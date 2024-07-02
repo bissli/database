@@ -15,8 +15,8 @@ psycopg = { extras = ["binary"], version = "*" }
 pymssql = "*"
 
 cachetools = "*"
+python-dateutil = "*"
 libb-util = { git = "https://github.com/bissli/libb-util", rev = "master" }
-libb-date = { git = "https://github.com/bissli/libb-date", rev = "master" }
 
 # == test
 asserts = { version = "*", optional = true }

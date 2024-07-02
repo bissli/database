@@ -1,4 +1,5 @@
 import atexit
+import datetime
 import logging
 import re
 import sqlite3
@@ -19,7 +20,6 @@ from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
 
-from date import Date, DateTime
 from libb import isiterable, load_options
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ for v in [
 ]:
     postgres_types[v] = float
 for v in [oid('date')]:
-    postgres_types[v] = Date
+    postgres_types[v] = datetime.date
 for v in [
     oid('time'),
     oid('time with time zone'),
@@ -95,7 +95,7 @@ for v in [
     oid('timetz'),
     oid('timestamp'),
 ]:
-    postgres_types[v] = DateTime
+    postgres_types[v] = datetime.datetime
 for v in [oid('bool'), oid('boolean')]:
     postgres_types[v] = bool
 for v in [oid('bytea'), oid('jsonb')]:
