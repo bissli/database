@@ -15,12 +15,12 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import register_adapters
-from database.options import DatabaseOptions
+from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
 
-from libb import isiterable, load_options
+from libb import attrdict, is_null, isiterable, load_options
 
 logger = logging.getLogger(__name__)
 
@@ -415,42 +415,57 @@ def load_data(cursor) -> pd.DataFrame:
     return data_loader(data, cols)
 
 
-def select_column(cn, sql, *args):
-    """When we query a single select parameter, return just
-    that dataframe column.
+def use_iterdict_data_loader(func):
+    """Temporarily use default Pandas loader over user-specified loader
     """
-    df = select(cn, sql, *args)
-    assert len(df.columns) == 1, 'Expected one col, got %d' % len(df.columns)
-    return df[df.columns[0]]
+    @wraps(func)
+    def inner(*args, **kwargs):
+        cn = args[0]
+        original_data_loader = cn.options.data_loader
+        cn.options.data_loader = iterdict_data_loader
+        try:
+            return func(*args, **kwargs)
+        finally:
+            cn.options.data_loader = original_data_loader
+    return inner
 
 
-def select_column_unique(cn, sql, *args):
+@use_iterdict_data_loader
+def select_column(cn, sql, *args) -> list:
+    data = select(cn, sql, *args)
+    return [row[tuple(row.keys())[0]] for row in data]
+
+
+def select_column_unique(cn, sql, *args) -> set:
     return set(select_column(cn, sql, *args))
 
 
-def select_row(cn, sql, *args):
-    df = select(cn, sql, *args)
-    assert len(df) == 1, 'Expected one row, got %d' % len(df)
-    return df.iloc[0]
+@use_iterdict_data_loader
+def select_row(cn, sql, *args) -> attrdict:
+    data = select(cn, sql, *args)
+    assert len(data) == 1, 'Expected one row, got %d' % len(data)
+    return attrdict(data[0])
 
 
-def select_row_or_none(cn, sql, *args):
-    df = select(cn, sql, *args)
-    if len(df) == 1:
-        return df.iloc[0]
+@use_iterdict_data_loader
+def select_row_or_none(cn, sql, *args) -> attrdict | None:
+    data = select(cn, sql, *args)
+    if len(data) == 1:
+        return attrdict(data[0])
     return None
 
 
+@use_iterdict_data_loader
 def select_scalar(cn, sql, *args):
-    df = select(cn, sql, *args)
-    assert len(df) == 1, 'Expected one col, got %d' % len(df)
-    return df[df.columns[0]].iloc[0]
+    data = select(cn, sql, *args)
+    assert len(data) == 1, 'Expected one col, got %d' % len(data)
+    return tuple(data[0].values())[0]
 
 
 def select_scalar_or_none(cn, sql, *args):
-    df = select_row_or_none(cn, sql, *args)
-    if len(df):
-        return df.iloc[0]
+    val = select_scalar(cn, sql, *args)
+    if not is_null(val):
+        return val
     return None
 
 
@@ -568,21 +583,16 @@ def get_table_primary_keys(cn, table, _=None):
     """
     if cn.options.drivername == 'postgres':
         sql = """
-    select
-        a.attname as column,
-        format_type(a.atttypid, a.atttypmod) as type
-    from
-        pg_index i
+    select a.attname as column
+    from pg_index i
     join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-    where
-        i.indrelid = %s::regclass
-        and i.indisprimary
+    where i.indrelid = %s::regclass and i.indisprimary
         """
     if cn.options.drivername == 'sqlite':
         sql = """
     select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
         """
-    cols = [row['column'] for row in select(cn, sql, table).to_dict('records')]
+    cols = select_column(cn, sql, table)
     return cols
 
 

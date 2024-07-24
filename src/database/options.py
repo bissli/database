@@ -5,23 +5,27 @@ import pyarrow as pa
 
 from libb import ConfigOptions, scriptname
 
-__all__ = ['DatabaseOptions', 'pandas_data_loader']
+__all__ = [
+    'DatabaseOptions',
+    'pandas_numpy_data_loader',
+    'pandas_pyarrow_data_loader',
+    'iterdict_data_loader',
+]
 
 
-def pandas_data_loader(backend='numpy'):
-    """Custom data loader. Takes list of dictionaries as data input. User
-    can overwrite data loader by passing in any similar function.
+def iterdict_data_loader(data, cols) -> list[dict]:
+    """Minimal data loader.
     """
-    assert backend in {'numpy', 'pyarrow'}, \
-        'pandas backend must be `numpy` or `pyarrow`'
+    return list(data)
 
-    def func(data, cols):
-        if backend == 'numpy':
-            return pd.DataFrame.from_records(list(data), columns=cols)
-        if backend == 'pyarrow':
-            dataT = [[row[col] for row in data] for col in cols]  # list of cols
-            return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
-    return func
+
+def pandas_numpy_data_loader(data, cols) -> pd.DataFrame:
+    return pd.DataFrame.from_records(list(data), columns=cols)
+
+
+def pandas_pyarrow_data_loader(data, cols) -> pd.DataFrame:
+    dataT = [[row[col] for row in data] for col in cols]  # list of cols
+    return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
 
 
 @dataclass
@@ -42,7 +46,7 @@ class DatabaseOptions(ConfigOptions):
     appname: str = None
     cleanup: bool = True
     check_connection: bool = True
-    data_loader: callable = field(default_factory=pandas_data_loader)
+    data_loader: callable = None
 
     def __post_init__(self):
         assert self.drivername in {'postgres', 'sqlserver', 'sqlite'}, \
@@ -54,3 +58,13 @@ class DatabaseOptions(ConfigOptions):
                 assert getattr(self, field), f'field {field} cannot be None or 0'
         if self.drivername == 'sqlite':
             assert self.database, 'field database cannot be None'
+        if self.data_loader is None:
+            self.data_loader = pandas_numpy_data_loader
+
+
+if __name__ == '__main__':
+    options = DatabaseOptions(hostname='hostname', username='username',
+                              password='password', database='database',
+                              port=1234, timeout=30)
+    print(options.data_loader([{'name': 'foo'}], ['name']))
+    print(str(options))
