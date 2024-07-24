@@ -40,6 +40,7 @@ parts
 
 poetry.toml
 poetry.lock
+proto
 .envrc
 TODO.*
 *.pkl

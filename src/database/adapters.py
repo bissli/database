@@ -4,46 +4,12 @@ import sqlite3
 import dateutil
 import psycopg
 import wrapt
-from psycopg.types.datetime import DateLoader, TimestampLoader
-from psycopg.types.datetime import TimestamptzLoader
 from psycopg.types.numeric import Float8, FloatDumper
 
 __all__ = ['register_adapters']
 
 
 # == psycopg adapters
-
-
-class DateMixin:
-    def load(self, data):
-        if isinstance(data, datetime.datetime):
-            return data.date()
-        if isinstance(data, datetime.date):
-            return data
-        return dateutil.parser.parse(data).date()
-
-
-class DateTimeMixin:
-    def load(self, data):
-        if isinstance(data, datetime.date | datetime.time):
-            return data
-        return dateutil.parser.parse(data)
-
-
-class DateTimeTzMixin:
-    def load(self, data):
-        if isinstance(data, datetime.date | datetime.time):
-            return data
-        return dateutil.parser.parse(data)
-
-
-class CustomDateLoader(DateMixin, DateLoader): pass
-
-
-class CustomDateTimeLoader(DateTimeMixin, TimestampLoader): pass
-
-
-class CustomDateTimeTzLoader(DateTimeTzMixin, TimestamptzLoader): pass
 
 
 class CustomFloatDumper(FloatDumper):
@@ -87,16 +53,14 @@ def convert_datetime(val):
     return dateutil.parser.isoparse(val.decode())
 
 
-def register_adapters():
+# == register
 
-    psycopg.adapters.register_loader('date', CustomDateLoader)
-    psycopg.adapters.register_loader('timestamp', CustomDateTimeLoader)
-    psycopg.adapters.register_loader('timestamptz', CustomDateTimeTzLoader)
+
+def register_adapters():
 
     psycopg.adapters.register_dumper(Float8, CustomFloatDumper)
 
     sqlite3.register_adapter(datetime.date, adapt_date_iso)
     sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
-
     sqlite3.register_converter('date', convert_date)
     sqlite3.register_converter('datetime', convert_datetime)
