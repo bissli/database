@@ -16,18 +16,16 @@ pymssql = "*"
 
 cachetools = "*"
 python-dateutil = "*"
-libb-util = { git = "https://github.com/bissli/libb-util", rev = "master" }
+libb-util = { git = "https://github.com/bissli/libb-util" }
 
 # == test
 asserts = { version = "*", optional = true }
 pytest = { version = "*", optional = true }
-pdbpp = { git = "https://github.com/pdbpp/pdbpp", optional = true, rev = "master" }
 docker = { version = "*", optional = true }
 
 [tool.poetry.extras]
 test = [
   "asserts",
-  "pdbpp",
   "pytest",
   "docker",
 ]
