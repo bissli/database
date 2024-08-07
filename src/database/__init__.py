@@ -23,6 +23,8 @@ __all__ = [
     'update_or_insert',
     'update_row',
     'isconnection',
+    'vacuum_table',
+    'reindex_table',
     # options
     'DatabaseOptions',
     ]

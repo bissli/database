@@ -45,6 +45,8 @@ __all__ = [
     'update_or_insert',
     'update_row',
     'isconnection',
+    'vacuum_table',
+    'reindex_table',
     ]
 
 register_adapters()
@@ -728,3 +730,33 @@ from
     else:
         execute(cn, sql)
     logger.debug(f'Reset sequence for {table=}')
+
+
+def vacuum_table(cn, table):
+    if isinstance(cn.connection, psycopg.Connection):
+        cn.connection.set_session(autocommit=True)
+        execute(cn, f'vacuum (full, analyze) {table}')
+        cn.connection.set_session(autocommit=False)
+    else:
+        logger.warning('Only postgres vacuum implemented')
+
+
+def reindex_table(cn, table):
+    if isinstance(cn.connection, psycopg.Connection):
+        cn.connection.set_session(autocommit=True)
+        execute(cn, f'reindex table {table}')
+        cn.connection.set_session(autocommit=False)
+    else:
+        logger.warning('Only postgres reindex implemented')
+
+
+def cluster_table(cn, table, index: str = None):
+    if isinstance(cn.connection, psycopg.Connection):
+        cn.connection.set_session(autocommit=True)
+        if index is None:
+            execute(cn, f'cluster {table}')
+        else:
+            execute(cn, f'cluster {table} using {index}')
+        cn.connection.set_session(autocommit=False)
+    else:
+        logger.warning('Only postgres cluster implemented')
