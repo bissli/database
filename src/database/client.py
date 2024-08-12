@@ -636,26 +636,22 @@ def upsert_rows(
             if c in update_cols_ifnull \
             else f'{c}=excluded.{c}'
         conflict = f"""
-on conflict (
-    {','.join(update_cols_key)}
-) do update set
-    {', '.join([coalesce(table, c) for c in update_cols])}
+on conflict ({','.join(update_cols_key)}
+) do update set {','.join([coalesce(table, c) for c in update_cols])}
 """.strip()
     else:
         conflict = 'on conflict do nothing'
-    values = ', '.join([f"({', '.join(['%s'] * len(cols))})"] * len(rows))
+    values = ','.join(['%s'] * len(cols))
     table_cols_sql = f"""
-insert into {table} (
-    {', '.join(cols)}
-)
-values
-{values}
+insert into {table} ({','.join(cols)})
+values ({values})
 {conflict}
     """.strip()
-    vals = tuple(flatten([tuple(row.values()) for row in rows]))
+    rc = 0
     try:
         with transaction(cn) as tx:
-            rc = tx.execute(table_cols_sql, *vals)
+            for row in rows:
+                rc += tx.execute(table_cols_sql, *row.values())
     finally:
         if reset_sequence:
             id_name = kw.pop('id_name', 'id')
