@@ -11,6 +11,18 @@ def test_select(psql_docker, conn):
     assert result.to_dict('list') == expected_data, 'The select query did not return the expected results.'
 
 
+def test_select_numeric(psql_docker, conn):
+    """Test custom numeric adapter (skip the Decimal creation)
+    """
+    # Perform select query
+    query = 'SELECT name, value::numeric as value FROM test_table ORDER BY id'
+    result = db.select(conn, query)
+
+    # Check results
+    expected_data = {'name': ['Alice', 'Bob', 'Charlie', 'Ethan', 'Fiona', 'George'], 'value': [10, 20, 30, 50, 70, 80]}
+    assert result.to_dict('list') == expected_data, 'The select query did not return the expected results.'
+
+
 def test_insert(psql_docker, conn):
     # Perform insert operation
     insert_sql = 'INSERT INTO test_table (name, value) VALUES (%s, %s)'

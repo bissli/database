@@ -3,8 +3,7 @@ import sqlite3
 
 import dateutil
 import psycopg
-import wrapt
-from psycopg.types.numeric import Float8, FloatDumper
+from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
 
 __all__ = ['register_adapters']
 
@@ -22,12 +21,14 @@ class CustomFloatDumper(FloatDumper):
     }
 
 
-@wrapt.patch_function_wrapper('psycopg.types.numeric', 'FloatDumper')
-def patch_mail_send_mail(wrapped, instance, args, kwargs):
-    """Patch parse args with our config"""
-    from tc import config
-    kwargs['config'] = config
-    return wrapped(*args, **kwargs)
+class NumericMixin:
+    def load(self, data) -> float:
+        if isinstance(data, memoryview):
+            data = bytes(data)
+        return float(data.decode()) if data is not None else None
+
+
+class CustomNumericLoader(NumericMixin, NumericLoader): pass
 
 
 # == sqlite adapter
@@ -59,6 +60,7 @@ def convert_datetime(val):
 def register_adapters():
 
     psycopg.adapters.register_dumper(Float8, CustomFloatDumper)
+    psycopg.adapters.register_loader('numeric', CustomNumericLoader)
 
     sqlite3.register_adapter(datetime.date, adapt_date_iso)
     sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
