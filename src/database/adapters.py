@@ -2,7 +2,9 @@ import datetime
 import sqlite3
 
 import dateutil
+import numpy as np
 import psycopg
+from psycopg.adapt import Dumper
 from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
 
 __all__ = ['register_adapters']
@@ -19,6 +21,13 @@ class CustomFloatDumper(FloatDumper):
         b'-inf': b"'-Infinity'::float8",
         b'nan': None
     }
+
+
+class NumpyNanDumper(Dumper):
+    def dump(self, value):
+        if np.isnan(value):
+            return None
+        return value
 
 
 class NumericMixin:
@@ -61,6 +70,12 @@ def register_adapters():
 
     psycopg.adapters.register_dumper(Float8, CustomFloatDumper)
     psycopg.adapters.register_loader('numeric', CustomNumericLoader)
+
+    # numpy
+    psycopg.adapters.register_dumper(np.float64, NumpyNanDumper)
+    psycopg.adapters.register_dumper(np.float32, NumpyNanDumper)
+    psycopg.adapters.register_dumper(np.int64, NumpyNanDumper)
+    psycopg.adapters.register_dumper(np.int32, NumpyNanDumper)
 
     sqlite3.register_adapter(datetime.date, adapt_date_iso)
     sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)

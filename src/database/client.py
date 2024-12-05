@@ -567,37 +567,6 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
         return rc
 
 
-def get_table_columns(cn, table):
-    sql = f"""
-select skeys(hstore(null::{table})) as column
-    """
-    cols = select_column(cn, sql)
-    return cols
-
-
-def ignore_first_argument_cache_key(cls, *args, **kwargs):
-    return cachetools.keys.hashkey(*args, **kwargs)
-
-
-@cachetools.cached(cache=cachetools.TTLCache(maxsize=10, ttl=60), key=ignore_first_argument_cache_key)
-def get_table_primary_keys(cn, table, _=None):
-    """Extra parameter for database switching. Pass in flag to bypass cache.
-    """
-    if cn.options.drivername == 'postgres':
-        sql = """
-    select a.attname as column
-    from pg_index i
-    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-    where i.indrelid = %s::regclass and i.indisprimary
-        """
-    if cn.options.drivername == 'sqlite':
-        sql = """
-    select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
-        """
-    cols = select_column(cn, sql, table)
-    return cols
-
-
 def upsert_rows(
     cn,
     table: str,
