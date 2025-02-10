@@ -15,6 +15,7 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
+from database.handler import handle_pg_error
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -50,6 +51,7 @@ __all__ = [
     ]
 
 register_adapters()
+
 
 # == psycopg type mapping
 
@@ -478,10 +480,16 @@ def execute(cn, sql, *args):
     cursor = cn.cursor()
     if isinstance(cn.connection, pymssql.Connection):
         args = TypeConverter.convert_params(args)
-    cursor.execute(sql, args)
-    rowcount = cursor.rowcount
-    cn.commit()
-    return rowcount
+    try:
+        cursor.execute(sql, args)
+        rowcount = cursor.rowcount
+        cn.commit()
+        return rowcount
+    except psycopg.Error as e:
+        if isinstance(cn.connection, psycopg.Connection):
+            error_info = handle_pg_error(e, {'sql': sql, 'args': args})
+            raise type(e)(error_info.message) from e
+        raise
 
 
 insert = update = delete = execute
@@ -520,24 +528,32 @@ class transaction:
     def execute(self, sql, *args, returnid=None):
         if isinstance(self.connection.connection, pymssql.Connection):
             args = TypeConverter.convert_params(args)
-        rc = self.cursor.execute(sql, args)
+        try:
+            rc = self.cursor.execute(sql, args)
+        except psycopg.Error as e:
+            if isinstance(self.connection.connection, psycopg.Connection):
+                error_info = handle_pg_error(e, {'sql': sql, 'args': args})
+                raise type(e)(error_info.message) from e
+            raise
+
         if not returnid:
             return rc
+
+        # may not work as cursor object may no longer exist
+        # getting recreated on each call
+        result = None
+        try:
+            result = self.cursor.fetchone()
+        except:
+            logger.debug('No results to return')
+        finally:
+            if not result:
+                return
+
+        if isiterable(returnid):
+            return [result[r] for r in returnid]
         else:
-            # may not work as cursor object may no longer exist
-            # getting recreated on each call
-            result = None
-            try:
-                result = self.cursor.fetchone()
-            except:
-                logger.debug('No results to return')
-            finally:
-                if not result:
-                    return
-            if isiterable(returnid):
-                return [result[r] for r in returnid]
-            else:
-                return result[returnid]
+            return result[returnid]
 
     @dumpsql
     @placeholder
