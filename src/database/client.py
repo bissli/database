@@ -14,7 +14,7 @@ import cachetools
 import pandas as pd
 import psycopg
 import pymssql
-from database.adapters import register_adapters
+from database.adapters import TypeConverter, register_adapters
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -476,6 +476,8 @@ def select_scalar_or_none(cn, sql, *args):
 @placeholder
 def execute(cn, sql, *args):
     cursor = cn.cursor()
+    if isinstance(cn.connection, pymssql.Connection):
+        args = TypeConverter.convert_params(args)
     cursor.execute(sql, args)
     rowcount = cursor.rowcount
     cn.commit()
@@ -516,6 +518,8 @@ class transaction:
     @check_connection
     @placeholder
     def execute(self, sql, *args, returnid=None):
+        if isinstance(self.connection.connection, pymssql.Connection):
+            args = TypeConverter.convert_params(args)
         rc = self.cursor.execute(sql, args)
         if not returnid:
             return rc
