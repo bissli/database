@@ -64,7 +64,9 @@ INSERT INTO test_table (name, value) VALUES
 
 
 def terminate_postgres_connections(cn):
-    sql = """
+    try:
+        cn.rollback()  # Reset any failed transaction state
+        sql = """
 select
     pg_terminate_backend(pg_stat_activity.pid)
 from
@@ -73,7 +75,9 @@ where
     pg_stat_activity.datname = current_database()
     and pid <> pg_backend_pid()
     """
-    db.execute(cn, sql)
+        db.execute(cn, sql)
+    except Exception as e:
+        logger.warning(f"Failed to terminate connections: {e}")
 
 
 @pytest.fixture(scope='session')

@@ -1,4 +1,5 @@
 import database as db
+import psycopg
 
 
 def test_select(psql_docker, conn):
@@ -112,6 +113,28 @@ def test_upsert(psql_docker, conn):
     db.upsert_rows(conn, 'test_table', rows, update_cols_key=['name'], update_cols_always=['not-value'])
     res = db.select_scalar(conn, 'select value from test_table where name = %s', 'Barry')
     assert int(res) == 51
+
+
+def test_handle_pg_error(psql_docker, conn):
+    """Test error handling with invalid SQL"""
+    try:
+        db.insert(conn, 'INSERT INTO test_table (name, value) VALUES (%s, %s)', 'Bob', '??')
+        raise AssertionError('Should have raised an error')
+    except psycopg.Error as e:
+        error_info = db.handler.handle_pg_error(e)
+        assert 'invalid input syntax for type integer' in str(error_info)
+        assert error_info.column == 'value'  # Should identify the value column
+        conn.rollback()  # Reset the transaction state
+
+    # Test with transaction class
+    with db.transaction(conn) as tx:
+        try:
+            tx.execute('INSERT INTO test_table (name, value) VALUES (%s, %s)', 'Bob', '??')
+            raise AssertionError('Should have raised an error')
+        except psycopg.Error as e:
+            error_info = db.handler.handle_pg_error(e)
+            assert 'invalid input syntax for type integer' in str(error_info)
+            assert error_info.column == 'value'  # Should identify the value column
 
 
 if __name__ == '__main__':
