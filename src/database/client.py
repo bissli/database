@@ -20,7 +20,7 @@ from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
 
-from libb import attrdict, is_null, isiterable, load_options
+from libb import attrdict, is_null, isiterable, load_options, peel
 
 logger = logging.getLogger(__name__)
 
@@ -725,3 +725,70 @@ def cluster_table(cn, table, index: str = None):
         cn.connection.set_session(autocommit=False)
     else:
         logger.warning('Only postgres cluster implemented')
+
+
+# postgres
+
+
+def get_table_columns(cn, table):
+    sql = f"""
+select skeys(hstore(null::{table})) as column
+    """
+    cols = select_column(cn, sql)
+    return cols
+
+
+def ignore_first_argument_cache_key(cls, *args, **kwargs):
+    return cachetools.keys.hashkey(*args, **kwargs)
+
+
+@cachetools.cached(cache=cachetools.TTLCache(maxsize=10, ttl=60), key=ignore_first_argument_cache_key)
+def get_table_primary_keys(cn, table, _=None):
+    """Extra parameter for database switching. Pass in flag to bypass cache.
+    """
+    if cn.options.drivername == 'postgres':
+        sql = """
+    select a.attname as column
+    from pg_index i
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
+    where i.indrelid = %s::regclass and i.indisprimary
+        """
+    if cn.options.drivername == 'sqlite':
+        sql = """
+    select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
+        """
+    cols = select_column(cn, sql, table)
+    return cols
+
+
+def table_fields(cn, table):
+    flds = select_column(cn, """
+select
+    t.column_name
+from information_schema.columns t
+where
+    t.table_name = %s
+order by
+    t.ordinal_position
+    """, table)
+    return flds
+
+
+def table_data(cn, table, columns=[]):
+    """Get table data by columns
+    """
+    if not columns:
+        columns = select_column(cn, """
+select
+    t.column_name
+from information_schema.columns t
+where
+    t.table_name = %s
+    and t.data_type in ('character', 'character varying', 'boolean',
+        'text', 'double precision', 'real' 'integer', 'date',
+        'time without time zone', 'timestamp without time zone')
+order by
+    t.ordinal_position
+        """, table)
+    columns = [f'{col} as {alias}' for col, alias in peel(columns)]
+    return select(cn, f"select {','.join(columns)} from {table}")
