@@ -15,7 +15,7 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
-from database.handler import handle_pg_error
+from database.handler import handle_pg_error, QueryContext
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -246,7 +246,7 @@ class CursorWrapper:
             self.cursor.execute(sql, *args, **kwargs)
         except psycopg.Error as e:
             if is_psycopg_connection(self.connwrapper):
-                error_info = handle_pg_error(e, {'sql': sql, 'args': args})
+                error_info = handle_pg_error(e, QueryContext(sql=sql, args=args, kwargs=kwargs))
                 raise type(e)(str(error_info)) from e
             raise
         logger.debug(f'Query result: {self.cursor.statusmessage}')
@@ -505,7 +505,7 @@ def select_scalar_or_none(cn, sql, *args):
 @dumpsql
 @check_connection
 @placeholder
-def execute(cn, sql, *args):
+def execute(cn, sql, *args, **kwargs):
     cursor = cn.cursor()
     if is_pymssql_connection(cn):
         args = TypeConverter.convert_params(args)
@@ -516,7 +516,7 @@ def execute(cn, sql, *args):
         return rowcount
     except psycopg.Error as e:
         if is_psycopg_connection(cn):
-            error_info = handle_pg_error(e, {'sql': sql, 'args': args})
+            error_info = handle_pg_error(e, QueryContext(sql=sql, args=args, kwargs=kwargs))
             raise type(e)(str(error_info)) from e
         raise
 

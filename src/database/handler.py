@@ -2,6 +2,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any
+from collections.abc import Sequence
 
 import psycopg
 
@@ -18,6 +19,7 @@ ERROR_TYPES = {
     'TYPE_ERROR': r'(?i)invalid input syntax for type|cannot cast type',
     'SYNTAX': r'(?i)syntax error',
     'CONNECTION': r'(?i)connection.*failed|timeout|terminated',
+    'NUMERIC_RANGE': r'(?i)\w+ out of range',
 }
 
 COLUMN_PATTERNS = [
@@ -38,7 +40,17 @@ TYPE_PATTERNS = [
      lambda m: ('value', f"Cannot convert '{m.group(2)}' to type {m.group(1)}")),
     (r'(?i)cannot cast type (\w+) to (\w+)',
      lambda m: ('value', f'Cannot convert from type {m.group(1)} to {m.group(2)}')),
+    (r'(?i)(\w+) out of range',
+     lambda m: ('value', f'{m.group(1).capitalize()} value is outside allowed range')),
 ]
+
+
+@dataclass
+class QueryContext:
+    """Context information for a database query"""
+    sql: str
+    args: Sequence[Any] | None = None
+    kwargs: dict[str, Any] | None = None
 
 
 @dataclass
@@ -49,7 +61,7 @@ class PostgresErrorInfo:
     detail: str | None = None
     column: str | None = None
     table: str | None = None
-    context: dict[str, Any] | None = None
+    context: QueryContext | None = None
 
     def __str__(self) -> str:
         """Format the error information as a string with all available details"""
@@ -62,6 +74,12 @@ class PostgresErrorInfo:
                 f'column={self.column}' if self.column else None
             ]))
             parts.append(f'Location: {location}')
+        if self.context:
+            parts.append(f"SQL: {self.context.sql}")
+            if self.context.args:
+                parts.append(f"Args: {self.context.args}")
+            if self.context.kwargs:
+                parts.append(f"Kwargs: {self.context.kwargs}")
         return ' | '.join(parts)
 
 
@@ -99,7 +117,7 @@ def parse_error(error_message: str) -> tuple[str, str | None, str | None, str | 
     return error_type, column, table, detail
 
 
-def handle_pg_error(error: psycopg.Error, context: dict | None = None) -> PostgresErrorInfo:
+def handle_pg_error(error: psycopg.Error, context: QueryContext | None = None) -> PostgresErrorInfo:
     """Handle PostgreSQL errors with pattern matching"""
     # Clean up error message
     error_message = str(error).split('\n')[0]
