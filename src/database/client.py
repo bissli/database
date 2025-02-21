@@ -242,7 +242,13 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        self.cursor.execute(sql, *args, **kwargs)
+        try:
+            self.cursor.execute(sql, *args, **kwargs)
+        except psycopg.Error as e:
+            if is_psycopg_connection(self.connwrapper):
+                error_info = handle_pg_error(e, {'sql': sql, 'args': args})
+                raise type(e)(str(error_info)) from e
+            raise
         logger.debug(f'Query result: {self.cursor.statusmessage}')
         end = time.time()
         self.connwrapper.addcall(end - start)
@@ -383,7 +389,7 @@ def IterChunk(cursor, size=5000):
 @check_connection
 @placeholder
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
-    cursor = _dict_cur(cn)
+    cursor = _dict_cur(cn)  # cn is already a ConnectionWrapper
     cursor.execute(sql, args)
     return load_data(cursor, **kwargs)
 
@@ -397,7 +403,7 @@ def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     each resultset, saving and processing the one with the most
     rows.
     """
-    cursor=_dict_cur(cn)
+    cursor = _dict_cur(cn)  # cn is already a ConnectionWrapper
     cursor.execute(sql, args)
     return load_data(cursor, **kwargs)
 
@@ -415,16 +421,19 @@ class DictRowFactory:
                 for (name, cast), value in zip(self.fields, values)}
 
 
-def _dict_cur(cn):
+def _dict_cur(cn: ConnectionWrapper):
     """Get a cursor that returns rows as dictionaries for the given connection type
     """
     if is_psycopg_connection(cn):
-        return cn.cursor(row_factory=DictRowFactory)
-    if is_pymssql_connection(cn):
-        return cn.cursor(as_dict=True)
-    if is_sqlite3_connection(cn):
-        return cn.cursor()
-    raise ValueError('Unknown connection type')
+        cursor = cn.cursor(row_factory=DictRowFactory)
+    elif is_pymssql_connection(cn):
+        cursor = cn.cursor(as_dict=True)
+    elif is_sqlite3_connection(cn):
+        cursor = cn.cursor()
+    else:
+        raise ValueError('Unknown connection type')
+
+    return CursorWrapper(cursor, cn)
 
 
 def load_data(cursor) -> pd.DataFrame:
@@ -508,7 +517,7 @@ def execute(cn, sql, *args):
     except psycopg.Error as e:
         if is_psycopg_connection(cn):
             error_info = handle_pg_error(e, {'sql': sql, 'args': args})
-            raise type(e)(error_info.message) from e
+            raise type(e)(str(error_info)) from e
         raise
 
 
@@ -528,8 +537,9 @@ class transaction:
 
     @property
     def cursor(self):
-        """Lazy cursor"""
-        return _dict_cur(self.connection)
+        """Lazy cursor wrapped with timing and error handling
+        """
+        return CursorWrapper(_dict_cur(self.connection), self.connection)
 
     def __enter__(self):
         return self
@@ -548,13 +558,7 @@ class transaction:
     def execute(self, sql, *args, returnid=None):
         if is_pymssql_connection(self.connection):
             args = TypeConverter.convert_params(args)
-        try:
-            rc = self.cursor.execute(sql, args)
-        except psycopg.Error as e:
-            if is_psycopg_connection(self.connection):
-                error_info = handle_pg_error(e, {'sql': sql, 'args': args})
-                raise type(e)(error_info.message) from e
-            raise
+        rc = self.cursor.execute(sql, args)
 
         if not returnid:
             return rc
