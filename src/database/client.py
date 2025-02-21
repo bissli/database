@@ -15,7 +15,7 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
-from database.handler import handle_pg_error, QueryContext
+from database.handler import QueryContext, handle_pg_error
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -611,6 +611,50 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
         return rc
 
 
+def _build_upsert_sql(
+    table: str,
+    columns: tuple[str],
+    key_columns: list[str],
+    update_always: list[str] = None,
+    update_if_null: list[str] = None,
+) -> str:
+    """Builds a Postgres UPSERT (INSERT ... ON CONFLICT) SQL statement.
+    """
+    # Validate inputs
+    if not key_columns:
+        return _build_insert_sql(table, columns)
+
+    # build the basic insert part
+    insert_sql = _build_insert_sql(table, columns)
+
+    # build the on conflict clause
+    conflict_sql = f"on conflict ({','.join(key_columns)})"
+
+    # If no updates requested, do nothing
+    if not (update_always or update_if_null):
+        return f'{insert_sql} {conflict_sql} do nothing'
+
+    # Build update expressions
+    update_exprs = []
+    if update_always:
+        update_exprs.extend(f'{col} = excluded.{col}'
+                            for col in update_always)
+    if update_if_null:
+        update_exprs.extend(f'{col} = coalesce({table}.{col}, excluded.{col})'
+                            for col in update_if_null)
+
+    update_sql = f"do update set {', '.join(update_exprs)}"
+
+    return f'{insert_sql} {conflict_sql} {update_sql}'
+
+
+def _build_insert_sql(table: str, columns: tuple[str]) -> str:
+    """Builds the INSERT part of the SQL statement
+    """
+    placeholders = ','.join(['%s'] * len(columns))
+    return f"insert into {table} ({','.join(columns)}) values ({placeholders})"
+
+
 def upsert_rows(
     cn,
     table: str,
@@ -621,57 +665,59 @@ def upsert_rows(
     reset_sequence: bool = False,
     **kw
 ):
-    """One step database insert of iterdict
+    """
+    Performs an UPSERT operation for multiple rows with configurable update behavior.
+
+    Args:
+        cn: Database connection
+        table: Target table name
+        rows: Rows to insert/update
+        update_cols_key: Columns that form the conflict constraint
+        update_cols_always: Columns that should always be updated on conflict
+        update_cols_ifnull: Columns that should only be updated if target is null
+        reset_sequence: Whether to reset the table's sequence after operation
     """
     if not rows:
         logger.debug('Skipping upsert of empty rows')
         return 0
 
-    cols = tuple(rows[0])  # assume consistency
-
     assert is_psycopg_connection(cn), '`upsert_rows` only supports postgres'
 
+    # Get columns from first row
+    columns = tuple(rows[0].keys())
+
+    # Get primary keys if not specified
     if not update_cols_key:
         update_cols_key = get_table_primary_keys(cn, table, cn.options.drivername)
 
-    if not update_cols_key:
-        update_cols_always = update_cols_ifnull = update_cols = []
-    else:
-        update_cols_always = [c for c in (update_cols_always or []) if c in cols]
-        update_cols_ifnull = [c for c in (update_cols_ifnull or []) if c in cols]
-        update_cols_always = [c for c in update_cols_always if c not in update_cols_ifnull+update_cols_key]
-        update_cols_ifnull = [c for c in update_cols_ifnull if c not in update_cols_always+update_cols_key]
-        update_cols = update_cols_always+update_cols_ifnull
+    # Filter update columns to only valid ones
+    update_cols_always = [c for c in (update_cols_always or [])
+                          if c in columns and c not in update_cols_key]
+    update_cols_ifnull = [c for c in (update_cols_ifnull or [])
+                          if c in columns and c not in update_cols_key]
 
-    if update_cols:
-        coalesce=lambda t, c: \
-            f'{c}=coalesce({t}.{c}, excluded.{c})' \
-            if c in update_cols_ifnull \
-            else f'{c}=excluded.{c}'
-        conflict = f"""
-on conflict ({','.join(update_cols_key)}
-) do update set {','.join([coalesce(table, c) for c in update_cols])}
-""".strip()
-    else:
-        conflict = 'on conflict do nothing'
-    values = ','.join(['%s'] * len(cols))
-    table_cols_sql = f"""
-insert into {table} ({','.join(cols)})
-values ({values})
-{conflict}
-    """.strip()
+    # Build the SQL statement
+    sql = _build_upsert_sql(
+        table=table,
+        columns=columns,
+        key_columns=update_cols_key,
+        update_always=update_cols_always,
+        update_if_null=update_cols_ifnull
+    )
+
+    # Execute the upsert
     rc = 0
     try:
         with transaction(cn) as tx:
             for row in rows:
-                rc += tx.execute(table_cols_sql, *row.values())
+                rc += tx.execute(sql, *row.values())
     finally:
         if reset_sequence:
             id_name = kw.pop('id_name', 'id')
             reset_table_sequence(cn, table, id_name)
 
     if rc != len(rows):
-        logger.debug(f'{len(rows) - rc} rows were skipped due to existing contraints')
+        logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints')
     return rc
 
 
