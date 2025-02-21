@@ -23,6 +23,11 @@ from psycopg.postgres import types
 
 from libb import attrdict, is_null, isiterable, load_options, peel
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -46,6 +51,9 @@ __all__ = [
     'update_or_insert',
     'update_row',
     'isconnection',
+    'is_psycopg_connection',
+    'is_pymssql_connection',
+    'is_sqlite3_connection',
     'vacuum_table',
     'reindex_table',
     ]
@@ -144,22 +152,33 @@ def check_connection(func, x_times=1):
 # == main
 
 
-CONNECTIONOBJ = psycopg.Connection | pymssql.Connection | sqlite3.Connection
+def is_psycopg_connection(obj):
+    """Check if object is a psycopg connection or wrapper containing one."""
+    if hasattr(obj, 'connection'):
+        obj = obj.connection
+    return isinstance(obj, psycopg.Connection) or \
+    (psycopg2 and isinstance(obj, psycopg2.extensions.connection))
 
-try:
-    import psycopg2
-    CONNECTIONOBJ |=  psycopg2.extensions.connection
-except ModuleNotFoundError:
-    pass
+
+def is_pymssql_connection(obj):
+    """Check if object is a pymssql connection or wrapper containing one."""
+    if hasattr(obj, 'connection'):
+        obj = obj.connection
+    return isinstance(obj, pymssql.Connection)
+
+
+def is_sqlite3_connection(obj):
+    """Check if object is a sqlite3 connection or wrapper containing one."""
+    if hasattr(obj, 'connection'):
+        obj = obj.connection
+    return isinstance(obj, sqlite3.Connection)
 
 
 def isconnection(obj):
     """Connection type check."""
-    if isinstance(obj, CONNECTIONOBJ):
-        return True
-    if hasattr(obj, 'connection'):
-        return isinstance(obj.connection, CONNECTIONOBJ)
-    return False
+    return (is_psycopg_connection(obj) or
+            is_pymssql_connection(obj) or
+            is_sqlite3_connection(obj))
 
 
 class ConnectionWrapper:
@@ -236,7 +255,7 @@ def dumpsql(func):
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
         try:
-            if isinstance(cn.connection, pymssql.Connection | sqlite3.Connection):
+            if is_pymssql_connection(cn) or is_sqlite3_connection(cn):
                 logger.debug(f'SQL:\n{sql}\nargs: {args}\nkwargs: {kwargs}')
             return func(cn, sql, *args, **kwargs)
         except:
@@ -249,11 +268,11 @@ def placeholder(func):
     """Handle placeholder by connection type"""
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
-        if isinstance(cn.connection, psycopg.Connection):
+        if is_psycopg_connection(cn):
             sql = sql.replace('?', '%s')
-        if isinstance(cn.connection, pymssql.Connection):
+        if is_pymssql_connection(cn):
             sql = sql.replace('%s', '?')
-        if isinstance(cn.connection, sqlite3.Connection):
+        if is_sqlite3_connection(cn):
             sql = sql.replace('%s', '?')
         return func(cn, sql, *args, **kwargs)
     return wrapper
@@ -397,12 +416,13 @@ class DictRowFactory:
 
 
 def _dict_cur(cn):
-    typ = type(cn.connection)
-    if typ == psycopg.Connection:
+    """Get a cursor that returns rows as dictionaries for the given connection type
+    """
+    if is_psycopg_connection(cn):
         return cn.cursor(row_factory=DictRowFactory)
-    if typ == pymssql.Connection:
+    if is_pymssql_connection(cn):
         return cn.cursor(as_dict=True)
-    if typ == sqlite3.Connection:
+    if is_sqlite3_connection(cn):
         return cn.cursor()
     raise ValueError('Unknown connection type')
 
@@ -410,9 +430,9 @@ def _dict_cur(cn):
 def load_data(cursor) -> pd.DataFrame:
     """Data loader callable (IE into DataFrame)
     """
-    if isinstance(cursor.connwrapper.connection, psycopg.Connection):
+    if is_psycopg_connection(cursor.connwrapper):
         cols = [c.name for c in (cursor.description or [])]
-    if isinstance(cursor.connwrapper.connection, pymssql.Connection | sqlite3.Connection):
+    if is_pymssql_connection(cursor.connwrapper) or is_sqlite3_connection(cursor.connwrapper):
         cols = [c[0] for c in (cursor.description or [])]
     data = cursor.fetchall()  # iterdict (dictcursor)
     data_loader = cursor.connwrapper.options.data_loader
@@ -478,7 +498,7 @@ def select_scalar_or_none(cn, sql, *args):
 @placeholder
 def execute(cn, sql, *args):
     cursor = cn.cursor()
-    if isinstance(cn.connection, pymssql.Connection):
+    if is_pymssql_connection(cn):
         args = TypeConverter.convert_params(args)
     try:
         cursor.execute(sql, args)
@@ -486,7 +506,7 @@ def execute(cn, sql, *args):
         cn.commit()
         return rowcount
     except psycopg.Error as e:
-        if isinstance(cn.connection, psycopg.Connection):
+        if is_psycopg_connection(cn):
             error_info = handle_pg_error(e, {'sql': sql, 'args': args})
             raise type(e)(error_info.message) from e
         raise
@@ -526,12 +546,12 @@ class transaction:
     @check_connection
     @placeholder
     def execute(self, sql, *args, returnid=None):
-        if isinstance(self.connection.connection, pymssql.Connection):
+        if is_pymssql_connection(self.connection):
             args = TypeConverter.convert_params(args)
         try:
             rc = self.cursor.execute(sql, args)
         except psycopg.Error as e:
-            if isinstance(self.connection.connection, psycopg.Connection):
+            if is_psycopg_connection(self.connection):
                 error_info = handle_pg_error(e, {'sql': sql, 'args': args})
                 raise type(e)(error_info.message) from e
             raise
@@ -605,7 +625,7 @@ def upsert_rows(
 
     cols = tuple(rows[0])  # assume consistency
 
-    assert isinstance(cn.connection, psycopg.Connection), '`upsert_rows` only supports postgres'
+    assert is_psycopg_connection(cn), '`upsert_rows` only supports postgres'
 
     if not update_cols_key:
         update_cols_key = get_table_primary_keys(cn, table, cn.options.drivername)
@@ -718,7 +738,7 @@ from
 
 
 def vacuum_table(cn, table):
-    if isinstance(cn.connection, psycopg.Connection):
+    if is_psycopg_connection(cn):
         cn.connection.set_session(autocommit=True)
         execute(cn, f'vacuum (full, analyze) {table}')
         cn.connection.set_session(autocommit=False)
@@ -727,7 +747,7 @@ def vacuum_table(cn, table):
 
 
 def reindex_table(cn, table):
-    if isinstance(cn.connection, psycopg.Connection):
+    if is_psycopg_connection(cn):
         cn.connection.set_session(autocommit=True)
         execute(cn, f'reindex table {table}')
         cn.connection.set_session(autocommit=False)
@@ -736,7 +756,7 @@ def reindex_table(cn, table):
 
 
 def cluster_table(cn, table, index: str = None):
-    if isinstance(cn.connection, psycopg.Connection):
+    if is_psycopg_connection(cn):
         cn.connection.set_session(autocommit=True)
         if index is None:
             execute(cn, f'cluster {table}')

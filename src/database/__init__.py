@@ -23,6 +23,9 @@ __all__ = [
     'update_or_insert',
     'update_row',
     'isconnection',
+    'is_psycopg_connection',
+    'is_pymssql_connection',
+    'is_sqlite3_connection',
     'vacuum_table',
     'reindex_table',
     # options
