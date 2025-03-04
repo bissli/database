@@ -464,7 +464,7 @@ def _dict_cur(cn: ConnectionWrapper):
     return CursorWrapper(cursor, cn)
 
 
-def load_data(cursor) -> pd.DataFrame:
+def load_data(cursor, **kwargs) -> pd.DataFrame:
     """Data loader callable (IE into DataFrame)
     """
     if is_psycopg_connection(cursor.connwrapper):
@@ -473,7 +473,7 @@ def load_data(cursor) -> pd.DataFrame:
         cols = [c[0] for c in (cursor.description or [])]
     data = cursor.fetchall()  # iterdict (dictcursor)
     data_loader = cursor.connwrapper.options.data_loader
-    return data_loader(data, cols)
+    return data_loader(data, cols, **kwargs)
 
 
 def use_iterdict_data_loader(func):
