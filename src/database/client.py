@@ -56,6 +56,11 @@ __all__ = [
     'is_sqlite3_connection',
     'vacuum_table',
     'reindex_table',
+    'IntegrityError',
+    'ProgrammingError',
+    'OperationalError',
+    'UniqueViolation',
+    'DbConnectionError',
     ]
 
 register_adapters()
@@ -119,14 +124,37 @@ for k in tuple(postgres_types):
 
 # == defined errors
 
-DbConnectionError = (psycopg.OperationalError, psycopg.InterfaceError,
-                     pymssql.OperationalError, sqlite3.InterfaceError)
-DbIntegrityError = (psycopg.IntegrityError, pymssql.IntegrityError,
-                    sqlite3.IntegrityError)
-DbProgrammingError = (psycopg.ProgrammingError, pymssql.DatabaseError,
-                      sqlite3.DatabaseError)
-DbOperationalError = (psycopg.OperationalError, pymssql.OperationalError,
-                      sqlite3.OperationalError)
+DbConnectionError = (
+    psycopg.OperationalError,    # Connection/timeout issues
+    psycopg.InterfaceError,      # Connection interface issues
+    pymssql.OperationalError,    # SQL Server connection issues
+    pymssql.InterfaceError,      # SQL Server interface issues
+    sqlite3.OperationalError,    # SQLite connection issues
+    sqlite3.InterfaceError,      # SQLite interface issues
+)
+IntegrityError = (
+    psycopg.IntegrityError,      # Postgres constraint violations
+    pymssql.IntegrityError,      # SQL Server constraint violations
+    sqlite3.IntegrityError,      # SQLite constraint violations
+)
+ProgrammingError = (
+    psycopg.ProgrammingError,    # Postgres syntax/query errors
+    psycopg.DatabaseError,       # Postgres general database errors
+    pymssql.ProgrammingError,    # SQL Server syntax/query errors
+    pymssql.DatabaseError,       # SQL Server general database errors
+    sqlite3.ProgrammingError,    # SQLite syntax/query errors
+    sqlite3.DatabaseError,       # SQLite general database errors
+)
+OperationalError = (
+    psycopg.OperationalError,    # Postgres operational issues
+    pymssql.OperationalError,    # SQL Server operational issues
+    sqlite3.OperationalError,    # SQLite operational issues
+)
+UniqueViolation = (
+    psycopg.errors.UniqueViolation,    # Postgres specific unique violation error
+    sqlite3.IntegrityError,            # SQLite error for unique/primary key violations
+    pymssql.IntegrityError,            # SQL Server unique constraint violations
+)
 
 
 def check_connection(func, x_times=1):

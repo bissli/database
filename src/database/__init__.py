@@ -30,4 +30,10 @@ __all__ = [
     'reindex_table',
     # options
     'DatabaseOptions',
+    # exceptions
+    'IntegrityError',
+    'ProgrammingError',
+    'OperationalError',
+    'UniqueViolation',
+    'DbConnectionError',
     ]
