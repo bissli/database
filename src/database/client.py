@@ -734,7 +734,8 @@ def upsert_rows(
     try:
         with transaction(cn) as tx:
             for row in rows:
-                rc += tx.execute(sql, *row.values())
+                ordered_values = [row[col] for col in columns]
+                rc += tx.execute(sql, *ordered_values)
     finally:
         if reset_sequence:
             reset_table_sequence(cn, table)
