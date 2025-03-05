@@ -22,11 +22,6 @@ from psycopg.postgres import types
 
 from libb import attrdict, collapse, is_null, isiterable, load_options, peel
 
-try:
-    import psycopg2
-except ImportError:
-    psycopg2 = None
-
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -208,8 +203,7 @@ def is_psycopg_connection(obj):
     """Check if object is a psycopg connection or wrapper containing one."""
     if hasattr(obj, 'connection'):
         obj = obj.connection
-    return isinstance(obj, psycopg.Connection) or \
-    (psycopg2 and isinstance(obj, psycopg2.extensions.connection))
+    return isinstance(obj, psycopg.Connection)
 
 
 def is_pymssql_connection(obj):
