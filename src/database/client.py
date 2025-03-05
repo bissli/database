@@ -641,35 +641,121 @@ def _build_upsert_sql(
     key_columns: list[str],
     update_always: list[str] = None,
     update_if_null: list[str] = None,
+    driver: str = 'postgres',
 ) -> str:
-    """Builds a Postgres UPSERT (INSERT ... ON CONFLICT) SQL statement.
+    """Builds an UPSERT SQL statement for the specified database driver.
+
+    Args:
+        table: Target table name
+        columns: All columns to insert
+        key_columns: Columns that form conflict constraint (primary/unique keys)
+        update_always: Columns that should always be updated on conflict
+        update_if_null: Columns that should only be updated if target is null
+        driver: Database driver ('postgres', 'sqlite', 'sqlserver')
     """
     # Validate inputs
     if not key_columns:
         return _build_insert_sql(table, columns)
 
-    # build the basic insert part
-    insert_sql = _build_insert_sql(table, columns)
+    # PostgreSQL uses INSERT ... ON CONFLICT DO UPDATE
+    if driver == 'postgres':
+        # build the basic insert part
+        insert_sql = _build_insert_sql(table, columns)
 
-    # build the on conflict clause
-    conflict_sql = f"on conflict ({','.join(key_columns)})"
+        # build the on conflict clause
+        conflict_sql = f"on conflict ({','.join(key_columns)})"
 
-    # If no updates requested, do nothing
-    if not (update_always or update_if_null):
-        return f'{insert_sql} {conflict_sql} do nothing'
+        # If no updates requested, do nothing
+        if not (update_always or update_if_null):
+            return f'{insert_sql} {conflict_sql} do nothing'
 
-    # Build update expressions
-    update_exprs = []
-    if update_always:
-        update_exprs.extend(f'{col} = excluded.{col}'
-                            for col in update_always)
-    if update_if_null:
-        update_exprs.extend(f'{col} = coalesce({table}.{col}, excluded.{col})'
-                            for col in update_if_null)
+        # Build update expressions
+        update_exprs = []
+        if update_always:
+            update_exprs.extend(f'{col} = excluded.{col}'
+                                for col in update_always)
+        if update_if_null:
+            update_exprs.extend(f'{col} = coalesce({table}.{col}, excluded.{col})'
+                                for col in update_if_null)
 
-    update_sql = f"do update set {', '.join(update_exprs)}"
+        update_sql = f"do update set {', '.join(update_exprs)}"
 
-    return f'{insert_sql} {conflict_sql} {update_sql}'
+        return f'{insert_sql} {conflict_sql} {update_sql}'
+
+    # SQLite uses INSERT ... ON CONFLICT DO UPDATE (similar to PostgreSQL)
+    elif driver == 'sqlite':
+        # build the basic insert part
+        insert_sql = _build_insert_sql(table, columns)
+
+        # build the on conflict clause
+        conflict_sql = f"on conflict ({','.join(key_columns)})"
+
+        # If no updates requested, do nothing
+        if not (update_always or update_if_null):
+            return f'{insert_sql} {conflict_sql} do nothing'
+
+        # Build update expressions
+        update_exprs = []
+        if update_always:
+            update_exprs.extend(f'{col} = excluded.{col}'
+                                for col in update_always)
+        if update_if_null:
+            update_exprs.extend(f'{col} = COALESCE({table}.{col}, excluded.{col})'
+                                for col in update_if_null)
+
+        update_sql = f"do update set {', '.join(update_exprs)}"
+
+        return f'{insert_sql} {conflict_sql} {update_sql}'
+
+    # SQL Server uses MERGE INTO
+    elif driver == 'sqlserver':
+        # For SQL Server we use MERGE statement
+        placeholders = ','.join(['%s'] * len(columns))
+        temp_alias = 'src'
+
+        # Build conditions for matching keys
+        match_conditions = ' AND '.join(
+            f'target.{col} = {temp_alias}.{col}' for col in key_columns
+        )
+
+        # Build column value list for source
+        source_values = ', '.join(f'%s as {col}' for col in columns)
+
+        # Build UPDATE statements
+        update_cols = []
+        if update_always:
+            update_cols.extend(update_always)
+        if update_if_null:
+            # For SQL Server, handle COALESCE in the driver logic instead
+            update_cols.extend(update_if_null)
+
+        update_clause = ''
+        if update_cols:
+            update_statements = ', '.join(
+                f'target.{col} = {temp_alias}.{col}' for col in update_cols
+            )
+            update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
+        else:
+            # If no updates but we have keys, just match without updating
+            update_clause = 'WHEN MATCHED THEN DO NOTHING'
+
+        # Build INSERT statements
+        all_columns = ', '.join(columns)
+        source_columns = ', '.join(f'{temp_alias}.{col}' for col in columns)
+
+        # Full MERGE statement
+        merge_sql = f"""
+        MERGE INTO {table} AS target
+        USING (SELECT {source_values}) AS {temp_alias}
+        ON {match_conditions}
+        {update_clause}
+        WHEN NOT MATCHED THEN INSERT ({all_columns}) VALUES ({source_columns});
+        """
+
+        return merge_sql
+
+    else:
+        raise ValueError(f'Driver {driver} not supported for UPSERT operations')
 
 
 def _build_insert_sql(table: str, columns: tuple[str]) -> str:
@@ -677,6 +763,139 @@ def _build_insert_sql(table: str, columns: tuple[str]) -> str:
     """
     placeholders = ','.join(['%s'] * len(columns))
     return f"insert into {table} ({','.join(columns)}) values ({placeholders})"
+
+
+def _get_driver_type(cn):
+    """Determine the database driver type from connection"""
+    return 'postgres' if is_psycopg_connection(cn) else \
+           'sqlite' if is_sqlite3_connection(cn) else \
+           'sqlserver' if is_pymssql_connection(cn) else None
+
+
+def _prepare_rows_for_upsert(cn, table, rows):
+    """Prepare and validate rows for upsert operation"""
+    # Include only columns that exist in the table
+    filtered_rows = filter_table_columns(cn, table, rows)
+    if not filtered_rows:
+        logger.warning(f'No valid columns found for {table} after filtering')
+        return None
+    return tuple(filtered_rows)
+
+
+def _filter_update_columns(columns, update_cols, key_cols):
+    """Filter update columns to ensure they're valid"""
+    if not update_cols:
+        return []
+    return [c for c in update_cols if c in columns and c not in key_cols]
+
+
+def _execute_standard_upsert(cn, table, rows, columns, key_cols,
+                             update_always, update_ifnull, driver):
+    """Execute standard upsert operation for supported databases"""
+    # Build the SQL statement
+    sql = _build_upsert_sql(
+        table=table,
+        columns=columns,
+        key_columns=key_cols,
+        update_always=update_always,
+        update_if_null=update_ifnull,
+        driver=driver
+    )
+
+    rc = 0
+    with transaction(cn) as tx:
+        for row in rows:
+            ordered_values = [row[col] for col in columns]
+            rc += tx.execute(sql, *ordered_values)
+
+    if rc != len(rows):
+        logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints')
+    return rc
+
+
+def _fetch_existing_rows(cn, table, rows, key_cols):
+    """Fetch existing rows for a set of key values"""
+    existing_rows = {}
+
+    # Group rows by key columns to minimize database queries
+    key_groups = {}
+    for row in rows:
+        row_key = tuple(row[key] for key in key_cols)
+        key_groups.setdefault(row_key, True)
+
+    # Build query to fetch all needed rows at once if possible
+    if len(key_groups) < 100:  # Arbitrary limit to avoid huge queries
+        # Build WHERE clause for fetching all needed rows at once
+        where_conditions = []
+        params = []
+
+        for row_key in key_groups:
+            condition_parts = []
+            for i, key_col in enumerate(key_cols):
+                condition_parts.append(f'{key_col} = %s')
+                params.append(row_key[i])
+
+            where_conditions.append(f"({' AND '.join(condition_parts)})")
+
+        if where_conditions:
+            where_clause = ' OR '.join(where_conditions)
+            sql = f'SELECT * FROM {table} WHERE {where_clause}'
+
+            # Fetch all matching rows at once
+            result = select(cn, sql, *params)
+            for row in result:
+                row_key = tuple(row[key] for key in key_cols)
+                existing_rows[row_key] = row
+    else:
+        # Too many keys, fetch rows individually
+        for row in rows:
+            key_values = [row[key] for key in key_cols]
+            key_conditions = ' AND '.join([f'{key} = %s' for key in key_cols])
+            existing_row = select_row_or_none(cn, f'SELECT * FROM {table} WHERE {key_conditions}', *key_values)
+
+            if existing_row:
+                row_key = tuple(row[key] for key in key_cols)
+                existing_rows[row_key] = existing_row
+
+    return existing_rows
+
+
+def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
+                                 update_always, update_ifnull):
+    """Special handling for SQL Server with NULL-preserving updates"""
+    logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
+
+    with transaction(cn) as tx:
+        # First retrieve existing rows to handle COALESCE logic
+        existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
+
+        # Apply NULL-preservation logic
+        for row in rows:
+            row_key = tuple(row[key] for key in key_cols)
+            existing_row = existing_rows.get(row_key)
+
+            if existing_row:
+                # Apply update_cols_ifnull logic manually
+                for col in update_ifnull:
+                    if not is_null(existing_row.get(col)):
+                        # Keep existing non-NULL value
+                        row[col] = existing_row.get(col)
+
+        # Build and execute the MERGE statement
+        sql = _build_upsert_sql(
+            table=table,
+            columns=columns,
+            key_columns=key_cols,
+            update_always=update_always + update_ifnull,  # Handle all columns the same now
+            update_if_null=[],  # No special NULL handling needed anymore
+            driver='sqlserver'
+        )
+
+        ordered_values = []
+        for row in rows:
+            ordered_values.extend([row[col] for col in columns])
+
+        return tx.execute(sql, *ordered_values)
 
 
 def upsert_rows(
@@ -705,43 +924,47 @@ def upsert_rows(
         logger.debug('Skipping upsert of empty rows')
         return 0
 
-    assert is_psycopg_connection(cn), '`upsert_rows` only supports postgres'
+    # Get database driver type
+    driver = _get_driver_type(cn)
+    if not driver:
+        raise ValueError('Unsupported database connection for upsert_rows')
 
-    # Get columns from first row
+    # SQLServer implementation notice
+    if driver == 'sqlserver':
+        logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
+
+    # Filter and validate rows and columns
+    rows = _prepare_rows_for_upsert(cn, table, rows)
+    if not rows:
+        return 0
+
     columns = tuple(rows[0].keys())
 
     # Get primary keys if not specified
+    update_cols_key = update_cols_key or get_table_primary_keys(cn, table, cn.options.drivername)
     if not update_cols_key:
-        update_cols_key = get_table_primary_keys(cn, table, cn.options.drivername)
+        logger.warning(f'No primary keys found for {table}, falling back to INSERT')
+        return insert_rows(cn, table, rows)
 
     # Filter update columns to only valid ones
-    update_cols_always = [c for c in (update_cols_always or [])
-                          if c in columns and c not in update_cols_key]
-    update_cols_ifnull = [c for c in (update_cols_ifnull or [])
-                          if c in columns and c not in update_cols_key]
+    update_cols_always = _filter_update_columns(columns, update_cols_always, update_cols_key)
+    update_cols_ifnull = _filter_update_columns(columns, update_cols_ifnull, update_cols_key)
 
-    # Build the SQL statement
-    sql = _build_upsert_sql(
-        table=table,
-        columns=columns,
-        key_columns=update_cols_key,
-        update_always=update_cols_always,
-        update_if_null=update_cols_ifnull
-    )
-
-    # Execute the upsert
-    rc = 0
     try:
-        with transaction(cn) as tx:
-            for row in rows:
-                ordered_values = [row[col] for col in columns]
-                rc += tx.execute(sql, *ordered_values)
+        # Handle the specific database driver
+        if driver == 'sqlserver' and update_cols_ifnull:
+            rc = _upsert_sqlserver_with_nulls(cn, table, rows, columns,
+                                              update_cols_key, update_cols_always,
+                                              update_cols_ifnull)
+        else:
+            # Standard approach for PostgreSQL, SQLite and simple SQL Server cases
+            rc = _execute_standard_upsert(cn, table, rows, columns,
+                                          update_cols_key, update_cols_always,
+                                          update_cols_ifnull, driver)
     finally:
         if reset_sequence:
             reset_table_sequence(cn, table)
 
-    if rc != len(rows):
-        logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints')
     return rc
 
 
@@ -750,6 +973,19 @@ def upsert_rows(
 #
 
 def insert_rows(cn, table, rows: tuple[dict]):
+    """Insert multiple rows into a table
+    """
+    if not rows:
+        logger.debug('Skipping insert of empty rows')
+        return 0
+
+    # Include only columns that exist in the table
+    filtered_rows = filter_table_columns(cn, table, rows)
+    if not filtered_rows:
+        logger.warning(f'No valid columns found for {table} after filtering')
+        return 0
+    rows = tuple(filtered_rows)
+
     cols = tuple(rows[0].keys())
     vals = tuple(flatten([tuple(row.values()) for row in rows]))
 
@@ -902,15 +1138,52 @@ def cluster_table(cn, table, index: str = None):
         logger.warning('Only postgres cluster implemented')
 
 
-# postgres
-
-
 def get_table_columns(cn, table):
-    sql = f"""
+    """Get all column names for a table based on database type"""
+    if is_psycopg_connection(cn):
+        sql = f"""
 select skeys(hstore(null::{table})) as column
     """
+    elif is_sqlite3_connection(cn):
+        sql = f"""
+select name as column from pragma_table_info('{table}')
+    """
+    elif is_pymssql_connection(cn):
+        sql = f"""
+select c.name as column
+from sys.columns c
+join sys.tables t on c.object_id = t.object_id
+where t.name = '{table}'
+    """
+    else:
+        raise ValueError('Unsupported database type for get_table_columns')
+
     cols = select_column(cn, sql)
     return cols
+
+
+def filter_table_columns(cn, table, row_dicts):
+    """Filter dictionaries to only include valid columns for the table
+    """
+    if not row_dicts:
+        return []
+
+    # Get table columns (case insensitive comparison)
+    table_cols = {c.lower() for c in get_table_columns(cn, table)}
+
+    # Create new filtered dictionaries
+    filtered_rows = []
+
+    for row in row_dicts:
+        filtered_row = {}
+        for col, val in row.items():
+            if col.lower() in table_cols:
+                filtered_row[col] = val
+            else:
+                logger.debug(f'Removed column {col} not in {table}')
+        filtered_rows.append(filtered_row)
+
+    return filtered_rows
 
 
 def ignore_first_argument_cache_key(cls, *args, **kwargs):
@@ -978,7 +1251,9 @@ def get_sequence_columns(cn, table):
 
 
 def table_fields(cn, table):
-    flds = select_column(cn, """
+    """Get all column names for a table ordered by their position"""
+    if is_psycopg_connection(cn):
+        flds = select_column(cn, """
 select
 t.column_name
 from information_schema.columns t
@@ -987,6 +1262,22 @@ t.table_name = %s
 order by
 t.ordinal_position
 """, table)
+    elif is_sqlite3_connection(cn):
+        flds = select_column(cn, """
+select name from pragma_table_info('%s')
+order by cid
+""", table)
+    elif is_pymssql_connection(cn):
+        flds = select_column(cn, """
+select c.name
+from sys.columns c
+join sys.tables t on c.object_id = t.object_id
+where t.name = %s
+order by c.column_id
+""", table)
+    else:
+        raise ValueError('Unsupported database type for table_fields')
+
     return flds
 
 
@@ -994,17 +1285,37 @@ def table_data(cn, table, columns=[]):
     """Get table data by columns
     """
     if not columns:
-        columns = select_column(cn, """
+        if is_psycopg_connection(cn):
+            columns = select_column(cn, """
 select
 t.column_name
 from information_schema.columns t
 where
 t.table_name = %s
 and t.data_type in ('character', 'character varying', 'boolean',
-    'text', 'double precision', 'real' 'integer', 'date',
+    'text', 'double precision', 'real', 'integer', 'date',
     'time without time zone', 'timestamp without time zone')
 order by
 t.ordinal_position
 """, table)
+        elif is_sqlite3_connection(cn):
+            columns = select_column(cn, """
+SELECT name FROM pragma_table_info('%s')
+""", table)
+        elif is_pymssql_connection(cn):
+            columns = select_column(cn, """
+SELECT c.name
+FROM sys.columns c
+JOIN sys.tables t ON c.object_id = t.object_id
+JOIN sys.types ty ON c.system_type_id = ty.system_type_id
+WHERE t.name = %s
+AND ty.name IN ('char', 'varchar', 'nvarchar', 'text', 'ntext', 'bit',
+    'tinyint', 'smallint', 'int', 'bigint', 'decimal', 'numeric',
+    'float', 'real', 'date', 'time', 'datetime', 'datetime2')
+ORDER BY c.column_id
+""", table)
+        else:
+            raise ValueError('Unsupported database type for table_data')
+
     columns = [f'{col} as {alias}' for col, alias in peel(columns)]
     return select(cn, f"select {','.join(columns)} from {table}")
