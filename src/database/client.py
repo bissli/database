@@ -20,7 +20,7 @@ from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
 
-from libb import attrdict, is_null, isiterable, load_options, peel
+from libb import attrdict, collapse, is_null, isiterable, load_options, peel
 
 try:
     import psycopg2
@@ -176,6 +176,31 @@ def check_connection(func, x_times=1):
                     conn.connection = connect(conn.options).connection
     return inner
 
+
+def handle_query_params(func):
+    """Decorator that standardizes SQL parameter handling:
+    - Converts placeholders between ? and %s based on database type
+    """
+    @wraps(func)
+    def wrapper(cn, sql, *args, **kwargs):
+        # Standardize placeholders based on connection type
+        if is_psycopg_connection(cn) or is_pymssql_connection(cn):
+            sql = sql.replace('?', '%s')
+        elif is_sqlite3_connection(cn):
+            sql = sql.replace('%s', '?')
+
+        # Convert parameters for pymssql if needed
+        if is_pymssql_connection(cn) and args:
+            args = TypeConverter.convert_params(args)
+
+        # No parameters provided
+        if not args:
+            return func(cn, sql, **kwargs)
+
+        return func(cn, sql, *args, **kwargs)
+
+    return wrapper
+
 # == main
 
 
@@ -269,8 +294,14 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        self.cursor.execute(sql, *args, **kwargs)
-        logger.debug(f'Query result: {self.cursor.statusmessage}')
+        for arg in collapse(args):
+            if isinstance(arg, dict):
+                self.cursor.execute(sql, arg)
+                break
+        else:
+            self.cursor.execute(sql, *args)
+        if is_psycopg_connection(self.connwrapper):
+            logger.debug(f'Query result: {self.cursor.statusmessage}')
         end = time.time()
         self.connwrapper.addcall(end - start)
         logger.debug('Query time: %f' % (end - start))
@@ -282,26 +313,13 @@ def dumpsql(func):
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
         try:
+            # For postgres, logging happens in LoggingCursor
             if is_pymssql_connection(cn) or is_sqlite3_connection(cn):
-                logger.debug(f'SQL:\n{sql}\nargs: {args}\nkwargs: {kwargs}')
+                logger.debug(f'SQL:\n{sql}\nargs: {args}')
             return func(cn, sql, *args, **kwargs)
         except:
-            logger.error(f'Error with query:\nSQL:\n{sql}\nargs: {args}\nkwargs: {kwargs}')
+            logger.error(f'Error with query:\nSQL:\n{sql}\nargs: {args}')
             raise
-    return wrapper
-
-
-def placeholder(func):
-    """Handle placeholder by connection type"""
-    @wraps(func)
-    def wrapper(cn, sql, *args, **kwargs):
-        if is_psycopg_connection(cn):
-            sql = sql.replace('?', '%s')
-        if is_pymssql_connection(cn):
-            sql = sql.replace('%s', '?')
-        if is_sqlite3_connection(cn):
-            sql = sql.replace('%s', '?')
-        return func(cn, sql, *args, **kwargs)
     return wrapper
 
 
@@ -338,10 +356,10 @@ class LoggingCursor(ClientCursor):
     """See https://github.com/psycopg/psycopg/discussions/153 if
     considering replacing raw connections with SQLAlchemy
     """
-    def execute(self, query, params=None, *args, **kwargs):
+    def execute(self, query, params=None, *args):
         formatted = self.mogrify(query, params)
         logger.debug('SQL:\n' + formatted)
-        result = super().execute(query, params, *args, **kwargs)
+        result = super().execute(query, params, *args)
         return result
 
 
@@ -406,17 +424,17 @@ def IterChunk(cursor, size=5000):
         yield from chunked
 
 
-@dumpsql
 @check_connection
-@placeholder
+@handle_query_params
+@dumpsql
 def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
     cursor = _dict_cur(cn)  # cn is already a ConnectionWrapper
     cursor.execute(sql, args)
     return load_data(cursor, **kwargs)
 
 
+@handle_query_params
 @dumpsql
-@placeholder
 def callproc(cn, sql, *args, **kwargs) -> pd.DataFrame:
     """Just like select above but used for stored procs which
     often return multiple resultsets because of nocount being
@@ -523,13 +541,11 @@ def select_scalar_or_none(cn, sql, *args):
     return None
 
 
-@dumpsql
 @check_connection
-@placeholder
-def execute(cn, sql, *args, **kwargs):
+@handle_query_params
+@dumpsql
+def execute(cn, sql, *args):
     cursor = cn.cursor()
-    if is_pymssql_connection(cn):
-        args = TypeConverter.convert_params(args)
     cursor.execute(sql, args)
     rowcount = cursor.rowcount
     cn.commit()
@@ -567,12 +583,10 @@ class transaction:
             self.connection.commit()
             logger.debug('Committed transaction.')
 
-    @dumpsql
     @check_connection
-    @placeholder
+    @handle_query_params
+    @dumpsql
     def execute(self, sql, *args, returnid=None):
-        if is_pymssql_connection(self.connection):
-            args = TypeConverter.convert_params(args)
         rc = self.cursor.execute(sql, args)
 
         if not returnid:
@@ -594,16 +608,16 @@ class transaction:
         else:
             return result[returnid]
 
+    @handle_query_params
     @dumpsql
-    @placeholder
     def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         cursor = self.cursor
         cursor.execute(sql, args)
         return load_data(cursor, **kwargs)
 
 
+@handle_query_params
 @dumpsql
-@placeholder
 def insert_identity(cn, sql, *args):
     """Inject @@identity column into query for row by row unique id"""
     cursor=cn.cursor()

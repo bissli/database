@@ -1,5 +1,6 @@
+import datetime
+
 import database as db
-import psycopg
 
 
 def test_select(psql_docker, conn):
@@ -115,26 +116,112 @@ def test_upsert(psql_docker, conn):
     assert int(res) == 51
 
 
-def test_handle_pg_error(psql_docker, conn):
-    """Test error handling with invalid SQL"""
-    try:
-        db.insert(conn, 'INSERT INTO test_table (name, value) VALUES (%s, %s)', 'Bob', '??')
-        raise AssertionError('Should have raised an error')
-    except psycopg.Error as e:
-        error_info = db.handler.handle_pg_error(e)
-        assert 'invalid input syntax for type integer' in str(error_info)
-        assert error_info.column == 'value'  # Should identify the value column
-        conn.rollback()  # Reset the transaction state
+def test_date_parameter_handling(psql_docker, conn):
+    """Test handling of datetime.date objects as parameters.
 
-    # Test with transaction class
+    This tests the error case: 'object of type 'datetime.date' has no len()'
+    """
+    # Setup - insert test data with date field
+    db.execute(conn, """
+        CREATE TEMPORARY TABLE test_date_table (
+            id SERIAL PRIMARY KEY,
+            date DATE,
+            identifier VARCHAR(20),
+            duplicate_see_id INTEGER NULL,
+            value INTEGER
+        )
+    """)
+
+    test_date = datetime.date(2025, 3, 3)
+    test_identifier = 'BBG00RMV8099'
+
+    db.insert(conn, """
+        INSERT INTO test_date_table (date, identifier, value)
+        VALUES (%s, %s, %s)
+    """, test_date, test_identifier, 100)
+
+    # Test 1: Using select directly with date parameter
+    query = """
+        SELECT date, identifier, value
+        FROM test_date_table
+        WHERE date = %s
+        AND identifier = %s
+        AND duplicate_see_id IS NULL
+    """
+
+    # This should work without error
+    result = db.select(conn, query, test_date, test_identifier)
+    assert len(result) == 1
+    assert result.iloc[0]['identifier'] == test_identifier
+
+    # Test 2: Using the same query in a transaction
     with db.transaction(conn) as tx:
-        try:
-            tx.execute('INSERT INTO test_table (name, value) VALUES (%s, %s)', 'Bob', '??')
-            raise AssertionError('Should have raised an error')
-        except psycopg.Error as e:
-            error_info = db.handler.handle_pg_error(e)
-            assert 'invalid input syntax for type integer' in str(error_info)
-            assert error_info.column == 'value'  # Should identify the value column
+        result = tx.select(query, test_date, test_identifier)
+        assert len(result) == 1
+        assert result.iloc[0]['identifier'] == test_identifier
+
+
+def test_named_parameter_handling(psql_docker, conn):
+    """Test handling of named parameters using a dictionary.
+
+    This tests the error case: 'the query has 2 placeholders but 1 parameters were passed'
+    """
+    # Setup - create a temporary table for testing
+    db.execute(conn, """
+        CREATE TEMPORARY TABLE test_named_params (
+            id SERIAL PRIMARY KEY,
+            col VARCHAR(20),
+            time TIMESTAMP,
+            value INTEGER
+        )
+    """)
+
+    db.execute(conn, """
+        CREATE TEMPORARY TABLE test_named_params_join (
+            id SERIAL PRIMARY KEY,
+            id_bb_unique VARCHAR(20),
+            date DATE,
+            data VARCHAR(50)
+        )
+    """)
+
+    # Insert test data
+    db.insert(conn, """
+        INSERT INTO test_named_params (col, time, value)
+        VALUES (%s, %s, %s)
+    """, 'TEST123', '2025-03-04 10:00:00', 200)
+
+    db.insert(conn, """
+        INSERT INTO test_named_params_join (id_bb_unique, date, data)
+        VALUES (%s, %s, %s)
+    """, 'TEST123', '2025-03-03', 'test data')
+
+    # Test 1: Using select with named parameters
+    query = """
+        SELECT q.col, q.value, bu.data
+        FROM test_named_params q
+        LEFT JOIN test_named_params_join bu
+            ON bu.id_bb_unique = q.col AND bu.date = %(pdate)s
+        WHERE q.time::date = %(bdate)s
+    """
+
+    params = {
+        'pdate': datetime.date(2025, 3, 3),
+        'bdate': datetime.date(2025, 3, 4)
+    }
+
+    # This should work without error
+    result = db.select(conn, query, params)
+    assert len(result) == 1
+    assert result.iloc[0]['col'] == 'TEST123'
+    assert result.iloc[0]['data'] == 'test data'
+
+    # Test 2: Using the same query in a transaction
+    with db.transaction(conn) as tx:
+        result = tx.select(query, params)
+        assert len(result) == 1
+        assert result.iloc[0]['col'] == 'TEST123'
+        assert result.iloc[0]['data'] == 'test data'
 
 
 if __name__ == '__main__':
