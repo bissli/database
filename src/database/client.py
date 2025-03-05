@@ -48,6 +48,7 @@ __all__ = [
     'is_psycopg_connection',
     'is_pymssql_connection',
     'is_sqlite3_connection',
+    'reset_table_sequence',
     'vacuum_table',
     'reindex_table',
     'IntegrityError',
@@ -736,8 +737,7 @@ def upsert_rows(
                 rc += tx.execute(sql, *row.values())
     finally:
         if reset_sequence:
-            id_name = kw.pop('id_name', 'id')
-            reset_table_sequence(cn, table, id_name)
+            reset_table_sequence(cn, table)
 
     if rc != len(rows):
         logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints')
@@ -796,18 +796,79 @@ def update_row_sql(table, keyfields, datafields):
     return f'update {table} set {datacols} where {keycols}'
 
 
-def reset_table_sequence(cn, table, identity='id'):
-    sql = f"""
+def find_sequence_column(cn, table):
+    """Find the best column to reset sequence for.
+
+    Intelligently determines the sequence column using these priorities:
+    1. Columns that are both primary key and sequence columns
+    2. Columns with 'id' in the name that are primary keys or sequence columns
+    3. Any primary key or sequence column
+    4. Default to 'id' as a last resort
+    """
+    sequence_cols = get_sequence_columns(cn, table)
+    primary_keys = get_table_primary_keys(cn, table)
+
+    # Find columns that are both PK and sequence columns
+    pk_sequence_cols = [col for col in sequence_cols if col in primary_keys]
+
+    if pk_sequence_cols:
+        # Among PK sequence columns, prefer ones with 'id' in the name
+        id_cols = [col for col in pk_sequence_cols if 'id' in col.lower()]
+        if id_cols:
+            return id_cols[0]
+        return pk_sequence_cols[0]
+
+    # If no PK sequence columns, try sequence columns
+    if sequence_cols:
+        # Among sequence columns, prefer ones with 'id' in the name
+        id_cols = [col for col in sequence_cols if 'id' in col.lower()]
+        if id_cols:
+            return id_cols[0]
+        return sequence_cols[0]
+
+    # If no sequence columns, try primary keys
+    if primary_keys:
+        # Among primary keys, prefer ones with 'id' in the name
+        id_cols = [col for col in primary_keys if 'id' in col.lower()]
+        if id_cols:
+            return id_cols[0]
+        return primary_keys[0]
+
+    # Default fallback
+    return 'id'
+
+
+def reset_table_sequence(cn, table, identity=None):
+    # Auto-detect identity column if not provided
+    if identity is None:
+        identity = find_sequence_column(cn, table)
+
+    if is_psycopg_connection(cn):
+        sql = f"""
 select
     setval(pg_get_serial_sequence('{table}', '{identity}'), coalesce(max({identity}),0)+1, false)
 from
-    {table}
-    """
+{table}
+"""
+    elif is_sqlite3_connection(cn):
+        # SQLite doesn't need explicit sequence resetting
+        return
+    elif is_pymssql_connection(cn):
+        # SQL Server IDENTITY reseed
+        sql = f"""
+DECLARE @max int;
+SELECT @max = ISNULL(MAX({identity}), 0) FROM {table};
+DBCC CHECKIDENT ('{table}', RESEED, @max);
+"""
+    else:
+        logger.warning('Sequence reset not implemented for this database type')
+        return
+
     if isinstance(cn, transaction):
         cn.execute(sql)
     else:
         execute(cn, sql)
-    logger.debug(f'Reset sequence for {table=}')
+    logger.debug(f'Reset sequence for {table=} using {identity=}')
 
 
 def vacuum_table(cn, table):
@@ -861,29 +922,70 @@ def get_table_primary_keys(cn, table, _=None):
     """
     if cn.options.drivername == 'postgres':
         sql = """
-    select a.attname as column
-    from pg_index i
-    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-    where i.indrelid = %s::regclass and i.indisprimary
-        """
+select a.attname as column
+from pg_index i
+join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
+where i.indrelid = %s::regclass and i.indisprimary
+"""
     if cn.options.drivername == 'sqlite':
         sql = """
-    select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
-        """
+select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
+"""
+    if cn.options.drivername == 'sqlserver':
+        sql = """
+SELECT c.name as column
+FROM sys.indexes i
+JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE i.is_primary_key = 1
+AND OBJECT_NAME(i.object_id) = %s
+"""
     cols = select_column(cn, sql, table)
     return cols
+
+
+def get_sequence_columns(cn, table):
+    """Identify columns that are likely to be sequence/identity columns based on database type.
+    """
+    if cn.options.drivername == 'postgres':
+        # Find columns with sequences
+        sql = """
+        SELECT column_name as column
+        FROM information_schema.columns
+        WHERE table_name = %s
+        AND column_default LIKE 'nextval%%'
+        """
+        return select_column(cn, sql, table)
+    elif cn.options.drivername == 'sqlite':
+        # Find autoincrement columns
+        sql = """
+        SELECT name as column
+        FROM pragma_table_info('%s')
+        WHERE pk = 1
+        """
+        return select_column(cn, sql, table)
+    elif cn.options.drivername == 'sqlserver':
+        # Find identity columns
+        sql = """
+        SELECT c.name as column
+        FROM sys.columns c
+        JOIN sys.tables t ON c.object_id = t.object_id
+        WHERE t.name = %s AND c.is_identity = 1
+        """
+        return select_column(cn, sql, table)
+    return []
 
 
 def table_fields(cn, table):
     flds = select_column(cn, """
 select
-    t.column_name
+t.column_name
 from information_schema.columns t
 where
-    t.table_name = %s
+t.table_name = %s
 order by
-    t.ordinal_position
-    """, table)
+t.ordinal_position
+""", table)
     return flds
 
 
@@ -893,15 +995,15 @@ def table_data(cn, table, columns=[]):
     if not columns:
         columns = select_column(cn, """
 select
-    t.column_name
+t.column_name
 from information_schema.columns t
 where
-    t.table_name = %s
-    and t.data_type in ('character', 'character varying', 'boolean',
-        'text', 'double precision', 'real' 'integer', 'date',
-        'time without time zone', 'timestamp without time zone')
+t.table_name = %s
+and t.data_type in ('character', 'character varying', 'boolean',
+    'text', 'double precision', 'real' 'integer', 'date',
+    'time without time zone', 'timestamp without time zone')
 order by
-    t.ordinal_position
-        """, table)
+t.ordinal_position
+""", table)
     columns = [f'{col} as {alias}' for col, alias in peel(columns)]
     return select(cn, f"select {','.join(columns)} from {table}")

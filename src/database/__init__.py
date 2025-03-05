@@ -26,6 +26,7 @@ __all__ = [
     'is_psycopg_connection',
     'is_pymssql_connection',
     'is_sqlite3_connection',
+    'reset_table_sequence',
     'vacuum_table',
     'reindex_table',
     # options

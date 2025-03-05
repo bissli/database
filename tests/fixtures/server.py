@@ -38,28 +38,25 @@ def psql_docker():
 
 
 def stage_test_data(cn):
-    drop_table_if_exists = """
-DROP TABLE IF EXISTS test_table;
-"""
+    drop_table_if_exists = 'drop table if exists test_table'
     db.execute(cn, drop_table_if_exists)
 
     create_and_insert_data = """
-CREATE TABLE test_table (
-    id SERIAL NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    value INTEGER NOT NULL,
+create table test_table (
+    id serial not null,
+    name varchar(255) not null,
+    value integer not null,
     primary key (name)
 );
 
-INSERT INTO test_table (name, value) VALUES
+insert into test_table (name, value) values
 ('Alice', 10),
 ('Bob', 20),
 ('Charlie', 30),
 ('Ethan', 50),
 ('Fiona', 70),
 ('George', 80);
-
-    """
+"""
     db.execute(cn, create_and_insert_data)
 
 
@@ -74,10 +71,10 @@ from
 where
     pg_stat_activity.datname = current_database()
     and pid <> pg_backend_pid()
-    """
+"""
         db.execute(cn, sql)
     except Exception as e:
-        logger.warning(f"Failed to terminate connections: {e}")
+        logger.warning(f'Failed to terminate connections: {e}')
 
 
 @pytest.fixture(scope='session')
