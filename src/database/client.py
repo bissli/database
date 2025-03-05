@@ -15,7 +15,6 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
-from database.handler import QueryContext, handle_pg_error
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -270,13 +269,7 @@ class CursorWrapper:
         created this connection.
         """
         start = time.time()
-        try:
-            self.cursor.execute(sql, *args, **kwargs)
-        except psycopg.Error as e:
-            if is_psycopg_connection(self.connwrapper):
-                error_info = handle_pg_error(e, QueryContext(sql=sql, args=args, kwargs=kwargs))
-                raise type(e)(str(error_info)) from e
-            raise
+        self.cursor.execute(sql, *args, **kwargs)
         logger.debug(f'Query result: {self.cursor.statusmessage}')
         end = time.time()
         self.connwrapper.addcall(end - start)
@@ -537,16 +530,10 @@ def execute(cn, sql, *args, **kwargs):
     cursor = cn.cursor()
     if is_pymssql_connection(cn):
         args = TypeConverter.convert_params(args)
-    try:
-        cursor.execute(sql, args)
-        rowcount = cursor.rowcount
-        cn.commit()
-        return rowcount
-    except psycopg.Error as e:
-        if is_psycopg_connection(cn):
-            error_info = handle_pg_error(e, QueryContext(sql=sql, args=args, kwargs=kwargs))
-            raise type(e)(str(error_info)) from e
-        raise
+    cursor.execute(sql, args)
+    rowcount = cursor.rowcount
+    cn.commit()
+    return rowcount
 
 
 insert = update = delete = execute
