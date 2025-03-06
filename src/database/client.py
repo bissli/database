@@ -1516,6 +1516,8 @@ def filter_table_columns(cn, table, row_dicts):
 
     # Create new filtered dictionaries with correct case
     filtered_rows = []
+    # Track removed columns
+    removed_columns = set()
 
     for row in row_dicts:
         filtered_row = {}
@@ -1525,8 +1527,12 @@ def filter_table_columns(cn, table, row_dicts):
                 correct_col = case_map[col.lower()]
                 filtered_row[correct_col] = val
             else:
-                logger.debug(f'Removed column {col} not in {table}')
+                # Add to removed columns set
+                removed_columns.add(col)
         filtered_rows.append(filtered_row)
+
+    for col in removed_columns:
+        logger.debug(f'Removed column {col} not in {table}')
 
     return filtered_rows
 
