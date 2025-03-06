@@ -1503,21 +1503,27 @@ where t.name = '{table}'
 
 def filter_table_columns(cn, table, row_dicts):
     """Filter dictionaries to only include valid columns for the table
+    and correct column name casing to match database schema
     """
     if not row_dicts:
         return []
 
-    # Get table columns (case insensitive comparison)
-    table_cols = {c.lower() for c in get_table_columns(cn, table)}
+    # Get table columns with original case preserved
+    table_cols = get_table_columns(cn, table)
 
-    # Create new filtered dictionaries
+    # Create case mapping dictionary (lowercase -> original case)
+    case_map = {col.lower(): col for col in table_cols}
+
+    # Create new filtered dictionaries with correct case
     filtered_rows = []
 
     for row in row_dicts:
         filtered_row = {}
         for col, val in row.items():
-            if col.lower() in table_cols:
-                filtered_row[col] = val
+            if col.lower() in case_map:
+                # Use the correctly-cased column name from the database
+                correct_col = case_map[col.lower()]
+                filtered_row[correct_col] = val
             else:
                 logger.debug(f'Removed column {col} not in {table}')
         filtered_rows.append(filtered_row)
