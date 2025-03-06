@@ -15,4 +15,13 @@ sqlite = Setting()
 sqlite.drivername='sqlite'
 sqlite.database='database.db'
 
+sqlserver = Setting()
+sqlserver.drivername='sqlserver'
+sqlserver.hostname='localhost'
+sqlserver.username='sa'
+sqlserver.password='StrongPassword123!'
+sqlserver.database='master'
+sqlserver.port=1433
+sqlserver.timeout=30
+
 Setting.lock()

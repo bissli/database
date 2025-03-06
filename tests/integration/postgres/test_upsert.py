@@ -173,5 +173,57 @@ def test_upsert_invalid_columns(psql_docker, conn):
     assert result.value == 100
 
 
+def test_upsert_no_primary_keys(psql_docker, conn):
+    """Test upsert with a table that has no primary keys"""
+    # Create a table without primary keys
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_no_pk (
+        name VARCHAR(50) NOT NULL,
+        value INTEGER NOT NULL
+    )
+    """)
+
+    # Insert data using upsert
+    rows = [
+        {'name': 'NoPK1', 'value': 100},
+        {'name': 'NoPK2', 'value': 200}
+    ]
+
+    # Without primary keys, all rows should be inserted
+    row_count = db.upsert_rows(conn, 'test_no_pk', rows)
+    assert row_count == 2, 'upsert should insert 2 rows'
+
+    # Verify rows were inserted
+    result = db.select(conn, 'select name, value from test_no_pk order by name')
+    assert len(result) == 2
+    assert result.iloc[0]['name'] == 'NoPK1'
+    assert result.iloc[0]['value'] == 100
+    assert result.iloc[1]['name'] == 'NoPK2'
+    assert result.iloc[1]['value'] == 200
+
+    # Try "updating" with upsert again - without primary keys, this should insert new rows, not update
+    rows = [
+        {'name': 'NoPK1', 'value': 101},
+        {'name': 'NoPK2', 'value': 201}
+    ]
+
+    row_count = db.upsert_rows(conn, 'test_no_pk', rows, update_cols_always=['value'])
+    assert row_count == 2, 'upsert should insert 2 new rows'
+
+    # We should now have 4 rows
+    result = db.select(conn, 'select name, value from test_no_pk order by name, value')
+    assert len(result) == 4, 'table should have 4 rows total'
+
+    # Verify both old and new rows exist
+    assert result.iloc[0]['name'] == 'NoPK1'
+    assert result.iloc[0]['value'] == 100
+    assert result.iloc[1]['name'] == 'NoPK1'
+    assert result.iloc[1]['value'] == 101
+    assert result.iloc[2]['name'] == 'NoPK2'
+    assert result.iloc[2]['value'] == 200
+    assert result.iloc[3]['name'] == 'NoPK2'
+    assert result.iloc[3]['value'] == 201
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

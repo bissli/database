@@ -1,7 +1,11 @@
 """
-Row and result set adapters to provide consistent interfaces
-across different database backends.
+Row adapters to provide consistent interfaces across different database backends.
 """
+
+from database.utils.connection_utils import is_psycopg_connection
+from database.utils.connection_utils import is_pymssql_connection
+from database.utils.connection_utils import is_sqlite3_connection
+
 from libb import attrdict
 
 
@@ -11,9 +15,6 @@ class DatabaseRowAdapter:
     @staticmethod
     def create(connection, row):
         """Factory method to create the appropriate adapter for the connection type"""
-        from .client import is_psycopg_connection, is_pymssql_connection
-        from .client import is_sqlite3_connection
-
         if is_sqlite3_connection(connection):
             return SQLiteRowAdapter(row)
         if is_psycopg_connection(connection):
@@ -22,6 +23,16 @@ class DatabaseRowAdapter:
             return SQLServerRowAdapter(row)
 
         return GenericRowAdapter(row)
+
+    @staticmethod
+    def create_empty_dict(cols):
+        """Create an empty dictionary with null values for the given columns"""
+        return {col: None for col in cols}
+    
+    @staticmethod
+    def create_attrdict_from_cols(cols):
+        """Create an attrdict with null values for all columns"""
+        return attrdict(DatabaseRowAdapter.create_empty_dict(cols))
 
     def __init__(self, row):
         self.row = row
@@ -160,50 +171,3 @@ class GenericRowAdapter(DatabaseRowAdapter):
                 pass
 
         return self.row
-
-
-class ResultSetAdapter:
-    """Adapter for sets of database rows providing consistent interface"""
-
-    def __init__(self, connection, data):
-        self.connection = connection
-        self.data = data
-
-    def to_dict_list(self):
-        """Convert all rows to dictionaries"""
-        return [DatabaseRowAdapter.create(self.connection, row).to_dict() for row in self.data]
-
-    def get_first_value(self):
-        """Get the first value from the first row"""
-        if not self.data:
-            return None
-        return DatabaseRowAdapter.create(self.connection, self.data[0]).get_value()
-
-    def get_first_row_dict(self):
-        """Get the first row as a dictionary"""
-        if not self.data:
-            return None
-        return DatabaseRowAdapter.create(self.connection, self.data[0]).to_dict()
-
-    def get_column_values(self, column_index=0):
-        """Get values from a specific column across all rows"""
-        result = []
-        for row in self.data:
-            adapter = DatabaseRowAdapter.create(self.connection, row)
-            if isinstance(column_index, int):
-                # Get by position
-                try:
-                    if hasattr(row, '__getitem__'):
-                        result.append(row[column_index])
-                    else:
-                        # Can't get by index, try first value
-                        result.append(adapter.get_value())
-                except (IndexError, KeyError):
-                    result.append(None)
-            else:
-                # Get by column name
-                try:
-                    result.append(adapter.get_value(column_index))
-                except (IndexError, KeyError):
-                    result.append(None)
-        return result

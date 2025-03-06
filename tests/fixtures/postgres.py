@@ -2,7 +2,6 @@ import logging
 import os
 import sys
 import time
-from unittest import mock
 
 import database as db
 import docker
@@ -17,25 +16,62 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.fixture(scope='session')
-def psql_docker():
+def psql_docker(request):
     client = docker.from_env()
-    container = client.containers.run(
-        image='postgres:12',
-        auto_remove=True,
-        environment={
-            'POSTGRES_DB': 'test_db',
-            'POSTGRES_USER': 'postgres',
-            'POSTGRES_PASSWORD': 'postgres',
-            'TZ': 'US/Eastern',
-            'PGTZ': 'US/Eastern'},
-        name='test_postgres',
-        ports={'5432/tcp': ('127.0.0.1', 5432)},
-        detach=True,
-        remove=True,
-    )
-    time.sleep(5)
-    yield
-    container.stop()
+
+    # Check if container already exists and remove it
+    try:
+        old_container = client.containers.get('test_postgres')
+        logger.info('Found existing test container, removing it')
+        old_container.stop()
+        old_container.remove()
+    except docker.errors.NotFound:
+        pass
+    except Exception as e:
+        logger.warning(f'Error when cleaning up container: {e}')
+
+    try:
+        container = client.containers.run(
+            image='postgres:12',
+            auto_remove=True,
+            environment={
+                'POSTGRES_DB': config.postgres.database,
+                'POSTGRES_USER': config.postgres.username,
+                'POSTGRES_PASSWORD': config.postgres.password,
+                'TZ': 'US/Eastern',
+                'PGTZ': 'US/Eastern'},
+            name='test_postgres',
+            ports={'5432/tcp': ('127.0.0.1', 5432)},
+            detach=True,
+            remove=True,
+        )
+
+        # Register finalizer to ensure container is cleaned up after all tests
+        def finalizer():
+            try:
+                container.stop()
+            except Exception as e:
+                logger.warning(f'Error stopping container during cleanup: {e}')
+
+        request.addfinalizer(finalizer)
+
+        # Wait for postgres to be ready
+        for i in range(30):
+            # Check if postgres is accepting connections
+            try:
+                cn = db.connect('postgres', config=config)
+                cn.close()
+                break
+            except Exception:
+                time.sleep(1)
+        else:
+            raise Exception('Postgres container failed to start in time')
+
+        return container
+
+    except Exception as e:
+        logger.error(f'Error setting up postgres container: {e}')
+        raise
 
 
 def stage_test_data(cn):
@@ -81,14 +117,27 @@ where
         logger.warning(f'Failed to terminate connections: {e}')
 
 
-@pytest.fixture(scope='session')
-def conn():
-    cn = db.connect('postgres', config)
+@pytest.fixture
+def conn(psql_docker):
+    """
+    Connection fixture with function scope for clean tests.
+    Each test gets a fresh connection with reset test data.
+    """
+    cn = db.connect('postgres', config=config)
     assert db.isconnection(cn)
+
+    # Ensure clean state for each test
+    cn.rollback()  # Ensure we're not in a failed transaction
     terminate_postgres_connections(cn)
     stage_test_data(cn)
+
     try:
         yield cn
     finally:
-        terminate_postgres_connections(cn)
-        cn.close()
+        # Clean up after the test
+        try:
+            cn.rollback()  # Make sure we don't have open transactions
+            terminate_postgres_connections(cn)
+            cn.close()
+        except Exception as e:
+            logger.warning(f'Error during connection cleanup: {e}')

@@ -24,14 +24,14 @@ def mock_sqlserver_conn():
     cursor.execute.side_effect = mock_execute
 
     # For is_pymssql_connection check
-    is_pymssql_connection_patcher = patch('database.client.is_pymssql_connection',
+    is_pymssql_connection_patcher = patch('database.utils.connection_utils.is_pymssql_connection',
                                           return_value=True)
     is_pymssql_connection_patcher.start()
 
     # Patch quote_identifier to return SQL Server style quoting
     quote_identifier_patcher = patch(
-        'database.client.quote_identifier',
-        side_effect=lambda conn, ident: f"[{ident.replace(']', ']]')}]"
+        'database.utils.sql.quote_identifier',
+        side_effect=lambda db_type, ident: f"[{ident.replace(']', ']]')}]"
     )
     quote_identifier_patcher.start()
 

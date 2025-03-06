@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 import psycopg
 import pymssql
 import pytest
-from database.client import _build_insert_sql, _build_upsert_sql
-from database.client import is_psycopg_connection, is_pymssql_connection
-from database.client import is_sqlite3_connection, isconnection
-from database.client import quote_identifier, sanitize_sql_for_logging
+from database.operations.upsert import _build_insert_sql, _build_upsert_sql
+from database.utils.connection_utils import is_psycopg_connection
+from database.utils.connection_utils import is_pymssql_connection
+from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import isconnection
+from database.utils.sql import quote_identifier, sanitize_sql_for_logging
 
 
 class TestConnectionDetection:
@@ -21,7 +23,7 @@ class TestConnectionDetection:
         wrapped_conn.connection = mock_conn
 
         # Patch isinstance to handle mock objects
-        with patch('database.client.isinstance', side_effect=lambda obj, cls: isinstance(obj, MagicMock) or isinstance(obj, cls)):
+        with patch('database.client.isinstance', side_effect=lambda obj, cls: isinstance(obj, MagicMock | cls)):
             # Test direct connection
             assert is_psycopg_connection(mock_conn)
 
@@ -92,77 +94,76 @@ class TestQuoteIdentifier:
 
     def test_quote_identifier_postgres(self):
         """Test PostgreSQL identifier quoting"""
-        conn = MagicMock()
-        conn.connection = MagicMock(spec=psycopg.Connection)
-
-        assert quote_identifier(conn, 'table_name') == '"table_name"'
-        assert quote_identifier(conn, 'column.with.dots') == '"column.with.dots"'
-        assert quote_identifier(conn, 'table"quoted') == '"table""quoted"'
+        assert quote_identifier('postgres', 'table_name') == '"table_name"'
+        assert quote_identifier('postgres', 'column.with.dots') == '"column.with.dots"'
+        assert quote_identifier('postgres', 'table"quoted') == '"table""quoted"'
 
     def test_quote_identifier_sqlite(self):
         """Test SQLite identifier quoting"""
-        conn = MagicMock()
-        conn.connection = MagicMock(spec=sqlite3.Connection)
-
-        assert quote_identifier(conn, 'table_name') == '"table_name"'
-        assert quote_identifier(conn, 'table"quoted') == '"table""quoted"'
+        assert quote_identifier('sqlite', 'table_name') == '"table_name"'
+        assert quote_identifier('sqlite', 'table"quoted') == '"table""quoted"'
 
     def test_quote_identifier_sqlserver(self):
         """Test SQL Server identifier quoting"""
-        conn = MagicMock()
-        conn.connection = MagicMock(spec=pymssql.Connection)
-
-        assert quote_identifier(conn, 'table_name') == '[table_name]'
-        assert quote_identifier(conn, 'table]with]brackets') == '[table]]with]]brackets]'
+        assert quote_identifier('sqlserver', 'table_name') == '[table_name]'
+        assert quote_identifier('sqlserver', 'table]with]brackets') == '[table]]with]]brackets]'
 
     def test_quote_identifier_unsupported(self):
         """Test quote_identifier with unsupported connection type"""
-        # Create a mock without database connection spec
-        conn = MagicMock()
-        conn._spec_class = None  # Explicitly not a database connection
-
-        with pytest.raises(ValueError, match="Unknown connection type"):
-            quote_identifier(conn, 'table_name')
+        with pytest.raises(ValueError, match='Unknown database type'):
+            quote_identifier('unknown', 'table_name')
 
 
 class TestSQLSanitization:
     """Test suite for SQL sanitization functions"""
 
-    def test_sanitize_sql_for_logging_sensitive_password(self):
-        """Test sanitization of SQL containing passwords"""
-        sql = "INSERT INTO users (username, password) VALUES ('admin', 'supersecret')"
-        sanitized_sql, _ = sanitize_sql_for_logging(sql)
-
-        assert 'supersecret' not in sanitized_sql
-        assert '***' in sanitized_sql
-
-    def test_sanitize_sql_for_logging_sensitive_credit_card(self):
-        """Test sanitization of SQL containing credit card info"""
-        sql = "INSERT INTO payments (user_id, credit_card) VALUES (1, '4111-1111-1111-1111')"
-        sanitized_sql, _ = sanitize_sql_for_logging(sql)
-
-        assert '4111-1111-1111-1111' not in sanitized_sql
-        assert '***' in sanitized_sql
-
     def test_sanitize_sql_for_logging_parameters(self):
-        """Test sanitization of parameters"""
+        """Test sanitization of parameters with sensitive terms"""
         sql = 'INSERT INTO users (username, password) VALUES (%s, %s)'
         args = ['admin', 'supersecret']
 
         sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
 
+        # SQL remains unchanged
+        assert sanitized_sql == sql
+        # Only password parameter is masked
         assert sanitized_args[0] == 'admin'
         assert sanitized_args[1] == '***'
 
     def test_sanitize_sql_for_logging_dict_parameters(self):
-        """Test sanitization of dictionary parameters"""
-        sql = 'INSERT INTO users (username, password) VALUES (%(username)s, %(password)s)'
-        args = {'username': 'admin', 'password': 'supersecret'}
+        """Test sanitization of dictionary parameters with sensitive terms"""
+        sql = 'INSERT INTO users (username, password, api_key) VALUES (%(username)s, %(password)s, %(api_key)s)'
+        args = {'username': 'admin', 'password': 'supersecret', 'api_key': 'abc123'}
 
         sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
 
+        # SQL remains unchanged
+        assert sanitized_sql == sql
+        # Only sensitive parameters are masked
         assert sanitized_args['username'] == 'admin'
         assert sanitized_args['password'] == '***'
+        assert sanitized_args['api_key'] == '***'
+
+    def test_sanitize_sql_for_logging_insert_columns(self):
+        """Test sanitization of parameters in INSERT statements"""
+        sql = 'INSERT INTO users (username, password, credit_card) VALUES (%s, %s, %s)'
+        args = ['admin', 'supersecret', '4111-1111-1111-1111']
+
+        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
+
+        # Order of parameters should match column order
+        assert sanitized_args[0] == 'admin'
+        assert sanitized_args[1] == '***'  # password masked
+        assert sanitized_args[2] == '***'  # credit_card masked
+
+    def test_sanitize_sql_for_logging_none_args(self):
+        """Test sanitization with no args"""
+        sql = 'SELECT * FROM users'
+
+        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql)
+
+        assert sanitized_sql == sql
+        assert sanitized_args is None
 
 
 class TestSQLBuilders:
@@ -172,15 +173,16 @@ class TestSQLBuilders:
         """Test PostgreSQL INSERT SQL generation"""
         conn = MagicMock()
         conn.connection = MagicMock(spec=psycopg.Connection)
+        conn.get_driver_type = MagicMock(return_value='postgres')
 
         # Patch quote_identifier to return PostgreSQL style quoting
-        with patch('database.client.quote_identifier', 
-                  side_effect=lambda conn, ident: f'"{ident}"'):
+        with patch('database.utils.sql.quote_identifier',
+                   side_effect=lambda db_type, ident: f'"{ident}"'):
             sql = _build_insert_sql(conn, 'users', ('id', 'username', 'email'))
 
             assert 'insert into "users"' in sql.lower()
             assert '("id","username","email")' in sql.replace(' ', '')
-            
+
             # More flexible assertion that doesn't depend on exact spacing
             assert all(x in sql.lower().replace(' ', '') for x in ['values', '(%s,%s,%s)'])
 
@@ -188,6 +190,7 @@ class TestSQLBuilders:
         """Test PostgreSQL UPSERT SQL generation"""
         conn = MagicMock()
         conn.connection = MagicMock(spec=psycopg.Connection)
+        conn.get_driver_type = MagicMock(return_value='postgres')
 
         sql = _build_upsert_sql(
             conn,

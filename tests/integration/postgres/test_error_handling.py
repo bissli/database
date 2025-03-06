@@ -11,7 +11,7 @@ def test_check_connection_decorator(psql_docker, conn):
     retry_count = [0]
     
     # Create a function that will fail N times then succeed
-    @db.client.check_connection(max_retries=3, retry_delay=0.1)
+    @db.core.transaction.check_connection(max_retries=3, retry_delay=0.1)
     def failing_function(conn, fail_count=2):
         if retry_count[0] < fail_count:
             retry_count[0] += 1
@@ -25,7 +25,7 @@ def test_check_connection_decorator(psql_docker, conn):
     
     # Reset and try with more failures than allowed retries
     retry_count[0] = 0
-    @db.client.check_connection(max_retries=3, retry_delay=0.1)
+    @db.core.transaction.check_connection(max_retries=3, retry_delay=0.1)
     def failing_function_2(conn, fail_count=5):
         if retry_count[0] < min(fail_count, 3):
             retry_count[0] += 1
@@ -41,7 +41,7 @@ def test_check_connection_decorator(psql_docker, conn):
 def test_simpler_reconnect(psql_docker, conn):
     """A simpler test for automatic reconnection after connection failure"""
     calls = [0]
-    @db.client.check_connection(max_retries=3, retry_delay=0.1)
+    @db.core.transaction.check_connection(max_retries=3, retry_delay=0.1)
     def failing_then_succeeding(connection, raise_error=True):
         calls[0] += 1
         if calls[0] == 1 and raise_error:
@@ -75,7 +75,7 @@ def test_automatic_reconnect(psql_docker, conn):
     mock_conn_wrapper = MagicMock()
     mock_conn_wrapper.connection = new_mock_connection
     mock_conn_wrapper.options = conn.options
-    @db.client.check_connection(max_retries=3, retry_delay=0.1)
+    @db.core.transaction.check_connection(max_retries=3, retry_delay=0.1)
     
     def test_execute_with_failure(connection, sql):
         execute_calls[0] += 1
@@ -88,7 +88,7 @@ def test_automatic_reconnect(psql_docker, conn):
     conn.options.check_connection = True
     
     # Apply the patch
-    with patch('database.client.connect', return_value=mock_conn_wrapper):
+    with patch('database.core.connection.connect', return_value=mock_conn_wrapper):
         # This should fail once, reconnect, and then succeed
         result = test_execute_with_failure(conn, 'SELECT 1')
     

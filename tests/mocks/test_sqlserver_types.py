@@ -1,8 +1,8 @@
 import datetime
 from unittest.mock import MagicMock, patch
-import pymssql
 
 import database as db
+import pymssql
 import pytest
 from database.adapters import TypeConverter
 
@@ -48,20 +48,20 @@ def mock_sqlserver_conn():
     conn.options = mock_options
 
     # For is_pymssql_connection check
-    is_pymssql_connection_patcher = patch('database.client.is_pymssql_connection',
+    is_pymssql_connection_patcher = patch('database.utils.connection_utils.is_pymssql_connection',
                                           return_value=True)
     is_pymssql_connection_patcher.start()
 
     # Patch quote_identifier to return SQL Server style quoting
     quote_identifier_patcher = patch(
-        'database.client.quote_identifier',
-        side_effect=lambda conn, ident: f"[{ident.replace(']', ']]')}]"
+        'database.utils.sql.quote_identifier',
+        side_effect=lambda db_type, ident: f"[{ident.replace(']', ']]')}]"
     )
     quote_identifier_patcher.start()
 
     # Patch the load_data function to properly use our mock data
     load_data_patcher = patch(
-        'database.client.load_data',
+        'database.operations.query.load_data',
         side_effect=lambda cursor, **kwargs: mock_options.data_loader(
             cursor.fetchall(),
             [c[0] for c in cursor.description],

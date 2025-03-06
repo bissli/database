@@ -107,6 +107,71 @@ where q.time::date = %(bdate)s
         assert result.iloc[0]['data'] == 'test data'
 
 
+def test_named_params_in_clause(psql_docker, conn):
+    """Test handling of IN clause with named parameters, including single-item tuples.
+    """
+    # Setup - create a temporary table for testing
+    db.execute(conn, """
+create temporary table test_in_clause (
+    id serial primary key,
+    category varchar(20),
+    vendor varchar(20),
+    description varchar(50)
+)
+""")
+
+    # Insert test data
+    test_data = [
+        ('Electronics', 'Apple', 'Smartphone'),
+        ('Electronics', 'Samsung', 'Tablet'),
+        ('Clothing', 'Nike', 'Running shoes')
+    ]
+
+    for category, vendor, desc in test_data:
+        db.insert(conn, """
+insert into test_in_clause (category, vendor, description)
+values (%s, %s, %s)
+""", category, vendor, desc)
+
+    # Test 1: Single-item tuple in IN clause - this was failing previously
+    query = """
+select
+    distinct
+    category,
+    description
+from
+    test_in_clause
+where
+    category in %(categories)s
+and
+    vendor = %(vendor)s
+"""
+    params = {'categories': ('Electronics',), 'vendor': 'Apple'}
+
+    result = db.select(conn, query, params)
+    assert len(result) == 1
+    assert result.iloc[0]['category'] == 'Electronics'
+    assert result.iloc[0]['description'] == 'Smartphone'
+
+    # Test 2: Multiple items in IN clause
+    params = {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'}
+    result = db.select(conn, query, params)
+    assert len(result) == 1
+    assert result.iloc[0]['category'] == 'Clothing'
+
+    # Test 3: IN clause with a different vendor
+    params = {'categories': ('Electronics',), 'vendor': 'Samsung'}
+    result = db.select(conn, query, params)
+    assert len(result) == 1
+    assert result.iloc[0]['category'] == 'Electronics'
+    assert result.iloc[0]['description'] == 'Tablet'
+
+    # Test 4: No matching data
+    params = {'categories': ('Books',), 'vendor': 'Apple'}
+    result = db.select(conn, query, params)
+    assert len(result) == 0
+
+
 def test_none_parameter(psql_docker, conn):
     """Test handling of None parameters in queries."""
     result = db.select(conn, 'select %s::text as null_value', None)
@@ -143,6 +208,71 @@ def test_numeric_parameters(psql_docker, conn):
     # Test with computation
     result = db.select(conn, 'select %s + %s as sum_val', 10, 20)
     assert result.iloc[0]['sum_val'] == 30
+
+
+def test_direct_list_parameters(psql_docker, conn):
+    """Test the direct list parameter format for IN clauses."""
+    # Insert test data
+    test_ids = [101, 102, 103]
+    for i, test_id in enumerate(test_ids):
+        db.insert(conn, 'insert into test_table (name, value) values (%s, %s)',
+                 f'DirectTest{i}', test_id)
+    
+    # Test direct list parameter syntax for IN clause
+    result = db.select(conn, 'select name, value from test_table where value IN %s order by value',
+                      test_ids)
+    
+    # Verify results
+    assert len(result) == 3
+    assert list(result['value']) == test_ids
+    
+    # Test with a single-item list
+    result = db.select(conn, 'select name, value from test_table where value IN %s',
+                      [101])
+    
+    assert len(result) == 1
+    assert result.iloc[0]['value'] == 101
+    
+    # Compare with traditional format
+    result_traditional = db.select(conn, 'select name, value from test_table where value IN %s',
+                                  ([101],))
+    
+    assert len(result) == len(result_traditional)
+    assert result.iloc[0]['value'] == result_traditional.iloc[0]['value']
+
+
+def test_direct_lists_for_multiple_in_clauses(psql_docker, conn):
+    """Test using direct lists for multiple IN clauses."""
+    # Insert test data for multiple categories and statuses
+    categories = ['cat1', 'cat2', 'cat3']
+    statuses = ['active', 'pending']
+    
+    # Create a temp table to test with
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE multi_in_test (
+        id SERIAL PRIMARY KEY,
+        category TEXT,
+        status TEXT
+    )
+    """)
+    
+    # Insert test data with different combinations
+    for i, (cat, status) in enumerate([(c, s) for c in categories for s in statuses]):
+        db.insert(conn, 'INSERT INTO multi_in_test (category, status) VALUES (%s, %s)',
+                 cat, status)
+    
+    # Now test direct lists for multiple IN clauses
+    result = db.select(conn, """
+    SELECT category, status 
+    FROM multi_in_test 
+    WHERE category IN %s AND status IN %s
+    ORDER BY category, status
+    """, ['cat1', 'cat2'], ['active', 'pending'])
+    
+    # Verify results
+    assert len(result) == 4  # 2 categories × 2 statuses
+    assert set(result['category'].unique()) == {'cat1', 'cat2'}
+    assert set(result['status'].unique()) == {'active', 'pending'}
 
 
 if __name__ == '__main__':

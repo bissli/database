@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pandas as pd
 import pyarrow as pa
@@ -13,19 +13,58 @@ __all__ = [
 ]
 
 
-def iterdict_data_loader(data, cols) -> list[dict]:
+def iterdict_data_loader(data, column_info) -> list[dict]:
     """Minimal data loader.
     """
+    if not data:
+        return []
     return list(data)
 
 
-def pandas_numpy_data_loader(data, cols) -> pd.DataFrame:
-    return pd.DataFrame.from_records(list(data), columns=cols)
+def pandas_numpy_data_loader(data, columns) -> pd.DataFrame:
+    """
+    Standard pandas DataFrame loader using NumPy.
+
+    Always returns a DataFrame, never None, with columns preserved for empty results.
+    Includes type information in the DataFrame.attrs attribute.
+    """
+    from database.adapters.column_info import Column
+
+    if not data:
+        df = pd.DataFrame(columns=Column.get_names(columns))
+        # Save column type information in DataFrame attributes
+        df.attrs['column_types'] = Column.get_column_types_dict(columns)
+        return df
+
+    df = pd.DataFrame.from_records(list(data), columns=Column.get_names(columns))
+
+    # Save column type information in DataFrame attributes
+    df.attrs['column_types'] = Column.get_column_types_dict(columns)
+
+    return df
 
 
-def pandas_pyarrow_data_loader(data, cols) -> pd.DataFrame:
-    dataT = [[row[col] for row in data] for col in cols]  # list of cols
-    return pa.table(dataT, names=cols).to_pandas(types_mapper=pd.ArrowDtype)
+def pandas_pyarrow_data_loader(data, columns) -> pd.DataFrame:
+    """PyArrow-based pandas DataFrame loader.
+
+    Always returns a DataFrame, never None, with columns preserved for empty results.
+    """
+    from database.adapters.column_info import Column
+
+    if not data:
+        df = pd.DataFrame(columns=Column.get_names(columns))
+        # Save column type information
+        df.attrs['column_types'] = Column.get_column_types_dict(columns)
+        return df
+
+    column_names = Column.get_names(columns)
+    dataT = [[row[col] for row in data] for col in column_names]  # list of cols
+    df = pa.table(dataT, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
+
+    # Save column type information
+    df.attrs['column_types'] = Column.get_column_types_dict(columns)
+
+    return df
 
 
 @dataclass
@@ -35,7 +74,6 @@ class DatabaseOptions(ConfigOptions):
     supported driver names: `postgres`, `sqlserver`, `sqlite`
 
     """
-
     drivername: str = 'postgres'
     hostname: str = None
     username: str = None

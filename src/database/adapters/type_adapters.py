@@ -1,3 +1,6 @@
+"""
+Database type adapters for different database backends.
+"""
 import datetime
 import logging
 import sqlite3
@@ -9,107 +12,116 @@ import psycopg
 import pyarrow as pa
 from psycopg.adapt import Dumper
 from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
+from psycopg.postgres import types
+
+from database.adapters.type_converter import (NUMPY_FLOAT_TYPES, NUMPY_INT_TYPES,
+                                            NUMPY_UINT_TYPES, PANDAS_NULLABLE_TYPES,
+                                            PYARROW_NUMERIC_TYPES, TypeConverter)
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['register_adapters', 'TypeConverter']
+# == database type mappings
 
-# Type collections for registration
-NUMPY_FLOAT_TYPES = (np.float64, np.float32, np.float16)
-NUMPY_INT_TYPES = (np.int64, np.int32, np.int16, np.int8)
-NUMPY_UINT_TYPES = (np.uint64, np.uint32, np.uint16, np.uint8)
-PYARROW_NUMERIC_TYPES = (pa.FloatScalar, pa.DoubleScalar)
-PANDAS_NULLABLE_TYPES = (
-    pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
-    pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
-    pd.Float64Dtype
-)
+# PostgreSQL type mapping
+oid = lambda x: types.get(x).oid
+aoid = lambda x: types.get(x).array_oid
 
+postgres_types = {}
+for v in [
+    oid('"char"'),
+    oid('bpchar'),
+    oid('character varying'),
+    oid('character'),
+    oid('json'),
+    oid('name'),
+    oid('text'),
+    oid('uuid'),
+    oid('varchar'),
+]:
+    postgres_types[v] = str
+for v in [
+    oid('bigint'),
+    oid('int2'),
+    oid('int4'),
+    oid('int8'),
+    oid('integer'),
+]:
+    postgres_types[v] = int
+for v in [
+    oid('float4'),
+    oid('float8'),
+    oid('double precision'),
+    oid('numeric'),
+]:
+    postgres_types[v] = float
+for v in [oid('date')]:
+    postgres_types[v] = datetime.date
+for v in [
+    oid('time'),
+    oid('time with time zone'),
+    oid('time without time zone'),
+    oid('timestamp with time zone'),
+    oid('timestamp without time zone'),
+    oid('timestamptz'),
+    oid('timetz'),
+    oid('timestamp'),
+]:
+    postgres_types[v] = datetime.datetime
+for v in [oid('bool'), oid('boolean')]:
+    postgres_types[v] = bool
+for v in [oid('bytea'), oid('jsonb')]:
+    postgres_types[v] = bytes
+postgres_types[aoid('int2vector')] = tuple
+for k in tuple(postgres_types):
+    postgres_types[aoid(k)] = tuple
 
-class TypeConverter:
-    """Universal type conversion for database parameters"""
+# SQLite type mappings
+sqlite_types = {
+    'INTEGER': int,
+    'REAL': float,
+    'TEXT': str,
+    'BLOB': bytes,
+    'NUMERIC': float,
+    'BOOLEAN': bool,
+    'DATE': datetime.date,
+    'DATETIME': datetime.datetime,
+    'TIME': datetime.time,
+}
 
-    @staticmethod
-    def convert_value(value):
-        """Single-pass type conversion"""
-        if value is None:
-            return None
-
-        # Handle numpy types efficiently
-        if isinstance(value, NUMPY_FLOAT_TYPES):
-            return None if np.isnan(value) else float(value)
-        if isinstance(value, (NUMPY_INT_TYPES + NUMPY_UINT_TYPES)):
-            return int(value)
-
-        # Handle pandas types more comprehensively
-        if pd.api.types.is_scalar(value) and pd.isna(value):
-            return None
-
-        # Handle pandas nullable types (Int64, Float64, etc.)
-        if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object'):
-            if pd.isna(value):
-                return None
-
-        # Handle normal pandas nullable types
-        if isinstance(value, PANDAS_NULLABLE_TYPES):
-            return None if pd.isna(value) else value
-
-        # Enhanced PyArrow handling
-        if hasattr(value, '_is_arrow_scalar') or isinstance(value, pa.Scalar):
-            try:
-                if pa.compute.is_null(value).as_py():
-                    return None
-                if hasattr(value, 'as_py'):
-                    return value.as_py()
-                return value.value
-            except (AttributeError, ValueError) as e:
-                # Log the error with type information
-                logger.warning(f'Failed to convert PyArrow value of type {type(value)}: {e}')
-                return None
-
-        # Handle PyArrow arrays
-        if isinstance(value, pa.Array):
-            try:
-                return value.to_pylist()
-            except Exception as e:
-                logger.warning(f'Failed to convert PyArrow array: {e}')
-                return None
-
-        # Handle PyArrow chunks
-        if isinstance(value, pa.ChunkedArray):
-            try:
-                return value.to_pylist()
-            except Exception as e:
-                logger.warning(f'Failed to convert PyArrow chunked array: {e}')
-                return None
-
-        # Handle PyArrow table columns
-        if isinstance(value, pa.Table):
-            try:
-                return value.to_pandas()
-            except Exception as e:
-                logger.warning(f'Failed to convert PyArrow table: {e}')
-                return None
-
-        return value
-
-    @staticmethod
-    def convert_params(params):
-        """Convert parameter collection"""
-        if params is None:
-            return None
-
-        if isinstance(params, dict):
-            return {k: TypeConverter.convert_value(v) for k, v in params.items()}
-
-        if isinstance(params, list | tuple):
-            return [TypeConverter.convert_value(v) for v in params]
-
-        return TypeConverter.convert_value(params)
+# SQL Server type mappings
+mssql_types = {
+    'int': int,
+    'bigint': int,
+    'smallint': int,
+    'tinyint': int,
+    'bit': bool,
+    'decimal': float,
+    'numeric': float,
+    'money': float,
+    'smallmoney': float,
+    'float': float,
+    'real': float,
+    'datetime': datetime.datetime,
+    'datetime2': datetime.datetime,
+    'smalldatetime': datetime.datetime,
+    'date': datetime.date,
+    'time': datetime.time,
+    'datetimeoffset': datetime.datetime,
+    'char': str,
+    'varchar': str,
+    'nchar': str,
+    'nvarchar': str,
+    'text': str,
+    'ntext': str,
+    'binary': bytes,
+    'varbinary': bytes,
+    'image': bytes,
+    'uniqueidentifier': str,
+    'xml': str,
+}
 
 
 # == psycopg adapters
-
 
 class CustomFloatDumper(FloatDumper):
     """Do not store NaN. Use Null"""
@@ -152,11 +164,11 @@ class NumericMixin:
         return float(data.decode())
 
 
-class CustomNumericLoader(NumericMixin, NumericLoader): pass
+class CustomNumericLoader(NumericMixin, NumericLoader):
+    pass
 
 
 # == sqlite adapter
-
 
 def adapt_numpy_float(val):
     if val is None or np.isnan(val):
@@ -217,8 +229,7 @@ def convert_datetime(val):
     return dateutil.parser.isoparse(val.decode())
 
 
-# == register
-
+# == register functions
 
 def register_psycopg_types(type_list, dumper_class):
     """Register multiple types with the same dumper for psycopg"""
@@ -324,17 +335,3 @@ def register_adapters(isolated=False):
         register_sqlite_types(NUMPY_UINT_TYPES, adapt_numpy_uint)
         register_sqlite_types(PANDAS_NULLABLE_TYPES, adapt_pandas_nullable)
         register_sqlite_types(PYARROW_NUMERIC_TYPES, adapt_pyarrow)
-
-
-def get_type_converter(cn):
-    """Get type converter for the connection's database
-
-    Args:
-        cn: Database connection
-
-    Returns
-        TypeConverter instance appropriate for the database
-    """
-    # For now all connections use the same converter
-    # In the future, this could return database-specific converter subclasses
-    return TypeConverter()

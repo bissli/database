@@ -9,7 +9,7 @@ from database.strategy import SQLServerStrategy
 
 def test_sqlserver_upsert_sql_generation(mock_sqlserver_conn):
     """Test SQL Server MERGE statement generation"""
-    from database.client import _build_upsert_sql
+    from database.operations.upsert import _build_upsert_sql
 
     sql = _build_upsert_sql(
         cn=mock_sqlserver_conn,
@@ -32,9 +32,9 @@ def test_sqlserver_upsert_with_null_preservation(mock_sqlserver_conn):
     """Test SQL Server upsert with NULL preservation"""
     # We need to patch both _get_driver_type and _prepare_rows_for_upsert to ensure
     # our mock is called in the right path
-    with patch('database.client._get_driver_type', return_value='sqlserver'), \
-         patch('database.client._prepare_rows_for_upsert', return_value=[{'id': 1, 'name': 'Test', 'nullable_field': 'new_value'}]), \
-         patch('database.client._upsert_sqlserver_with_nulls', return_value=1) as mock_upsert:
+    with patch('database.operations.upsert._get_driver_type', return_value='sqlserver'), \
+         patch('database.operations.upsert._prepare_rows_for_upsert', return_value=[{'id': 1, 'name': 'Test', 'nullable_field': 'new_value'}]), \
+         patch('database.operations.upsert._upsert_sqlserver_with_nulls', return_value=1) as mock_upsert:
 
         # Set up test data
         rows = [{'id': 1, 'name': 'Test', 'nullable_field': 'new_value'}]
@@ -63,10 +63,10 @@ def test_sqlserver_upsert_with_null_preservation(mock_sqlserver_conn):
         )
 
 
-@patch('database.client._fetch_existing_rows')
+@patch('database.operations.upsert._fetch_existing_rows')
 def test_sqlserver_null_preserving_logic(mock_fetch_rows, mock_sqlserver_conn):
     """Test SQL Server-specific NULL preservation logic"""
-    from database.client import _upsert_sqlserver_with_nulls
+    from database.operations.upsert import _upsert_sqlserver_with_nulls
 
     # Mock existing rows with a non-null value
     mock_fetch_rows.return_value = {
@@ -77,7 +77,7 @@ def test_sqlserver_null_preserving_logic(mock_fetch_rows, mock_sqlserver_conn):
     rows = [{'id': 1, 'name': 'Updated', 'nullable_field': 'new_value'}]
 
     # Call the function
-    with patch('database.client._build_upsert_sql') as mock_build_sql, \
+    with patch('database.operations.upsert._build_upsert_sql') as mock_build_sql, \
     patch.object(mock_sqlserver_conn, 'execute'):
 
         mock_build_sql.return_value = 'MERGE SQL'
