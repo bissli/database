@@ -280,9 +280,24 @@ def handle_query_params(func):
     def wrapper(cn, sql, *args, **kwargs):
         # Standardize placeholders based on connection type
         if is_psycopg_connection(cn) or is_pymssql_connection(cn):
-            sql = sql.replace('?', '%s')
+            # Only replace ? that are actual parameter placeholders
+            # This pattern finds ? that aren't part of regex operators or other contexts
+            # Look for ? that:
+            # - is surrounded by spaces, or
+            # - is at the beginning of a clause, or
+            # - is after a comma or parenthesis, or
+            # - is at the end of a string, clause, or parenthesis
+            sql = re.sub(r'(\s\?\s|\(\?\)|\s\?$|\s\?\)|\s\?,|\(\?,)',
+                         lambda m: m.group().replace('?', '%s'),
+                         ' ' + sql + ' ')
+            # Remove the padding we added
+            sql = sql.strip()
         elif is_sqlite3_connection(cn):
-            sql = sql.replace('%s', '?')
+            # Same careful replacement for SQLite, converting %s to ?
+            sql = re.sub(r'(\s%s\s|\(%s\)|\s%s$|\s%s\)|\s%s,|\(%s,)',
+                         lambda m: m.group().replace('%s', '?'),
+                         ' ' + sql + ' ')
+            sql = sql.strip()
 
         # Convert parameters for pymssql if needed
         if is_pymssql_connection(cn) and args:
