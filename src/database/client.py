@@ -306,18 +306,70 @@ def standardize_placeholders(cn, sql):
     return sql
 
 
+def handle_in_clause_params(sql, args):
+    """
+    Expand list/tuple parameters for IN clauses across different database drivers
+
+    For SQL like: "WHERE x IN %s" and args like [('A', 'B', 'C')]
+    converts to: "WHERE x IN (%s, %s, %s)" and args ['A', 'B', 'C']
+    """
+    if not args or not sql or ' in ' not in sql.lower():
+        return sql, args
+
+    modified_sql = sql
+    modified_args = list(args)
+
+    # Find "IN %s" patterns in SQL
+    pattern = re.compile(r'\bIN\s+(%s)\b', re.IGNORECASE)
+    matches = list(pattern.finditer(sql))
+
+    # Process matches in reverse to avoid position shifts
+    for match in reversed(matches):
+        placeholder_pos = match.start(1)
+        param_index = sql[:placeholder_pos].count('%s')
+
+        if param_index < len(args):
+            param = args[param_index]
+
+            # Check if parameter is a sequence (but not string/bytes)
+            if isinstance(param, Sequence) and not isinstance(param, str | bytes):
+                if not param:  # Empty sequence
+                    # Replace with something that will always be false
+                    repl = 'in (null)'
+                    modified_sql = modified_sql[:match.start(0)] + repl + modified_sql[match.end(0):]
+                    # Remove this parameter
+                    modified_args.pop(param_index)
+                else:
+                    # Create the correct number of placeholders
+                    placeholders = ', '.join(['%s'] * len(param))
+                    repl = f'in ({placeholders})'
+                    modified_sql = modified_sql[:match.start(0)] + repl + modified_sql[match.end(0):]
+
+                    # Remove the original param and insert expanded values
+                    modified_args.pop(param_index)
+                    for i, val in enumerate(param):
+                        modified_args.insert(param_index + i, val)
+
+    return modified_sql, tuple(modified_args)
+
+
 def handle_query_params(func):
     """Decorator that standardizes SQL parameter handling:
     - Converts placeholders between ? and %s based on database type
+    - Handles IN clause parameters with lists/tuples
     """
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
         # Standardize placeholders
-        # sql = standardize_placeholders(cn, sql) # comment out for now
+        sql = standardize_placeholders(cn, sql)
 
-        # Convert parameters for pymssql if needed
-        if is_pymssql_connection(cn) and args:
-            args = TypeConverter.convert_params(args)
+        if args:
+            # Expand IN clause parameters
+            sql, args = handle_in_clause_params(sql, args)
+
+            # Convert parameters for pymssql if needed
+            if is_pymssql_connection(cn):
+                args = TypeConverter.convert_params(args)
 
         # No parameters provided
         if not args:
