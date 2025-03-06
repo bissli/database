@@ -14,6 +14,7 @@ import cachetools
 import pandas as pd
 import psycopg
 import pymssql
+from database.adapter import DatabaseRowAdapter
 from database.adapters import TypeConverter, register_adapters
 from database.options import DatabaseOptions, iterdict_data_loader
 from database.strategy import get_db_strategy
@@ -52,6 +53,7 @@ __all__ = [
     'reset_table_sequence',
     'vacuum_table',
     'reindex_table',
+    'cluster_table',
     'IntegrityError',
     'ProgrammingError',
     'OperationalError',
@@ -240,12 +242,12 @@ def check_connection(func=None, *, max_retries=3, retry_delay=1,
         def inner(*args, **kwargs):
             tries = 0
             delay = retry_delay
-            while True:
+            while tries < max_retries:
                 try:
                     return f(*args, **kwargs)
                 except retry_errors as err:
                     tries += 1
-                    if tries > max_retries:
+                    if tries >= max_retries:
                         logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
                         raise
 
@@ -383,24 +385,48 @@ def handle_query_params(func):
 
 
 def is_psycopg_connection(obj):
-    """Check if object is a psycopg connection or wrapper containing one."""
-    if hasattr(obj, 'connection'):
+    """Check if object is a psycopg connection or wrapper containing one.
+    """
+    if isinstance(obj, ConnectionWrapper) or (hasattr(obj, 'connection') and not isinstance(obj, transaction)):
         obj = obj.connection
-    return isinstance(obj, psycopg.Connection)
+
+    if isinstance(obj, transaction):
+        obj = obj.connection.connection if hasattr(obj.connection, 'connection') else obj.connection
+
+    if isinstance(obj, psycopg.Connection):
+        return True
+
+    return bool(hasattr(obj, '_spec_class') and obj._spec_class == psycopg.Connection)
 
 
 def is_pymssql_connection(obj):
-    """Check if object is a pymssql connection or wrapper containing one."""
-    if hasattr(obj, 'connection'):
+    """Check if object is a pymssql connection or wrapper containing one.
+    """
+    if isinstance(obj, ConnectionWrapper) or (hasattr(obj, 'connection') and not isinstance(obj, transaction)):
         obj = obj.connection
-    return isinstance(obj, pymssql.Connection)
+
+    if isinstance(obj, transaction):
+        obj = obj.connection.connection if hasattr(obj.connection, 'connection') else obj.connection
+
+    if isinstance(obj, pymssql.Connection):
+        return True
+
+    return bool(hasattr(obj, '_spec_class') and obj._spec_class == pymssql.Connection)
 
 
 def is_sqlite3_connection(obj):
-    """Check if object is a sqlite3 connection or wrapper containing one."""
-    if hasattr(obj, 'connection'):
+    """Check if object is a sqlite3 connection or wrapper containing one.
+    """
+    if isinstance(obj, ConnectionWrapper) or (hasattr(obj, 'connection') and not isinstance(obj, transaction)):
         obj = obj.connection
-    return isinstance(obj, sqlite3.Connection)
+
+    if isinstance(obj, transaction):
+        obj = obj.connection.connection if hasattr(obj.connection, 'connection') else obj.connection
+
+    if isinstance(obj, sqlite3.Connection):
+        return True
+
+    return bool(hasattr(obj, '_spec_class') and obj._spec_class == sqlite3.Connection)
 
 
 def isconnection(obj):
@@ -508,9 +534,43 @@ def sanitize_sql_for_logging(sql, args=None):
     # Copy the SQL for sanitization
     sanitized_sql = sql
 
+    # Define sanitization helper function inside the main function
+    def _sanitize_values_clause(match, sensitive_pattern):
+        values_start = match.group(1)
+        values_content = match.group(2)
+        values_end = match.group(3)
+
+        # Find column names from INSERT INTO ... (col1, col2, ...) part
+        full_sql = sanitized_sql
+        columns_match = re.search(r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)', full_sql, re.IGNORECASE)
+
+        if columns_match:
+            columns = [col.strip() for col in columns_match.group(1).split(',')]
+            values = [val.strip() for val in values_content.split(',')]
+
+            # If we have correct number of columns and values
+            if len(columns) == len(values):
+                for i, col in enumerate(columns):
+                    # Check if column matches sensitive pattern
+                    if re.search(sensitive_pattern, col, re.IGNORECASE) and i < len(values):
+                        values[i] = "'***'"
+
+                return values_start + ', '.join(values) + values_end
+
+        return match.group(0)
+
     # Mask sensitive data in the SQL itself
     for pattern in sensitive_patterns:
-        # Find value sections that match our sensitive patterns
+        # Find values in INSERT statements - handles VALUES ('value1', 'sensitive_value')
+        insert_pattern = r'(VALUES\s*\()([^)]+)(\))'
+        sanitized_sql = re.sub(
+            insert_pattern,
+            lambda m: _sanitize_values_clause(m, pattern),
+            sanitized_sql,
+            flags=re.IGNORECASE
+        )
+
+        # Find value sections that match our sensitive patterns for other statements
         matches = re.finditer(pattern, sanitized_sql, re.IGNORECASE)
         for match in matches:
             # Look for patterns like "password = '...'" or "password = %s"
@@ -523,6 +583,32 @@ def sanitize_sql_for_logging(sql, args=None):
                 sanitized_sql
             )
 
+    def _sanitize_values_clause(match, sensitive_pattern):
+        """Helper function to sanitize VALUES clause
+        """
+        values_start = match.group(1)
+        values_content = match.group(2)
+        values_end = match.group(3)
+
+        # Find column names from INSERT INTO ... (col1, col2, ...) part
+        full_sql = sanitized_sql
+        columns_match = re.search(r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)', full_sql, re.IGNORECASE)
+
+        if columns_match:
+            columns = [col.strip() for col in columns_match.group(1).split(',')]
+            values = [val.strip() for val in values_content.split(',')]
+
+            # If we have correct number of columns and values
+            if len(columns) == len(values):
+                for i, col in enumerate(columns):
+                    # Check if column matches sensitive pattern
+                    if re.search(sensitive_pattern, col, re.IGNORECASE) and i < len(values):
+                        values[i] = "'***'"
+
+                return values_start + ', '.join(values) + values_end
+
+        return match.group(0)
+
     # Sanitize arguments if provided
     sanitized_args = None
     if args:
@@ -530,6 +616,17 @@ def sanitize_sql_for_logging(sql, args=None):
             sanitized_args = list(args)
             # Find parameter positions that might be sensitive
             for pattern in sensitive_patterns:
+                # For each column in INSERT statements
+                columns_match = re.search(r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)', sql, re.IGNORECASE)
+                if columns_match:
+                    columns = [col.strip() for col in columns_match.group(1).split(',')]
+                    # Find any columns that match sensitive patterns
+                    for i, col in enumerate(columns):
+                        if re.search(pattern, col, re.IGNORECASE) and i < len(sanitized_args):
+                            if sanitized_args[i] is not None:
+                                sanitized_args[i] = '***'
+
+                # For standard parameter positions
                 param_positions = []
                 for match in re.finditer(pattern + r'\s*=\s*(%s)', sql, re.IGNORECASE):
                     # Count placeholders before this one
@@ -586,7 +683,7 @@ class LoggingCursor(ClientCursor):
 class ConnectionPool:
     """Simple database connection pool implementation"""
 
-    def __init__(self, options, max_connections=5, max_idle_time=300):
+    def __init__(self, options, config=None, max_connections=5, max_idle_time=300):
         """Initialize a connection pool
 
         Args:
@@ -832,11 +929,21 @@ def _dict_cur(cn: ConnectionWrapper):
 def load_data(cursor, **kwargs) -> pd.DataFrame:
     """Data loader callable (IE into DataFrame)
     """
+    # Extract column names based on database type
     if is_psycopg_connection(cursor.connwrapper):
         cols = [c.name for c in (cursor.description or [])]
-    if is_pymssql_connection(cursor.connwrapper) or is_sqlite3_connection(cursor.connwrapper):
+    elif is_pymssql_connection(cursor.connwrapper) or is_sqlite3_connection(cursor.connwrapper):
         cols = [c[0] for c in (cursor.description or [])]
-    data = cursor.fetchall()  # iterdict (dictcursor)
+    data = cursor.fetchall()  # Get raw data
+
+    # Convert all database-specific row types to a consistent format
+    adapted_data = []
+    for row in data:
+        adapter = DatabaseRowAdapter.create(cursor.connwrapper, row)
+        adapted_data.append(adapter.to_dict())
+    data = adapted_data
+
+    # Use the configured data loader
     data_loader = cursor.connwrapper.options.data_loader
     return data_loader(data, cols, **kwargs)
 
@@ -859,7 +966,7 @@ def use_iterdict_data_loader(func):
 @use_iterdict_data_loader
 def select_column(cn, sql, *args) -> list:
     data = select(cn, sql, *args)
-    return [row[tuple(row.keys())[0]] for row in data]
+    return [DatabaseRowAdapter.create(cn, row).get_value() for row in data]
 
 
 def select_column_unique(cn, sql, *args) -> set:
@@ -870,14 +977,14 @@ def select_column_unique(cn, sql, *args) -> set:
 def select_row(cn, sql, *args) -> attrdict:
     data = select(cn, sql, *args)
     assert len(data) == 1, 'Expected one row, got %d' % len(data)
-    return attrdict(data[0])
+    return DatabaseRowAdapter.create(cn, data[0]).to_attrdict()
 
 
 @use_iterdict_data_loader
 def select_row_or_none(cn, sql, *args) -> attrdict | None:
     data = select(cn, sql, *args)
     if len(data) == 1:
-        return attrdict(data[0])
+        return DatabaseRowAdapter.create(cn, data[0]).to_attrdict()
     return None
 
 
@@ -885,14 +992,17 @@ def select_row_or_none(cn, sql, *args) -> attrdict | None:
 def select_scalar(cn, sql, *args):
     data = select(cn, sql, *args)
     assert len(data) == 1, 'Expected one col, got %d' % len(data)
-    return tuple(data[0].values())[0]
+    return DatabaseRowAdapter.create(cn, data[0]).get_value()
 
 
 def select_scalar_or_none(cn, sql, *args):
-    val = select_scalar(cn, sql, *args)
-    if not is_null(val):
-        return val
-    return None
+    try:
+        val = select_scalar(cn, sql, *args)
+        if not is_null(val):
+            return val
+        return None
+    except AssertionError:
+        return None
 
 
 def execute_with_context(cn, sql, *args, **kwargs):
@@ -911,10 +1021,17 @@ def execute_with_context(cn, sql, *args, **kwargs):
 @dumpsql
 def execute(cn, sql, *args):
     cursor = cn.cursor()
-    cursor.execute(sql, args)
-    rowcount = cursor.rowcount
-    cn.commit()
-    return rowcount
+    try:
+        cursor.execute(sql, args)
+        rowcount = cursor.rowcount
+        cn.commit()
+        return rowcount
+    except Exception as e:
+        try:
+            cn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 insert = update = delete = execute
@@ -1246,8 +1363,9 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
             # Fetch all matching rows at once
             result = select(tx_or_cn, sql, *params)
             for row in result:
-                row_key = tuple(row[key] for key in key_cols)
-                existing_rows[row_key] = row
+                adapter = DatabaseRowAdapter.create(tx_or_cn, row)
+                row_key = tuple(adapter.get_value(key) for key in key_cols)
+                existing_rows[row_key] = adapter.to_dict()
     else:
         # Too many keys, fetch rows individually
         for row in rows:
@@ -1281,7 +1399,7 @@ def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
             if existing_row:
                 # Apply update_cols_ifnull logic manually
                 for col in update_ifnull:
-                    if not is_null(existing_row.get(col)):
+                    if col in existing_row and not is_null(existing_row.get(col)):
                         # Keep existing non-NULL value
                         row[col] = existing_row.get(col)
 
@@ -1291,16 +1409,18 @@ def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
             table=table,
             columns=columns,
             key_columns=key_cols,
-            update_always=update_always + update_ifnull,  # Handle all columns the same now
-            update_if_null=[],  # No special NULL handling needed anymore
+            update_always=update_always,  # Only handle "always update" columns
+            update_if_null=[],  # No special NULL handling needed anymore since we modified the rows
             driver=driver
         )
 
-        ordered_values = []
+        # For each row, convert values to ordered list for SQL parameters
+        row_count = 0
         for row in rows:
-            ordered_values.extend([row[col] for col in columns])
+            ordered_values = [row[col] for col in columns]
+            row_count += tx.execute(sql, *ordered_values)
 
-        return tx.execute(sql, *ordered_values)
+        return row_count
 
 
 def upsert_rows(
@@ -1358,9 +1478,10 @@ def upsert_rows(
     try:
         # Handle the specific database driver
         if driver == 'sqlserver' and update_cols_ifnull:
-            rc = _upsert_sqlserver_with_nulls(cn, table, rows, columns,
-                                              update_cols_key, update_cols_always,
-                                              update_cols_ifnull)
+            # For SQL Server with NULL preservation, use specialized function
+            return _upsert_sqlserver_with_nulls(cn, table, rows, columns,
+                                                update_cols_key, update_cols_always,
+                                                update_cols_ifnull)
         else:
             # Standard approach for PostgreSQL, SQLite and simple SQL Server cases
             rc = _execute_standard_upsert(cn, table, rows, columns,

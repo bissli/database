@@ -55,32 +55,49 @@ class PostgresStrategy(DatabaseStrategy):
     def vacuum_table(self, cn, table):
         """Optimize a table with VACUUM"""
         from . import client
-        cn.connection.set_session(autocommit=True)
-        quoted_table = self.quote_identifier(table)
-        client.execute(cn, f'vacuum (full, analyze) {quoted_table}')
-        cn.connection.set_session(autocommit=False)
+        # Save current autocommit state
+        original_autocommit = cn.connection.autocommit
+        try:
+            # Set autocommit to True for VACUUM
+            cn.connection.autocommit = True
+            quoted_table = self.quote_identifier(table)
+            client.execute(cn, f'vacuum (full, analyze) {quoted_table}')
+        finally:
+            # Restore original autocommit state
+            cn.connection.autocommit = original_autocommit
 
     def reindex_table(self, cn, table):
         """Rebuild indexes for a table"""
         from . import client
-        cn.connection.set_session(autocommit=True)
-        quoted_table = self.quote_identifier(table)
-        client.execute(cn, f'reindex table {quoted_table}')
-        cn.connection.set_session(autocommit=False)
+        # Save current autocommit state
+        original_autocommit = cn.connection.autocommit
+        try:
+            # Set autocommit to True for REINDEX
+            cn.connection.autocommit = True
+            quoted_table = self.quote_identifier(table)
+            client.execute(cn, f'reindex table {quoted_table}')
+        finally:
+            # Restore original autocommit state
+            cn.connection.autocommit = original_autocommit
 
     def cluster_table(self, cn, table, index=None):
         """Order table data according to an index"""
         from . import client
-        cn.connection.set_session(autocommit=True)
-        quoted_table = self.quote_identifier(table)
+        # Save current autocommit state
+        original_autocommit = cn.connection.autocommit
+        try:
+            # Set autocommit to True for CLUSTER
+            cn.connection.autocommit = True
+            quoted_table = self.quote_identifier(table)
 
-        if index is None:
-            client.execute(cn, f'cluster {quoted_table}')
-        else:
-            quoted_index = self.quote_identifier(index)
-            client.execute(cn, f'cluster {quoted_table} using {quoted_index}')
-
-        cn.connection.set_session(autocommit=False)
+            if index is None:
+                client.execute(cn, f'cluster {quoted_table}')
+            else:
+                quoted_index = self.quote_identifier(index)
+                client.execute(cn, f'cluster {quoted_table} using {quoted_index}')
+        finally:
+            # Restore original autocommit state
+            cn.connection.autocommit = original_autocommit
 
     def reset_sequence(self, cn, table, identity=None):
         """Reset the sequence for a table"""
@@ -209,10 +226,11 @@ class SQLiteStrategy(DatabaseStrategy):
     def get_primary_keys(self, cn, table):
         """Get primary key columns for a table"""
         from . import client
-        sql = """
-select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
+        # SQLite pragmas don't use parameter binding
+        sql = f"""
+select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
 """
-        return client.select_column(cn, sql, table)
+        return client.select_column(cn, sql)
 
     def get_columns(self, cn, table):
         """Get all columns for a table"""

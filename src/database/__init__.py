@@ -1,5 +1,6 @@
 from database.client import *
 from database.options import DatabaseOptions
+from database.adapter import DatabaseRowAdapter, ResultSetAdapter
 
 __all__ = [
     # client
@@ -29,8 +30,12 @@ __all__ = [
     'reset_table_sequence',
     'vacuum_table',
     'reindex_table',
+    'cluster_table',
     # options
     'DatabaseOptions',
+    # adapters
+    'DatabaseRowAdapter',
+    'ResultSetAdapter',
     # exceptions
     'IntegrityError',
     'ProgrammingError',
