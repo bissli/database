@@ -15,8 +15,8 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
-from database.database_strategy import get_db_strategy
 from database.options import DatabaseOptions, iterdict_data_loader
+from database.strategy import get_db_strategy
 from more_itertools import flatten
 from psycopg import ClientCursor
 from psycopg.postgres import types
