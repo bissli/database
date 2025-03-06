@@ -503,56 +503,6 @@ def dumpsql(func):
     return wrapper
 
 
-def paginate_query(cn, sql, order_by, offset=0, limit=100):
-    """Add pagination to a SQL query based on database type
-
-    Args:
-        cn: Database connection
-        sql: SQL query to paginate
-        order_by: Column(s) to order by
-        offset: Number of rows to skip
-        limit: Maximum number of rows to return
-
-    Returns
-        Paginated SQL query string
-    """
-    if is_psycopg_connection(cn) or is_sqlite3_connection(cn):
-        return _page_pgsql(sql, order_by, offset, limit)
-    elif is_pymssql_connection(cn):
-        return _page_mssql(sql, order_by, offset, limit)
-    else:
-        raise ValueError(f'Unsupported connection type: {type(cn)}')
-
-
-def _page_mssql(sql, order_by, offset, limit):
-    """Wrap a MSSQL stmt in sql server windowing notation, strip existing order by"""
-    if isiterable(order_by):
-        order_by = ','.join(order_by)
-    match = re.search('order by', sql, re.IGNORECASE)
-    if match:
-        sql = sql[: match.start()]
-    logger.info(f'Paged MSSQL statement with {order_by} {offset} {limit}')
-    return f"""
-{sql}
-ORDER BY {order_by}
-OFFSET {offset} ROWS
-FETCH NEXT {limit} ROWS ONLY"""
-
-
-def _page_pgsql(sql, order_by, offset, limit):
-    """Wrap a Postgres SQL stmt in sql server windowing notation, strip existing order by"""
-    if isiterable(order_by):
-        order_by = ','.join(order_by)
-    match = re.search('order by', sql, re.IGNORECASE)
-    if match:
-        sql = sql[: match.start()]
-    logger.info(f'Paged Postgres statement with {order_by} {offset} {limit}')
-    return f"""
-{sql}
-ORDER BY {order_by}
-LIMIT {limit} OFFSET {offset}"""
-
-
 class LoggingCursor(ClientCursor):
     """See https://github.com/psycopg/psycopg/discussions/153 if
     considering replacing raw connections with SQLAlchemy
@@ -641,8 +591,15 @@ class ConnectionPool:
 
 
 @load_options(cls=DatabaseOptions)
-def connect(options: str | dict | DatabaseOptions | None, config=None, use_pool=False,
-            pool_max_connections=5, pool_max_idle_time=300, isolated_adapters=False, **kw):
+def connect(
+    options: str | dict | DatabaseOptions | None,
+    config=None,
+    use_pool=False,
+    pool_max_connections=5,
+    pool_max_idle_time=300,
+    isolated_adapters=False,
+    **kw
+):
     """Database connection wrapper
 
     Use config.py to specify database
@@ -745,25 +702,18 @@ def IterChunk(cursor, size=5000):
 @check_connection
 @handle_query_params
 @dumpsql
-def select(cn, sql, *args, order_by=None, offset=None, limit=None, **kwargs) -> pd.DataFrame:
-    """Execute a SELECT query with optional pagination
+def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
+    """Execute a SELECT query
 
     Args:
         cn: Database connection
         sql: SQL query string
         *args: Query parameters
-        order_by: Column(s) to order by for pagination
-        offset: Number of rows to skip
-        limit: Maximum number of rows to return
         **kwargs: Additional options passed to data loader
 
     Returns
         Result data as a pandas DataFrame
     """
-    # Apply pagination if all required parameters are provided
-    if order_by is not None and offset is not None and limit is not None:
-        sql = paginate_query(cn, sql, order_by, offset, limit)
-
     cursor = _dict_cur(cn)  # cn is already a ConnectionWrapper
     cursor.execute(sql, args)
     return load_data(cursor, **kwargs)
