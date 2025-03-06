@@ -1,4 +1,5 @@
 import datetime
+import logging
 import sqlite3
 
 import dateutil
@@ -8,6 +9,8 @@ import psycopg
 import pyarrow as pa
 from psycopg.adapt import Dumper
 from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
+
+logger = logging.getLogger(__name__)
 
 __all__ = ['register_adapters', 'TypeConverter']
 
@@ -38,21 +41,55 @@ class TypeConverter:
         if isinstance(value, (NUMPY_INT_TYPES + NUMPY_UINT_TYPES)):
             return int(value)
 
-        # Handle pandas nullable types
+        # Handle pandas types more comprehensively
+        if pd.api.types.is_scalar(value) and pd.isna(value):
+            return None
+
+        # Handle pandas nullable types (Int64, Float64, etc.)
+        if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object'):
+            if pd.isna(value):
+                return None
+
+        # Handle normal pandas nullable types
         if isinstance(value, PANDAS_NULLABLE_TYPES):
             return None if pd.isna(value) else value
 
-        # Handle pyarrow types
-        if isinstance(value, PYARROW_NUMERIC_TYPES):
-            if pa.compute.is_null(value).as_py():
-                return None
-            if hasattr(value, 'as_py'):
-                return value.as_py()
-            if isinstance(value, pa.Scalar):  # Handle scalar values
+        # Enhanced PyArrow handling
+        if hasattr(value, '_is_arrow_scalar') or isinstance(value, pa.Scalar):
+            try:
+                if pa.compute.is_null(value).as_py():
+                    return None
+                if hasattr(value, 'as_py'):
+                    return value.as_py()
                 return value.value
-            if isinstance(value, pa.Array):   # Handle array values
+            except (AttributeError, ValueError) as e:
+                # Log the error with type information
+                logger.warning(f'Failed to convert PyArrow value of type {type(value)}: {e}')
+                return None
+
+        # Handle PyArrow arrays
+        if isinstance(value, pa.Array):
+            try:
                 return value.to_pylist()
-            raise ValueError(f'Unsupported PyArrow type: {type(value)}')
+            except Exception as e:
+                logger.warning(f'Failed to convert PyArrow array: {e}')
+                return None
+
+        # Handle PyArrow chunks
+        if isinstance(value, pa.ChunkedArray):
+            try:
+                return value.to_pylist()
+            except Exception as e:
+                logger.warning(f'Failed to convert PyArrow chunked array: {e}')
+                return None
+
+        # Handle PyArrow table columns
+        if isinstance(value, pa.Table):
+            try:
+                return value.to_pandas()
+            except Exception as e:
+                logger.warning(f'Failed to convert PyArrow table: {e}')
+                return None
 
         return value
 
@@ -195,28 +232,109 @@ def register_sqlite_types(type_list, adapter_func):
         sqlite3.register_adapter(dtype, adapter_func)
 
 
-def register_adapters():
-    """Register only the necessary adapters for each database type"""
-    # PostgreSQL adapters
-    psycopg.adapters.register_dumper(Float8, CustomFloatDumper)
-    psycopg.adapters.register_loader('numeric', CustomNumericLoader)
+def register_adapters(isolated=False):
+    """Register adapters for database connections
 
-    # Register NumPy and Pandas types for PostgreSQL
-    register_psycopg_types(NUMPY_FLOAT_TYPES, NumpyFloatDumper)
-    register_psycopg_types(NUMPY_INT_TYPES, NumPyIntDumper)
-    register_psycopg_types(NUMPY_UINT_TYPES, NumPyIntDumper)
-    register_psycopg_types(PANDAS_NULLABLE_TYPES, PandasNullableDumper)
-    register_psycopg_types(PYARROW_NUMERIC_TYPES, PyArrowDumper)
+    Args:
+        isolated: If True, returns adapter mappings instead of registering globally
 
-    # Register datetime types for SQLite
-    sqlite3.register_adapter(datetime.date, adapt_date_iso)
-    sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
-    sqlite3.register_converter('date', convert_date)
-    sqlite3.register_converter('datetime', convert_datetime)
+    Returns
+        If isolated=True, returns a dict of database-specific adapter maps
+        Otherwise, registers adapters globally and returns None
+    """
+    if isolated:
+        # Create isolated adapter maps for each driver
+        postgres_adapters = psycopg.adapt.AdaptersMap()
 
-    # Register NumPy and Pandas types for SQLite
-    register_sqlite_types(NUMPY_FLOAT_TYPES, adapt_numpy_float)
-    register_sqlite_types(NUMPY_INT_TYPES, adapt_numpy_int)
-    register_sqlite_types(NUMPY_UINT_TYPES, adapt_numpy_uint)
-    register_sqlite_types(PANDAS_NULLABLE_TYPES, adapt_pandas_nullable)
-    register_sqlite_types(PYARROW_NUMERIC_TYPES, adapt_pyarrow)
+        # Register PostgreSQL adapters to isolated map
+        postgres_adapters.register_dumper(Float8, CustomFloatDumper)
+        postgres_adapters.register_loader('numeric', CustomNumericLoader)
+
+        for dtype in NUMPY_FLOAT_TYPES:
+            postgres_adapters.register_dumper(dtype, NumpyFloatDumper)
+
+        for dtype in NUMPY_INT_TYPES + NUMPY_UINT_TYPES:
+            postgres_adapters.register_dumper(dtype, NumPyIntDumper)
+
+        for dtype in PANDAS_NULLABLE_TYPES:
+            postgres_adapters.register_dumper(dtype, PandasNullableDumper)
+
+        for dtype in PYARROW_NUMERIC_TYPES:
+            postgres_adapters.register_dumper(dtype, PyArrowDumper)
+
+        # For SQLite and SQL Server, we don't have adapter maps but
+        # we can prepare functions to register them individually
+
+        def register_sqlite_adapters(connection):
+            """Register adapters for a specific SQLite connection"""
+            # Register datetime types
+            connection.execute('SELECT 1')  # Force connection to be made
+
+            # These are actually registered globally, but SQLite doesn't
+            # support per-connection registration
+            sqlite3.register_adapter(datetime.date, adapt_date_iso)
+            sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+            sqlite3.register_converter('date', convert_date)
+            sqlite3.register_converter('datetime', convert_datetime)
+
+            # Register NumPy and Pandas types
+            for dtype in NUMPY_FLOAT_TYPES:
+                sqlite3.register_adapter(dtype, adapt_numpy_float)
+
+            for dtype in NUMPY_INT_TYPES:
+                sqlite3.register_adapter(dtype, adapt_numpy_int)
+
+            for dtype in NUMPY_UINT_TYPES:
+                sqlite3.register_adapter(dtype, adapt_numpy_uint)
+
+            for dtype in PANDAS_NULLABLE_TYPES:
+                sqlite3.register_adapter(dtype, adapt_pandas_nullable)
+
+            for dtype in PYARROW_NUMERIC_TYPES:
+                sqlite3.register_adapter(dtype, adapt_pyarrow)
+
+        # Return the isolated adapter maps
+        return {
+            'postgres': postgres_adapters,
+            'sqlite': register_sqlite_adapters,
+            'sqlserver': None  # SQL Server doesn't need adapter registration
+        }
+    else:
+        # Legacy global registration
+        # PostgreSQL adapters
+        psycopg.adapters.register_dumper(Float8, CustomFloatDumper)
+        psycopg.adapters.register_loader('numeric', CustomNumericLoader)
+
+        # Register NumPy and Pandas types for PostgreSQL
+        register_psycopg_types(NUMPY_FLOAT_TYPES, NumpyFloatDumper)
+        register_psycopg_types(NUMPY_INT_TYPES, NumPyIntDumper)
+        register_psycopg_types(NUMPY_UINT_TYPES, NumPyIntDumper)
+        register_psycopg_types(PANDAS_NULLABLE_TYPES, PandasNullableDumper)
+        register_psycopg_types(PYARROW_NUMERIC_TYPES, PyArrowDumper)
+
+        # Register datetime types for SQLite
+        sqlite3.register_adapter(datetime.date, adapt_date_iso)
+        sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+        sqlite3.register_converter('date', convert_date)
+        sqlite3.register_converter('datetime', convert_datetime)
+
+        # Register NumPy and Pandas types for SQLite
+        register_sqlite_types(NUMPY_FLOAT_TYPES, adapt_numpy_float)
+        register_sqlite_types(NUMPY_INT_TYPES, adapt_numpy_int)
+        register_sqlite_types(NUMPY_UINT_TYPES, adapt_numpy_uint)
+        register_sqlite_types(PANDAS_NULLABLE_TYPES, adapt_pandas_nullable)
+        register_sqlite_types(PYARROW_NUMERIC_TYPES, adapt_pyarrow)
+
+
+def get_type_converter(cn):
+    """Get type converter for the connection's database
+
+    Args:
+        cn: Database connection
+
+    Returns
+        TypeConverter instance appropriate for the database
+    """
+    # For now all connections use the same converter
+    # In the future, this could return database-specific converter subclasses
+    return TypeConverter()

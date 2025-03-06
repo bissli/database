@@ -38,6 +38,9 @@ def psql_docker():
 
 
 def stage_test_data(cn):
+    # Install hstore extension
+    db.execute(cn, 'CREATE EXTENSION IF NOT EXISTS hstore')
+
     drop_table_if_exists = 'drop table if exists test_table'
     db.execute(cn, drop_table_if_exists)
 

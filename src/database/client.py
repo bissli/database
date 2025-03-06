@@ -15,6 +15,7 @@ import pandas as pd
 import psycopg
 import pymssql
 from database.adapters import TypeConverter, register_adapters
+from database.database_strategy import get_db_strategy
 from database.options import DatabaseOptions, iterdict_data_loader
 from more_itertools import flatten
 from psycopg import ClientCursor
@@ -61,9 +62,9 @@ __all__ = [
 register_adapters()
 
 
-# == psycopg type mapping
+# == database type mappings
 
-
+# PostgreSQL type mapping
 oid = lambda x: types.get(x).oid
 aoid = lambda x: types.get(x).array_oid
 
@@ -116,8 +117,75 @@ postgres_types[aoid('int2vector')] = tuple
 for k in tuple(postgres_types):
     postgres_types[aoid(k)] = tuple
 
+# SQLite type mappings
+sqlite_types = {
+    'INTEGER': int,
+    'REAL': float,
+    'TEXT': str,
+    'BLOB': bytes,
+    'NUMERIC': float,
+    'BOOLEAN': bool,
+    'DATE': datetime.date,
+    'DATETIME': datetime.datetime,
+    'TIME': datetime.time,
+}
 
-# == defined errors
+# SQL Server type mappings
+mssql_types = {
+    'int': int,
+    'bigint': int,
+    'smallint': int,
+    'tinyint': int,
+    'bit': bool,
+    'decimal': float,
+    'numeric': float,
+    'money': float,
+    'smallmoney': float,
+    'float': float,
+    'real': float,
+    'datetime': datetime.datetime,
+    'datetime2': datetime.datetime,
+    'smalldatetime': datetime.datetime,
+    'date': datetime.date,
+    'time': datetime.time,
+    'datetimeoffset': datetime.datetime,
+    'char': str,
+    'varchar': str,
+    'nchar': str,
+    'nvarchar': str,
+    'text': str,
+    'ntext': str,
+    'binary': bytes,
+    'varbinary': bytes,
+    'image': bytes,
+    'uniqueidentifier': str,
+    'xml': str,
+}
+
+
+# == custom exceptions
+
+class DatabaseError(Exception):
+    """Base class for all database module errors"""
+
+
+class ConnectionError(DatabaseError):
+    """Error establishing or maintaining database connection"""
+
+
+class QueryError(DatabaseError):
+    """Error in query syntax or execution"""
+
+
+class TypeConversionError(DatabaseError):
+    """Error converting types between Python and database"""
+
+
+class IntegrityViolationError(DatabaseError):
+    """Database constraint violation error"""
+
+
+# == defined errors (for compatibility)
 
 DbConnectionError = (
     psycopg.OperationalError,    # Connection/timeout issues
@@ -126,11 +194,13 @@ DbConnectionError = (
     pymssql.InterfaceError,      # SQL Server interface issues
     sqlite3.OperationalError,    # SQLite connection issues
     sqlite3.InterfaceError,      # SQLite interface issues
+    ConnectionError,             # Our custom exception
 )
 IntegrityError = (
     psycopg.IntegrityError,      # Postgres constraint violations
     pymssql.IntegrityError,      # SQL Server constraint violations
     sqlite3.IntegrityError,      # SQLite constraint violations
+    IntegrityViolationError,     # Our custom exception
 )
 ProgrammingError = (
     psycopg.ProgrammingError,    # Postgres syntax/query errors
@@ -139,6 +209,7 @@ ProgrammingError = (
     pymssql.DatabaseError,       # SQL Server general database errors
     sqlite3.ProgrammingError,    # SQLite syntax/query errors
     sqlite3.DatabaseError,       # SQLite general database errors
+    QueryError,                  # Our custom exception
 )
 OperationalError = (
     psycopg.OperationalError,    # Postgres operational issues
@@ -149,28 +220,56 @@ UniqueViolation = (
     psycopg.errors.UniqueViolation,    # Postgres specific unique violation error
     sqlite3.IntegrityError,            # SQLite error for unique/primary key violations
     pymssql.IntegrityError,            # SQL Server unique constraint violations
+    IntegrityViolationError,           # Our custom exception
 )
 
 
-def check_connection(func, x_times=1):
-    """Reconnect on closed connection
+def check_connection(func=None, *, max_retries=3, retry_delay=1,
+                     retry_errors=DbConnectionError, retry_backoff=1.5):
+    """Enhanced connection retry decorator with backoff
+
+    Args:
+        func: Function to decorate
+        max_retries: Maximum number of retry attempts
+        retry_delay: Initial delay between retries (seconds)
+        retry_errors: Errors that should trigger a retry
+        retry_backoff: Multiplier for delay after each retry
     """
-    @wraps(func)
-    def inner(*args, **kwargs):
-        tries = 0
-        while tries <= x_times:
-            try:
-                return func(*args, **kwargs)
-            except DbConnectionError as err:
-                if tries > x_times:
-                    raise err
-                tries += 1
-                logger.warning(err)
-                conn = args[0]
-                if conn.options.check_connection:
-                    conn.connection.close()
-                    conn.connection = connect(conn.options).connection
-    return inner
+    def decorator(f):
+        @wraps(f)
+        def inner(*args, **kwargs):
+            tries = 0
+            delay = retry_delay
+            while True:
+                try:
+                    return f(*args, **kwargs)
+                except retry_errors as err:
+                    tries += 1
+                    if tries > max_retries:
+                        logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
+                        raise
+
+                    logger.warning(f'Connection error (attempt {tries}/{max_retries}): {err}')
+                    conn = args[0]
+                    if hasattr(conn, 'options') and conn.options.check_connection:
+                        try:
+                            conn.connection.close()
+                        except:
+                            pass  # Ignore errors when closing broken connection
+
+                        # Reconnect
+                        conn.connection = connect(conn.options).connection
+
+                    # Wait before retry with exponential backoff
+                    time.sleep(delay)
+                    delay *= retry_backoff
+
+        return inner
+
+    # Allow both @check_connection and @check_connection() syntax
+    if func is None:
+        return decorator
+    return decorator(func)
 
 
 def handle_query_params(func):
@@ -240,6 +339,7 @@ class ConnectionWrapper:
         self.options = options
         self.calls = 0
         self.time = 0
+        self._driver_type = None  # Cached driver type
         if self.options.cleanup:
             atexit.register(self.cleanup)
 
@@ -303,6 +403,74 @@ class CursorWrapper:
         return self.cursor.rowcount
 
 
+def sanitize_sql_for_logging(sql, args=None):
+    """Remove sensitive information from SQL for logging
+
+    Args:
+        sql: SQL query string
+        args: Query parameters
+
+    Returns
+        Sanitized SQL query and parameters
+    """
+    # List of keywords indicating potentially sensitive columns
+    sensitive_patterns = [
+        r'\b(password|passwd|secret|key|token|credential)\b',
+        r'\bcredit_?card\b',
+        r'\bcard_?number\b',
+        r'\bssn\b',
+        r'\bsocial_?security\b'
+    ]
+
+    # Copy the SQL for sanitization
+    sanitized_sql = sql
+
+    # Mask sensitive data in the SQL itself
+    for pattern in sensitive_patterns:
+        # Find value sections that match our sensitive patterns
+        matches = re.finditer(pattern, sanitized_sql, re.IGNORECASE)
+        for match in matches:
+            # Look for patterns like "password = '...'" or "password = %s"
+            value_pattern = rf"{match.group(0)}\s*=\s*('[^']*'|\$[^$]*\$|%s|:[a-zA-Z0-9_]+)"
+
+            # Replace values with ***
+            sanitized_sql = re.sub(
+                value_pattern,
+                lambda m: m.group(0).replace(m.group(1), "'***'"),
+                sanitized_sql
+            )
+
+    # Sanitize arguments if provided
+    sanitized_args = None
+    if args:
+        if isinstance(args, list | tuple):
+            sanitized_args = list(args)
+            # Find parameter positions that might be sensitive
+            for pattern in sensitive_patterns:
+                param_positions = []
+                for match in re.finditer(pattern + r'\s*=\s*(%s)', sql, re.IGNORECASE):
+                    # Count placeholders before this one
+                    sql_before = sql[:match.start()]
+                    param_count = sql_before.count('%s')
+                    if param_count < len(sanitized_args):
+                        param_positions.append(param_count)
+
+                # Mask sensitive parameters
+                for pos in param_positions:
+                    if sanitized_args[pos] is not None:
+                        sanitized_args[pos] = '***'
+        elif isinstance(args, dict):
+            # Handle dictionary parameters
+            sanitized_args = args.copy()
+            for key in sanitized_args:
+                for pattern in sensitive_patterns:
+                    if re.search(pattern, key, re.IGNORECASE):
+                        if sanitized_args[key] is not None:
+                            sanitized_args[key] = '***'
+
+    return sanitized_sql, sanitized_args
+
+
 def dumpsql(func):
     """This is a decorator for db module functions, for logging data flowing down to driver"""
     @wraps(func)
@@ -310,12 +478,35 @@ def dumpsql(func):
         try:
             # For postgres, logging happens in LoggingCursor
             if is_pymssql_connection(cn) or is_sqlite3_connection(cn):
-                logger.debug(f'SQL:\n{sql}\nargs: {args}')
+                sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
+                logger.debug(f'SQL:\n{sanitized_sql}\nargs: {sanitized_args}')
             return func(cn, sql, *args, **kwargs)
         except:
-            logger.error(f'Error with query:\nSQL:\n{sql}\nargs: {args}')
+            sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
+            logger.error(f'Error with query:\nSQL:\n{sanitized_sql}\nargs: {sanitized_args}')
             raise
     return wrapper
+
+
+def paginate_query(cn, sql, order_by, offset=0, limit=100):
+    """Add pagination to a SQL query based on database type
+
+    Args:
+        cn: Database connection
+        sql: SQL query to paginate
+        order_by: Column(s) to order by
+        offset: Number of rows to skip
+        limit: Maximum number of rows to return
+
+    Returns
+        Paginated SQL query string
+    """
+    if is_psycopg_connection(cn) or is_sqlite3_connection(cn):
+        return _page_pgsql(sql, order_by, offset, limit)
+    elif is_pymssql_connection(cn):
+        return _page_mssql(sql, order_by, offset, limit)
+    else:
+        raise ValueError(f'Unsupported connection type: {type(cn)}')
 
 
 def _page_mssql(sql, order_by, offset, limit):
@@ -359,7 +550,84 @@ class LoggingCursor(ClientCursor):
 
 
 @load_options(cls=DatabaseOptions)
-def connect(options: str | dict | DatabaseOptions | None, config=None, **kw):
+class ConnectionPool:
+    """Simple database connection pool implementation"""
+
+    def __init__(self, options, max_connections=5, max_idle_time=300):
+        """Initialize a connection pool
+
+        Args:
+            options: DatabaseOptions for creating connections
+            max_connections: Maximum number of connections in the pool
+            max_idle_time: Maximum time in seconds a connection can be idle
+        """
+        self.options = options
+        self.max_connections = max_connections
+        self.max_idle_time = max_idle_time
+        self._pool = []  # (connection, last_used_time)
+        self._in_use = set()
+        self._lock = __import__('threading').RLock()
+
+    def get_connection(self):
+        """Get a connection from the pool or create a new one"""
+        with self._lock:
+            # Clean up expired connections
+            self._cleanup()
+
+            # Try to get a connection from the pool
+            if self._pool:
+                conn_wrapper, last_used = self._pool.pop()
+                self._in_use.add(conn_wrapper)
+                return conn_wrapper
+
+            # Create new connection if under limit
+            if len(self._in_use) < self.max_connections:
+                conn_wrapper = connect(self.options)
+                self._in_use.add(conn_wrapper)
+                return conn_wrapper
+
+            # Pool exhausted
+            raise RuntimeError('Connection pool exhausted')
+
+    def release_connection(self, conn_wrapper):
+        """Return a connection to the pool"""
+        with self._lock:
+            if conn_wrapper in self._in_use:
+                self._in_use.remove(conn_wrapper)
+                self._pool.append((conn_wrapper, time.time()))
+
+    def _cleanup(self):
+        """Remove expired connections from the pool"""
+        now = time.time()
+        valid_connections = []
+
+        for conn_wrapper, last_used in self._pool:
+            if now - last_used > self.max_idle_time:
+                try:
+                    conn_wrapper.connection.close()
+                except:
+                    pass  # Ignore errors when closing expired connections
+            else:
+                valid_connections.append((conn_wrapper, last_used))
+
+        self._pool = valid_connections
+
+    def close_all(self):
+        """Close all connections in the pool"""
+        with self._lock:
+            for conn_wrapper, _ in self._pool:
+                try:
+                    conn_wrapper.connection.close()
+                except:
+                    pass
+
+            self._pool = []
+            # We can't forcibly close connections in use
+
+
+@load_options(cls=DatabaseOptions)
+def connect(options: str | dict | DatabaseOptions | None, config=None, use_pool=False,
+            pool_max_connections=5, pool_max_idle_time=300, isolated_adapters=False, **kw):
     """Database connection wrapper
 
     Use config.py to specify database
@@ -375,20 +643,54 @@ def connect(options: str | dict | DatabaseOptions | None, config=None, **kw):
     if isinstance(options, DatabaseOptions):
         for field in fields(options):
             kw.pop(field.name, None)
+
+    # Use connection pool if requested
+    if use_pool:
+        # Create a singleton pool for each options combination
+        pool_key = str(options)
+        if not hasattr(connect, '_connection_pools'):
+            connect._connection_pools = {}
+
+        if pool_key not in connect._connection_pools:
+            connect._connection_pools[pool_key] = ConnectionPool(
+                options,
+                max_connections=pool_max_connections,
+                max_idle_time=pool_max_idle_time
+            )
+
+        return connect._connection_pools[pool_key].get_connection()
+
+    # Optional isolated adapters (per-connection adapter registration)
+    adapter_maps = register_adapters(isolated=isolated_adapters) if isolated_adapters else None
+
+    # Standard connection creation
     conn = None
     if options.drivername == 'sqlite':
         conn = sqlite3.connect(database=options.database)
         conn.row_factory = sqlite3.Row
+
+        # Apply isolated adapters if requested
+        if isolated_adapters and adapter_maps['sqlite']:
+            adapter_maps['sqlite'](conn)
+
     if options.drivername == 'postgres':
-        conn = psycopg.connect(
-            dbname=options.database,
-            host=options.hostname,
-            user=options.username,
-            password=options.password,
-            port=options.port,
-            connect_timeout=options.timeout,
-            cursor_factory=LoggingCursor
-        )
+        # Use isolated adapter context if requested
+        postgres_args = {
+            'dbname': options.database,
+            'host': options.hostname,
+            'user': options.username,
+            'password': options.password,
+            'port': options.port,
+            'connect_timeout': options.timeout,
+            'cursor_factory': LoggingCursor
+        }
+
+        # Apply isolated adapters if requested
+        if isolated_adapters and adapter_maps['postgres']:
+            postgres_args['adapters'] = adapter_maps['postgres']
+
+        conn = psycopg.connect(**postgres_args)
+
     if options.drivername == 'sqlserver':
         conn = pymssql.connect(
             database=options.database,
@@ -399,8 +701,14 @@ def connect(options: str | dict | DatabaseOptions | None, config=None, **kw):
             timeout=options.timeout,
             port=options.port,
         )
+
     if not conn:
         raise AttributeError(f'{options.drivername} is not supported, see Options docstring')
+
+    # Apply database-specific configuration
+    strategy = get_db_strategy(conn)
+    strategy.configure_connection(conn)
+
     return ConnectionWrapper(conn, options)
 
 
@@ -422,7 +730,25 @@ def IterChunk(cursor, size=5000):
 @check_connection
 @handle_query_params
 @dumpsql
-def select(cn, sql, *args, **kwargs) -> pd.DataFrame:
+def select(cn, sql, *args, order_by=None, offset=None, limit=None, **kwargs) -> pd.DataFrame:
+    """Execute a SELECT query with optional pagination
+
+    Args:
+        cn: Database connection
+        sql: SQL query string
+        *args: Query parameters
+        order_by: Column(s) to order by for pagination
+        offset: Number of rows to skip
+        limit: Maximum number of rows to return
+        **kwargs: Additional options passed to data loader
+
+    Returns
+        Result data as a pandas DataFrame
+    """
+    # Apply pagination if all required parameters are provided
+    if order_by is not None and offset is not None and limit is not None:
+        sql = paginate_query(cn, sql, order_by, offset, limit)
+
     cursor = _dict_cur(cn)  # cn is already a ConnectionWrapper
     cursor.execute(sql, args)
     return load_data(cursor, **kwargs)
@@ -536,6 +862,17 @@ def select_scalar_or_none(cn, sql, *args):
     return None
 
 
+def execute_with_context(cn, sql, *args, **kwargs):
+    """Execute SQL with enhanced error context"""
+    try:
+        return execute(cn, sql, *args, **kwargs)
+    except ProgrammingError as e:
+        # Capture original exception for context
+        raise QueryError(f'Query execution failed: {e}\nSQL: {sql}') from e
+    except DbConnectionError as e:
+        raise ConnectionError(f'Connection failed during query: {e}') from e
+
+
 @check_connection
 @handle_query_params
 @dumpsql
@@ -636,6 +973,7 @@ def update_or_insert(cn, update_sql, insert_sql, *args):
 
 
 def _build_upsert_sql(
+    cn,
     table: str,
     columns: tuple[str],
     key_columns: list[str],
@@ -646,6 +984,7 @@ def _build_upsert_sql(
     """Builds an UPSERT SQL statement for the specified database driver.
 
     Args:
+        cn: Database connection
         table: Target table name
         columns: All columns to insert
         key_columns: Columns that form conflict constraint (primary/unique keys)
@@ -655,15 +994,20 @@ def _build_upsert_sql(
     """
     # Validate inputs
     if not key_columns:
-        return _build_insert_sql(table, columns)
+        return _build_insert_sql(cn, table, columns)
+
+    # Quote table name and all column names
+    quoted_table = quote_identifier(cn, table)
+    quoted_columns = [quote_identifier(cn, col) for col in columns]
+    quoted_key_columns = [quote_identifier(cn, col) for col in key_columns]
 
     # PostgreSQL uses INSERT ... ON CONFLICT DO UPDATE
     if driver == 'postgres':
         # build the basic insert part
-        insert_sql = _build_insert_sql(table, columns)
+        insert_sql = _build_insert_sql(cn, table, columns)
 
         # build the on conflict clause
-        conflict_sql = f"on conflict ({','.join(key_columns)})"
+        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
 
         # If no updates requested, do nothing
         if not (update_always or update_if_null):
@@ -672,10 +1016,10 @@ def _build_upsert_sql(
         # Build update expressions
         update_exprs = []
         if update_always:
-            update_exprs.extend(f'{col} = excluded.{col}'
+            update_exprs.extend(f'{quote_identifier(cn, col)} = excluded.{quote_identifier(cn, col)}'
                                 for col in update_always)
         if update_if_null:
-            update_exprs.extend(f'{col} = coalesce({table}.{col}, excluded.{col})'
+            update_exprs.extend(f'{quote_identifier(cn, col)} = coalesce({quoted_table}.{quote_identifier(cn, col)}, excluded.{quote_identifier(cn, col)})'
                                 for col in update_if_null)
 
         update_sql = f"do update set {', '.join(update_exprs)}"
@@ -685,10 +1029,10 @@ def _build_upsert_sql(
     # SQLite uses INSERT ... ON CONFLICT DO UPDATE (similar to PostgreSQL)
     elif driver == 'sqlite':
         # build the basic insert part
-        insert_sql = _build_insert_sql(table, columns)
+        insert_sql = _build_insert_sql(cn, table, columns)
 
         # build the on conflict clause
-        conflict_sql = f"on conflict ({','.join(key_columns)})"
+        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
 
         # If no updates requested, do nothing
         if not (update_always or update_if_null):
@@ -697,10 +1041,10 @@ def _build_upsert_sql(
         # Build update expressions
         update_exprs = []
         if update_always:
-            update_exprs.extend(f'{col} = excluded.{col}'
+            update_exprs.extend(f'{quote_identifier(cn, col)} = excluded.{quote_identifier(cn, col)}'
                                 for col in update_always)
         if update_if_null:
-            update_exprs.extend(f'{col} = COALESCE({table}.{col}, excluded.{col})'
+            update_exprs.extend(f'{quote_identifier(cn, col)} = COALESCE({quoted_table}.{quote_identifier(cn, col)}, excluded.{quote_identifier(cn, col)})'
                                 for col in update_if_null)
 
         update_sql = f"do update set {', '.join(update_exprs)}"
@@ -715,11 +1059,11 @@ def _build_upsert_sql(
 
         # Build conditions for matching keys
         match_conditions = ' AND '.join(
-            f'target.{col} = {temp_alias}.{col}' for col in key_columns
+            f'target.{quote_identifier(cn, col)} = {temp_alias}.{quote_identifier(cn, col)}' for col in key_columns
         )
 
         # Build column value list for source
-        source_values = ', '.join(f'%s as {col}' for col in columns)
+        source_values = ', '.join(f'%s as {quote_identifier(cn, col)}' for col in columns)
 
         # Build UPDATE statements
         update_cols = []
@@ -732,7 +1076,7 @@ def _build_upsert_sql(
         update_clause = ''
         if update_cols:
             update_statements = ', '.join(
-                f'target.{col} = {temp_alias}.{col}' for col in update_cols
+                f'target.{quote_identifier(cn, col)} = {temp_alias}.{quote_identifier(cn, col)}' for col in update_cols
             )
             update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
         else:
@@ -740,16 +1084,16 @@ def _build_upsert_sql(
             update_clause = 'WHEN MATCHED THEN DO NOTHING'
 
         # Build INSERT statements
-        all_columns = ', '.join(columns)
-        source_columns = ', '.join(f'{temp_alias}.{col}' for col in columns)
+        quoted_all_columns = ', '.join(quoted_columns)
+        source_columns = ', '.join(f'{temp_alias}.{quote_identifier(cn, col)}' for col in columns)
 
         # Full MERGE statement
         merge_sql = f"""
-        MERGE INTO {table} AS target
+        MERGE INTO {quoted_table} AS target
         USING (SELECT {source_values}) AS {temp_alias}
         ON {match_conditions}
         {update_clause}
-        WHEN NOT MATCHED THEN INSERT ({all_columns}) VALUES ({source_columns});
+        WHEN NOT MATCHED THEN INSERT ({quoted_all_columns}) VALUES ({source_columns});
         """
 
         return merge_sql
@@ -758,11 +1102,33 @@ def _build_upsert_sql(
         raise ValueError(f'Driver {driver} not supported for UPSERT operations')
 
 
-def _build_insert_sql(table: str, columns: tuple[str]) -> str:
+def _build_insert_sql(cn, table: str, columns: tuple[str]) -> str:
     """Builds the INSERT part of the SQL statement
     """
     placeholders = ','.join(['%s'] * len(columns))
-    return f"insert into {table} ({','.join(columns)}) values ({placeholders})"
+    quoted_table = quote_identifier(cn, table)
+    quoted_columns = ','.join(quote_identifier(cn, col) for col in columns)
+    return f'insert into {quoted_table} ({quoted_columns}) values ({placeholders})'
+
+
+def quote_identifier(cn, identifier):
+    """Safely quote database identifiers based on connection type
+
+    Args:
+        cn: Database connection
+        identifier: The identifier (table or column name) to quote
+
+    Returns
+        Properly quoted identifier safe for use in SQL
+    """
+    if is_psycopg_connection(cn):
+        return '"' + identifier.replace('"', '""') + '"'
+    elif is_sqlite3_connection(cn):
+        return '"' + identifier.replace('"', '""') + '"'
+    elif is_pymssql_connection(cn):
+        return '[' + identifier.replace(']', ']]') + ']'
+    else:
+        raise ValueError(f'Unknown connection type: {type(cn)}')
 
 
 def _get_driver_type(cn):
@@ -794,6 +1160,7 @@ def _execute_standard_upsert(cn, table, rows, columns, key_cols,
     """Execute standard upsert operation for supported databases"""
     # Build the SQL statement
     sql = _build_upsert_sql(
+        cn=cn,
         table=table,
         columns=columns,
         key_columns=key_cols,
@@ -813,9 +1180,10 @@ def _execute_standard_upsert(cn, table, rows, columns, key_cols,
     return rc
 
 
-def _fetch_existing_rows(cn, table, rows, key_cols):
+def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
     """Fetch existing rows for a set of key values"""
     existing_rows = {}
+    quoted_table = quote_identifier(tx_or_cn, table)
 
     # Group rows by key columns to minimize database queries
     key_groups = {}
@@ -832,17 +1200,18 @@ def _fetch_existing_rows(cn, table, rows, key_cols):
         for row_key in key_groups:
             condition_parts = []
             for i, key_col in enumerate(key_cols):
-                condition_parts.append(f'{key_col} = %s')
+                quoted_key_col = quote_identifier(tx_or_cn, key_col)
+                condition_parts.append(f'{quoted_key_col} = %s')
                 params.append(row_key[i])
 
             where_conditions.append(f"({' AND '.join(condition_parts)})")
 
         if where_conditions:
             where_clause = ' OR '.join(where_conditions)
-            sql = f'SELECT * FROM {table} WHERE {where_clause}'
+            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
 
             # Fetch all matching rows at once
-            result = select(cn, sql, *params)
+            result = select(tx_or_cn, sql, *params)
             for row in result:
                 row_key = tuple(row[key] for key in key_cols)
                 existing_rows[row_key] = row
@@ -850,8 +1219,8 @@ def _fetch_existing_rows(cn, table, rows, key_cols):
         # Too many keys, fetch rows individually
         for row in rows:
             key_values = [row[key] for key in key_cols]
-            key_conditions = ' AND '.join([f'{key} = %s' for key in key_cols])
-            existing_row = select_row_or_none(cn, f'SELECT * FROM {table} WHERE {key_conditions}', *key_values)
+            key_conditions = ' AND '.join([f'{quote_identifier(tx_or_cn, key)} = %s' for key in key_cols])
+            existing_row = select_row_or_none(tx_or_cn, f'SELECT * FROM {quoted_table} WHERE {key_conditions}', *key_values)
 
             if existing_row:
                 row_key = tuple(row[key] for key in key_cols)
@@ -865,9 +1234,11 @@ def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
     """Special handling for SQL Server with NULL-preserving updates"""
     logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
 
+    driver = _get_driver_type(cn)
+
     with transaction(cn) as tx:
-        # First retrieve existing rows to handle COALESCE logic
-        existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
+        # First retrieve existing rows to handle COALESCE logic, passing the transaction
+        existing_rows = _fetch_existing_rows(tx, table, rows, key_cols)
 
         # Apply NULL-preservation logic
         for row in rows:
@@ -883,12 +1254,13 @@ def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
 
         # Build and execute the MERGE statement
         sql = _build_upsert_sql(
+            cn=tx,
             table=table,
             columns=columns,
             key_columns=key_cols,
             update_always=update_always + update_ifnull,  # Handle all columns the same now
             update_if_null=[],  # No special NULL handling needed anymore
-            driver='sqlserver'
+            driver=driver
         )
 
         ordered_values = []
@@ -993,23 +1365,19 @@ def insert_rows(cn, table, rows: tuple[dict]):
         this = ','.join(['%s']*len(cols))
         return ','.join([f'({this})']*int(len(vals)/len(cols)))
 
-    sql = f'insert into {table} ({",".join(cols)}) values {genvals(cols, vals)}'
+    quoted_table = quote_identifier(cn, table)
+    quoted_cols = ','.join(quote_identifier(cn, col) for col in cols)
+
+    sql = f'insert into {quoted_table} ({quoted_cols}) values {genvals(cols, vals)}'
     return insert(cn, sql, *vals)
 
 
 def insert_row(cn, table, fields, values):
     """Insert a row into a table using the supplied list of fields and values."""
     assert len(fields) == len(values), 'fields must be same length as values'
-    return insert(cn, insert_row_sql(table, fields), *values)
-
-
-def insert_row_sql(table, fields):
-    """Generate the SQL to insert a row into a table using the supplied list
-    of fields and values.
-    """
-    cols = ','.join(fields)
-    vals = ','.join(['%s'] * len(fields))
-    return f'insert into {table} ({cols}) values ({vals})'
+    builder = SQLBuilder(cn)
+    sql = builder.insert(table, fields)
+    return insert(cn, sql, *values)
 
 
 def update_row(cn, table, keyfields, keyvalues, datafields, datavalues):
@@ -1076,79 +1444,67 @@ def find_sequence_column(cn, table):
 
 
 def reset_table_sequence(cn, table, identity=None):
-    # Auto-detect identity column if not provided
-    if identity is None:
-        identity = find_sequence_column(cn, table)
+    """Reset a table's sequence/identity column to the max value + 1
 
-    if is_psycopg_connection(cn):
-        sql = f"""
-select
-    setval(pg_get_serial_sequence('{table}', '{identity}'), coalesce(max({identity}),0)+1, false)
-from
-{table}
-"""
-    elif is_sqlite3_connection(cn):
-        # SQLite doesn't need explicit sequence resetting
-        return
-    elif is_pymssql_connection(cn):
-        # SQL Server IDENTITY reseed
-        sql = f"""
-DECLARE @max int;
-SELECT @max = ISNULL(MAX({identity}), 0) FROM {table};
-DBCC CHECKIDENT ('{table}', RESEED, @max);
-"""
-    else:
-        logger.warning('Sequence reset not implemented for this database type')
-        return
-
-    if isinstance(cn, transaction):
-        cn.execute(sql)
-    else:
-        execute(cn, sql)
-    logger.debug(f'Reset sequence for {table=} using {identity=}')
+    Args:
+        cn: Database connection
+        table: Table name
+        identity: Identity column name (auto-detected if None)
+    """
+    strategy = get_db_strategy(cn)
+    strategy.reset_sequence(cn, table, identity)
 
 
 def vacuum_table(cn, table):
-    if is_psycopg_connection(cn):
-        cn.connection.set_session(autocommit=True)
-        execute(cn, f'vacuum (full, analyze) {table}')
-        cn.connection.set_session(autocommit=False)
-    else:
-        logger.warning('Only postgres vacuum implemented')
+    """Optimize a table by reclaiming space
+
+    This operation varies by database type:
+    - PostgreSQL: VACUUM (FULL, ANALYZE)
+    - SQLite: VACUUM (entire database)
+    - SQL Server: Rebuilds all indexes
+    """
+    strategy = get_db_strategy(cn)
+    strategy.vacuum_table(cn, table)
 
 
 def reindex_table(cn, table):
-    if is_psycopg_connection(cn):
-        cn.connection.set_session(autocommit=True)
-        execute(cn, f'reindex table {table}')
-        cn.connection.set_session(autocommit=False)
-    else:
-        logger.warning('Only postgres reindex implemented')
+    """Rebuild indexes for a table
+
+    This operation varies by database type:
+    - PostgreSQL: REINDEX TABLE
+    - SQLite: REINDEX
+    - SQL Server: ALTER INDEX ALL ... REBUILD
+    """
+    strategy = get_db_strategy(cn)
+    strategy.reindex_table(cn, table)
 
 
 def cluster_table(cn, table, index: str = None):
-    if is_psycopg_connection(cn):
-        cn.connection.set_session(autocommit=True)
-        if index is None:
-            execute(cn, f'cluster {table}')
-        else:
-            execute(cn, f'cluster {table} using {index}')
-        cn.connection.set_session(autocommit=False)
-    else:
-        logger.warning('Only postgres cluster implemented')
+    """Order table data according to an index
+
+    This operation is primarily for PostgreSQL:
+    - PostgreSQL: CLUSTER table [USING index]
+    - Other databases: Not supported (warning logged)
+    """
+    strategy = get_db_strategy(cn)
+    strategy.cluster_table(cn, table, index)
 
 
 def get_table_columns(cn, table):
     """Get all column names for a table based on database type"""
+    quoted_table = quote_identifier(cn, table)
+
     if is_psycopg_connection(cn):
         sql = f"""
-select skeys(hstore(null::{table})) as column
+select skeys(hstore(null::{quoted_table})) as column
     """
     elif is_sqlite3_connection(cn):
+        # SQLite pragma requires unquoted table name
         sql = f"""
 select name as column from pragma_table_info('{table}')
     """
     elif is_pymssql_connection(cn):
+        # SQL Server system queries use unquoted names for matching
         sql = f"""
 select c.name as column
 from sys.columns c
@@ -1192,62 +1548,32 @@ def ignore_first_argument_cache_key(cls, *args, **kwargs):
 
 @cachetools.cached(cache=cachetools.TTLCache(maxsize=10, ttl=60), key=ignore_first_argument_cache_key)
 def get_table_primary_keys(cn, table, _=None):
-    """Extra parameter for database switching. Pass in flag to bypass cache.
+    """Get primary key columns for a table
+
+    Args:
+        cn: Database connection
+        table: Table name
+        _: Extra parameter for database switching (to bypass cache)
+
+    Returns
+        List of primary key column names
     """
-    if cn.options.drivername == 'postgres':
-        sql = """
-select a.attname as column
-from pg_index i
-join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
-where i.indrelid = %s::regclass and i.indisprimary
-"""
-    if cn.options.drivername == 'sqlite':
-        sql = """
-select l.name as column from pragma_table_info("%s") as l where l.pk <> 0
-"""
-    if cn.options.drivername == 'sqlserver':
-        sql = """
-SELECT c.name as column
-FROM sys.indexes i
-JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-WHERE i.is_primary_key = 1
-AND OBJECT_NAME(i.object_id) = %s
-"""
-    cols = select_column(cn, sql, table)
-    return cols
+    strategy = get_db_strategy(cn)
+    return strategy.get_primary_keys(cn, table)
 
 
 def get_sequence_columns(cn, table):
-    """Identify columns that are likely to be sequence/identity columns based on database type.
+    """Identify columns that are likely to be sequence/identity columns
+
+    Args:
+        cn: Database connection
+        table: Table name
+
+    Returns
+        List of sequence/identity column names
     """
-    if cn.options.drivername == 'postgres':
-        # Find columns with sequences
-        sql = """
-        SELECT column_name as column
-        FROM information_schema.columns
-        WHERE table_name = %s
-        AND column_default LIKE 'nextval%%'
-        """
-        return select_column(cn, sql, table)
-    elif cn.options.drivername == 'sqlite':
-        # Find autoincrement columns
-        sql = """
-        SELECT name as column
-        FROM pragma_table_info('%s')
-        WHERE pk = 1
-        """
-        return select_column(cn, sql, table)
-    elif cn.options.drivername == 'sqlserver':
-        # Find identity columns
-        sql = """
-        SELECT c.name as column
-        FROM sys.columns c
-        JOIN sys.tables t ON c.object_id = t.object_id
-        WHERE t.name = %s AND c.is_identity = 1
-        """
-        return select_column(cn, sql, table)
-    return []
+    strategy = get_db_strategy(cn)
+    return strategy.get_sequence_columns(cn, table)
 
 
 def table_fields(cn, table):
@@ -1319,3 +1645,159 @@ ORDER BY c.column_id
 
     columns = [f'{col} as {alias}' for col, alias in peel(columns)]
     return select(cn, f"select {','.join(columns)} from {table}")
+
+
+class SQLBuilder:
+    """SQL query builder with database-specific syntax"""
+
+    def __init__(self, connection):
+        """Initialize SQL builder
+
+        Args:
+            connection: Database connection
+        """
+        self.connection = connection
+        self.strategy = get_db_strategy(connection)
+
+    def quote(self, identifier):
+        """Safely quote an identifier"""
+        return self.strategy.quote_identifier(identifier)
+
+    def select(self, table, columns=None, where=None, order_by=None,
+               group_by=None, having=None, limit=None, offset=None):
+        """Build a SELECT query
+
+        Args:
+            table: Table name or table expression
+            columns: List of columns to select or None for all columns
+            where: WHERE clause
+            order_by: ORDER BY expression
+            group_by: GROUP BY expression
+            having: HAVING clause
+            limit: Maximum number of rows
+            offset: Number of rows to skip
+
+        Returns
+            SQL query string
+        """
+        quoted_table = self.quote(table)
+
+        if columns:
+            quoted_columns = ', '.join(self.quote(col) for col in columns)
+            query = f'SELECT {quoted_columns} FROM {quoted_table}'
+        else:
+            query = f'SELECT * FROM {quoted_table}'
+
+        if where:
+            query += f' WHERE {where}'
+
+        if group_by:
+            if isinstance(group_by, list | tuple):
+                quoted_group = ', '.join(self.quote(col) for col in group_by)
+            else:
+                quoted_group = self.quote(group_by)
+            query += f' GROUP BY {quoted_group}'
+
+        if having:
+            query += f' HAVING {having}'
+
+        if order_by:
+            if isinstance(order_by, list | tuple):
+                quoted_order = ', '.join(self.quote(col) for col in order_by)
+            else:
+                quoted_order = self.quote(order_by)
+            query += f' ORDER BY {quoted_order}'
+
+        if limit is not None:
+            query += f' LIMIT {int(limit)}'
+
+        if offset is not None:
+            query += f' OFFSET {int(offset)}'
+
+        return query
+
+    def insert(self, table, columns):
+        """Build an INSERT statement
+
+        Args:
+            table: Target table name
+            columns: List of column names
+
+        Returns
+            SQL query string
+        """
+        quoted_table = self.quote(table)
+        quoted_columns = ', '.join(self.quote(col) for col in columns)
+        placeholders = ', '.join(['%s'] * len(columns))
+
+        return f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'
+
+    def update(self, table, columns, where=None):
+        """Build an UPDATE statement
+
+        Args:
+            table: Target table name
+            columns: List of column names to update
+            where: WHERE clause
+
+        Returns
+            SQL query string
+        """
+        quoted_table = self.quote(table)
+        set_clause = ', '.join(f'{self.quote(col)} = %s' for col in columns)
+
+        query = f'UPDATE {quoted_table} SET {set_clause}'
+
+        if where:
+            query += f' WHERE {where}'
+
+        return query
+
+    def delete(self, table, where):
+        """Build a DELETE statement
+
+        Args:
+            table: Target table name
+            where: WHERE clause
+
+        Returns
+            SQL query string
+        """
+        quoted_table = self.quote(table)
+        query = f'DELETE FROM {quoted_table}'
+
+        if where:
+            query += f' WHERE {where}'
+
+        return query
+
+    def build_upsert(self, table, columns, key_columns,
+                     update_always=None, update_ifnull=None):
+        """Build an UPSERT statement
+
+        Args:
+            table: Target table name
+            columns: All columns to insert/update
+            key_columns: Columns forming the conflict constraint
+            update_always: Columns that should always be updated on conflict
+            update_ifnull: Columns that should only be updated if target is NULL
+
+        Returns
+            SQL query string
+        """
+        driver = _get_driver_type(self.connection)
+        return _build_upsert_sql(
+            cn=self.connection,
+            table=table,
+            columns=columns,
+            key_columns=key_columns,
+            update_always=update_always,
+            update_if_null=update_ifnull,
+            driver=driver
+        )
+
+    def get_driver_type(self):
+        """Get and cache the driver type for this connection"""
+        if self._driver_type is None:
+            self._driver_type = _get_driver_type(self)
+        return self._driver_type
