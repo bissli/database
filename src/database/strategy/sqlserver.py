@@ -96,13 +96,36 @@ where t.name = '{table}'
 
     def _find_sequence_column(self, cn, table):
         """Find the best column to reset sequence for"""
+        # Get identity columns (SQL Server's version of sequences)
         identity_cols = self.get_sequence_columns(cn, table)
+
+        # Get primary keys
+        primary_keys = self.get_primary_keys(cn, table)
+
+        # Find columns that are both PK and identity columns
+        pk_identity_cols = [col for col in identity_cols if col in primary_keys]
+
+        if pk_identity_cols:
+            # Among PK identity columns, prefer ones with 'id' in the name
+            id_cols = [col for col in pk_identity_cols if 'id' in col.lower()]
+            if id_cols:
+                return id_cols[0]
+            return pk_identity_cols[0]
+
+        # If no PK identity columns, try identity columns
         if identity_cols:
+            # Among identity columns, prefer ones with 'id' in the name
+            id_cols = [col for col in identity_cols if 'id' in col.lower()]
+            if id_cols:
+                return id_cols[0]
             return identity_cols[0]
 
-        # If no identity column found, check primary keys
-        primary_keys = self.get_primary_keys(cn, table)
+        # If no identity columns, try primary keys
         if primary_keys:
+            # Among primary keys, prefer ones with 'id' in the name
+            id_cols = [col for col in primary_keys if 'id' in col.lower()]
+            if id_cols:
+                return id_cols[0]
             return primary_keys[0]
 
         # Default fallback

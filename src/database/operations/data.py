@@ -5,6 +5,7 @@ import logging
 
 from database.core.query import dumpsql, execute
 from database.core.transaction import Transaction
+from database.utils.connection_utils import is_pymssql_connection
 from database.utils.sql import handle_query_params, quote_identifier
 from more_itertools import flatten
 
@@ -19,10 +20,22 @@ insert = update = delete = execute
 @dumpsql
 def insert_identity(cn, sql, *args):
     """Inject @@identity column into query for row by row unique id"""
+    from database.utils.sqlserver_utils import extract_identity_from_result
+
     cursor = cn.cursor()
-    cursor.execute(sql + '; select @@identity', args)
+
+    # For SQL Server, we need to handle the column name issue with @@identity
+    if is_pymssql_connection(cn):
+        cursor.execute(sql + '; select @@identity AS id', args)
+    else:
+        cursor.execute(sql + '; select @@identity', args)
+
     cursor.nextset()
-    identity = cursor.fetchone()[0]
+
+    # Safely extract the identity value using our helper
+    result = cursor.fetchone()
+    identity = extract_identity_from_result(result)
+
     # must do the commit after retrieving data since commit closes cursor
     cn.commit()
     return identity
@@ -57,7 +70,7 @@ def insert_rows(cn, table, rows):
         logger.debug('Skipping insert of empty rows')
         return 0
 
-    # Include only columns that exist in the table
+    # Filter to include only valid columns for the table
     filtered_rows = filter_table_columns(cn, table, rows)
     if not filtered_rows:
         logger.warning(f'No valid columns found for {table} after filtering')

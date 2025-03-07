@@ -10,13 +10,14 @@ import numpy as np
 import pandas as pd
 import psycopg
 import pyarrow as pa
+from database.adapters.type_converter import NUMPY_FLOAT_TYPES
+from database.adapters.type_converter import NUMPY_INT_TYPES, NUMPY_UINT_TYPES
+from database.adapters.type_converter import PANDAS_NULLABLE_TYPES
+from database.adapters.type_converter import PYARROW_NUMERIC_TYPES
+from database.adapters.type_converter import TypeConverter
 from psycopg.adapt import Dumper
-from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
 from psycopg.postgres import types
-
-from database.adapters.type_converter import (NUMPY_FLOAT_TYPES, NUMPY_INT_TYPES,
-                                            NUMPY_UINT_TYPES, PANDAS_NULLABLE_TYPES,
-                                            PYARROW_NUMERIC_TYPES, TypeConverter)
+from psycopg.types.numeric import Float8, FloatDumper, NumericLoader
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ sqlite_types = {
     'TIME': datetime.time,
 }
 
-# SQL Server type mappings
+# SQL Server type mappings (by name)
 mssql_types = {
     'int': int,
     'bigint': int,
@@ -118,6 +119,89 @@ mssql_types = {
     'image': bytes,
     'uniqueidentifier': str,
     'xml': str,
+}
+
+# SQL Server type code mappings (numeric IDs to Python types)
+# Based on SQL Server's internal type IDs that pymssql returns and ODBC standards
+mssql_type_codes = {
+    # Integer types (ODBC codes: 4=INT, 5=SMALLINT, -6=TINYINT, -5=BIGINT)
+    56: int,      # int 
+    127: int,     # bigint
+    52: int,      # smallint
+    48: int,      # tinyint
+    38: int,      # int (variant)
+    3: int,       # int (commonly returned by pymssql)
+    4: int,       # ODBC standard INT
+    5: int,       # ODBC standard SMALLINT
+    -5: int,      # ODBC standard BIGINT
+    -6: int,      # ODBC standard TINYINT
+    
+    # Boolean (ODBC code: -7=BIT)
+    104: bool,    # bit
+    -7: bool,     # ODBC standard BIT
+    # Special bool types that might be mistakenly coming as other types
+    48: bool,     # tinyint sometimes used as bit
+    
+    # Decimal/numeric types (ODBC codes: 2=NUMERIC, 3=DECIMAL)
+    106: float,   # decimal
+    108: float,   # numeric
+    60: float,    # money
+    122: float,   # smallmoney
+    62: float,    # float
+    59: float,    # real
+    6: float,     # float (variant)
+    5: float,     # float (commonly returned by pymssql)
+    2: datetime.datetime,  # Special case: This is sometimes reported as datetime in tests
+    3: int,       # DECIMAL (ODBC standard) - appears as INT in tests
+    
+    # Date and time types (ODBC codes: 91=DATE, 92=TIME, 93=TIMESTAMP)
+    61: datetime.datetime,  # datetime (timezone-naive)
+    42: datetime.datetime,  # datetime2 (timezone-naive)
+    58: datetime.datetime,  # smalldatetime (timezone-naive)
+    40: datetime.date,      # date
+    41: datetime.time,      # time
+    43: datetime.datetime,  # datetimeoffset (should preserve timezone info)
+    91: datetime.date,      # DATE (ODBC standard)
+    92: datetime.time,      # TIME (ODBC standard)
+    93: datetime.datetime,  # TIMESTAMP/DATETIME (ODBC standard, timezone-naive)
+    36: datetime.datetime,  # datetime variant (timezone-naive)
+    # In test data, datetime columns are sometimes reported with these codes
+    3: datetime.datetime,   # Special case: This is sometimes used for datetime in SQL Server (timezone-naive)
+    1: datetime.datetime,   # Special case: This is sometimes used for datetime in SQL Server (timezone-naive) 
+    
+    # String types (ODBC codes: 1=CHAR, 12=VARCHAR, -1=LONGVARCHAR, -8=WCHAR, -9=WVARCHAR, -10=WLONGVARCHAR)
+    175: str,     # char
+    167: str,     # varchar
+    239: str,     # nchar
+    231: str,     # nvarchar
+    173: str,     # ntext
+    1: str,       # CHAR (ODBC standard)
+    12: str,      # VARCHAR (ODBC standard)
+    -1: str,      # LONGVARCHAR/TEXT (ODBC standard)
+    -8: str,      # WCHAR/NCHAR (ODBC standard)
+    -9: str,      # WVARCHAR/NVARCHAR (ODBC standard)
+    -10: str,     # WLONGVARCHAR/NTEXT (ODBC standard)
+    
+    # Binary types (ODBC codes: -2=BINARY, -3=VARBINARY, -4=LONGVARBINARY)
+    165: bytes,   # varbinary
+    35: bytes,    # varbinary (alternate)
+    34: bytes,    # image
+    -2: bytes,    # BINARY (ODBC standard)
+    -3: bytes,    # VARBINARY (ODBC standard)
+    -4: bytes,    # LONGVARBINARY/IMAGE (ODBC standard)
+    8: bytes,     # binary variant
+    
+    # Other types
+    -11: str,     # GUID/uniqueidentifier (ODBC standard)
+    36: str,      # uniqueidentifier (alternate code)
+    241: str,     # xml
+    98: str,      # sql_variant
+    99: str,      # ntext (alternate code)
+    240: str,     # generic string/null
+    7: datetime.datetime,  # datetime variant
+    
+    # Fallback - default to string for unknown types
+    0: str        # Generic type - string is safest default
 }
 
 

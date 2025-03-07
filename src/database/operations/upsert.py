@@ -342,7 +342,7 @@ def upsert_rows(
     if not driver:
         raise ValueError('Unsupported database connection for upsert_rows')
 
-    # SQLServer implementation notice
+    # Warning for SQL Server implementation
     if driver == 'sqlserver':
         logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
 

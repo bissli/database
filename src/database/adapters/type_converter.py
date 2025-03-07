@@ -49,7 +49,7 @@ class TypeConverter:
         if isinstance(value, PANDAS_NULLABLE_TYPES):
             return None if pd.isna(value) else value
 
-        # Enhanced PyArrow handling
+        # PyArrow scalar value handling
         if hasattr(value, '_is_arrow_scalar') or isinstance(value, pa.Scalar):
             try:
                 if pa.compute.is_null(value).as_py():
@@ -58,7 +58,7 @@ class TypeConverter:
                     return value.as_py()
                 return value.value
             except (AttributeError, ValueError) as e:
-                # Log the error with type information
+                # Log error with type info for troubleshooting
                 logger.warning(f'Failed to convert PyArrow value of type {type(value)}: {e}')
                 return None
 

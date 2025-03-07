@@ -13,16 +13,12 @@ def standardize_placeholders(db_type, sql):
     """Standardize SQL placeholders between ? and %s based on database type"""
     if db_type in {'postgres', 'sqlserver'}:
         # Replace ? placeholders with %s for postgres and sqlserver
-        sql = re.sub(r'(\s\?\s|\(\?\)|\s\?$|\s\?\)|\s\?,|\(\?,)',
-                     lambda m: m.group().replace('?', '%s'),
-                     ' ' + sql + ' ')
-        sql = sql.strip()
+        # Comprehensive pattern to catch all ? placeholders
+        sql = re.sub(r'(?<!\w)\?(?!\w)', '%s', sql)
     elif db_type == 'sqlite':
         # Replace %s placeholders with ? for SQLite
-        sql = re.sub(r'(\s%s\s|\(%s\)|\s%s$|\s%s\)|\s%s,|\(%s,)',
-                     lambda m: m.group().replace('%s', '?'),
-                     ' ' + sql + ' ')
-        sql = sql.strip()
+        # Pattern to handle %s placeholders not inside string literals
+        sql = re.sub(r'(?<![\'"])%s(?![\'"])', '?', sql)
 
     return sql
 
@@ -81,7 +77,7 @@ def _handle_positional_in_params(sql, args):
     matches = list(standard_pattern.finditer(sql))
     modified_sql = sql
 
-    # Process matches in reverse to avoid position shifts
+    # Process matches in reverse order to maintain correct positions
     for match in reversed(matches):
         placeholder_pos = match.start(1)
 
@@ -192,8 +188,8 @@ def escape_like_clause_placeholders(sql):
     if ' LIKE ' in sql or ' like ' in sql:
         # Only double percent signs in LIKE patterns, not in placeholders
         sql = re.sub(r"(LIKE|like)\s+('[^']*'|\"[^\"]*\")",
-                    lambda m: m.group(1) + ' ' + m.group(2).replace('%', '%%'),
-                    sql)
+                     lambda m: m.group(1) + ' ' + m.group(2).replace('%', '%%'),
+                     sql)
     return sql
 
 
