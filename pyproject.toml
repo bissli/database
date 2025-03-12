@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "database"
+version = "0.1.0"
+description = ""
+authors = ["bissli <bissli@xyz.com>"]
+readme = "README.md"
+packages = [{ include = "database", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+
+pandas = "*"
+pyarrow = "*"
+psycopg = { extras = ["binary"], version = "*" }
+pyodbc = "*"
+sqlalchemy = "^2.0.0"
+
+cachetools = "*"
+python-dateutil = "*"
+libb-util = { git = "https://github.com/bissli/libb-util" }
+
+# == test
+asserts = { version = "*", optional = true }
+pytest = { version = "*", optional = true }
+docker = { version = "*", optional = true }
+pytest-cov = { version = "^6.0.0", optional = true }
+
+[tool.poetry.extras]
+test = [
+  "asserts",
+  "pytest",
+  "docker",
+  "pytest-cov",
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
