@@ -345,5 +345,114 @@ def test_combined_in_clause_named_params_with_returnid(psql_docker, conn):
             assert row.category in {'electronics', 'clothing'}
 
 
+def test_is_null_parameter_handling(psql_docker, conn):
+    """Test correct handling of NULL values with IS NULL/IS NOT NULL operators."""
+    # Create a test table
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_null_handling (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        value INTEGER
+    )
+    """)
+
+    # Insert test data with NULL and non-NULL values
+    db.execute(conn, """
+    INSERT INTO test_null_handling (name, value) VALUES
+    ('item1', 100),
+    ('item2', NULL),
+    ('item3', 300)
+    """)
+
+    # Test 1: Correct usage with IS NULL (no parameter needed)
+    result = db.select(conn, """
+    SELECT name, value FROM test_null_handling
+    WHERE value IS NULL
+    """)
+    assert len(result) == 1
+    assert result[0]['name'] == 'item2'
+
+    # Test 2: Correct usage with IS NOT NULL (no parameter needed)
+    result = db.select(conn, """
+    SELECT name, value FROM test_null_handling
+    WHERE value IS NOT NULL
+    ORDER BY name
+    """)
+    assert len(result) == 2
+    assert [r['name'] for r in result] == ['item1', 'item3']
+
+    # Test 3: Parameterized date range with IS NULL condition
+    # This demonstrates the correct pattern for combining parameterized values
+    # with NULL checks in the same query
+    start_date = datetime.date(2025, 1, 1)
+    end_date = datetime.date(2025, 3, 11)
+
+    # Create a table with dates for testing
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_date_null (
+        id SERIAL PRIMARY KEY,
+        date DATE,
+        value INTEGER,
+        strategy TEXT
+    )
+    """)
+
+    # Insert test data
+    db.execute(conn, """
+    INSERT INTO test_date_null (date, value, strategy) VALUES
+    ('2025-01-15', 100, 'A'),
+    ('2025-02-01', NULL, 'B'),
+    ('2025-03-01', 300, 'A')
+    """)
+
+    # This is the CORRECT way to handle NULL checks with parameters:
+    # Use IS NULL or IS NOT NULL directly in the SQL, not with parameters
+    result = db.select(conn, """
+    SELECT date, value, strategy
+    FROM test_date_null
+    WHERE date BETWEEN %s AND %s
+    AND value IS NOT NULL
+    """, start_date, end_date)
+
+    assert len(result) == 2
+    assert {r['strategy'] for r in result} == {'A'}
+
+    # Test 4: Testing for a specific value OR NULL using parameters
+    # For cases where you want to find rows where value = X OR value IS NULL
+    result = db.select(conn, """
+    SELECT name, value
+    FROM test_null_handling
+    WHERE value = %s OR value IS NULL
+    """, 100)
+
+    assert len(result) == 2
+    assert {r['name'] for r in result} == {'item1', 'item2'}
+
+    # Test 5: Test handling of None parameter with IS NOT operator
+    # This should be correctly handled by converting None to NULL
+    result = db.select(conn, """
+    SELECT date, value, strategy
+    FROM test_date_null
+    WHERE date BETWEEN %s AND %s
+    AND value IS NOT %s
+    """, start_date, end_date, None)
+
+    # Verify results - should match rows where value is not NULL
+    assert len(result) == 2
+    assert {r['strategy'] for r in result} == {'A'}
+
+    # Test 6: Test handling of None parameter with IS operator
+    result = db.select(conn, """
+    SELECT date, value, strategy
+    FROM test_date_null
+    WHERE date BETWEEN %s AND %s
+    AND value IS %s
+    """, start_date, end_date, None)
+
+    # Verify results - should match rows where value is NULL
+    assert len(result) == 1
+    assert result[0]['strategy'] == 'B'
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

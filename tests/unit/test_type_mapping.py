@@ -97,23 +97,23 @@ def test_type_resolver():
 def test_consistent_type_mapping():
     """Test that type mapping is consistent across components"""
     from database.adapters.type_mapping import TypeHandlerRegistry
-    from database.adapters.type_mapping import TypeResolver, resolve_type
+    from database.adapters.type_mapping import resolve_type
 
     # Mock the components to avoid initialization errors
     with patch('database.adapters.type_mapping.TypeResolver') as mock_resolver_class, \
-         patch.object(TypeHandlerRegistry, 'get_instance') as mock_registry_getter:
-        
+    patch.object(TypeHandlerRegistry, 'get_instance') as mock_registry_getter:
+
         # Create mock instances
         mock_registry = MagicMock()
         mock_registry_getter.return_value = mock_registry
-        
+
         mock_resolver = MagicMock()
         mock_resolver_class.return_value = mock_resolver
-        
+
         # Configure the mocks to return datetime.datetime for SQL_TYPE_TIMESTAMP (93)
         mock_registry.get_python_type.return_value = datetime.datetime
         mock_resolver.resolve_python_type.return_value = datetime.datetime
-        
+
         # Test the same type through different paths
         # Direct from registry
         registry_type = mock_registry.get_python_type('mssql', 93)
@@ -128,7 +128,7 @@ def test_consistent_type_mapping():
         # Test with column name context
         mock_registry.get_python_type.return_value = int
         mock_resolver.resolve_python_type.return_value = int
-        
+
         id_from_registry = mock_registry.get_python_type('mssql', None, 'id')
         id_from_resolver = mock_resolver.resolve_python_type('mssql', None, 'id')
         id_from_global = resolve_type('mssql', None, 'id')
@@ -145,13 +145,13 @@ def test_postgres_type_mapping():
     # Helper to get OID from type name
     def get_oid(type_name):
         return psycopg.postgres.types.get(type_name).oid
-    
+
     # Mock the resolve_type function to avoid initialization errors
     with patch('database.adapters.type_mapping.TypeResolver') as mock_resolver_class:
         # Create a mock instance
         mock_resolver = MagicMock()
         mock_resolver_class.return_value = mock_resolver
-        
+
         # Setup the mock's resolve_python_type method
         def resolve_side_effect(db_type, type_code, column_name=None, **kwargs):
             if db_type == 'postgresql':
@@ -168,9 +168,9 @@ def test_postgres_type_mapping():
                 elif type_code == get_oid('bool'):
                     return bool
             return str  # default
-        
+
         mock_resolver.resolve_python_type.side_effect = resolve_side_effect
-        
+
         # Test integer types
         int_type = resolve_type('postgresql', get_oid('int4'))
         assert int_type == int
@@ -204,7 +204,7 @@ def test_sqlite_type_mapping():
         # Create a mock instance
         mock_resolver = MagicMock()
         mock_resolver_class.return_value = mock_resolver
-        
+
         # Setup the mock's resolve_python_type method
         def resolve_side_effect(db_type, type_code, column_name=None, **kwargs):
             if db_type == 'sqlite':
@@ -221,9 +221,9 @@ def test_sqlite_type_mapping():
                 elif type_code == 'DATETIME':
                     return datetime.datetime
             return str  # default
-        
+
         mock_resolver.resolve_python_type.side_effect = resolve_side_effect
-        
+
         # Test integer type
         int_type = resolve_type('sqlite', 'INTEGER')
         assert int_type == int

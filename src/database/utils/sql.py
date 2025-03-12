@@ -39,14 +39,17 @@ def process_query_parameters(cn, sql, args):
 
     # 1. Standardize placeholders based on DB type
     sql = standardize_placeholders(cn, sql)
+    
+    # 2. Handle NULL values with IS/IS NOT operators
+    sql, args = handle_null_is_operators(sql, args)
 
-    # 2. Handle LIKE clause escaping
+    # 3. Handle LIKE clause escaping
     sql = escape_like_clause_placeholders(sql)
 
-    # 3. Handle IN clause parameters
+    # 4. Handle IN clause parameters
     sql, args = handle_in_clause_params(sql, args)
 
-    # 4. Convert numpy and pandas values
+    # 5. Convert numpy and pandas values
     from database.adapters.type_conversion import TypeConverter
     args = TypeConverter.convert_params(args)
 
@@ -284,6 +287,124 @@ def handle_query_params(func):
         return func(cn, processed_sql, *processed_args, **kwargs)
 
     return wrapper
+
+
+def handle_null_is_operators(sql, args):
+    """
+    Handle NULL values used with IS and IS NOT operators.
+    
+    Converts 'IS %s' and 'IS NOT %s' with None parameters to 'IS NULL' and 'IS NOT NULL'
+    instead of trying to use parameterized NULL values which causes syntax errors.
+    Also handles named parameters like 'IS %(param)s'.
+    
+    Args:
+        sql: SQL query string
+        args: Query parameters
+        
+    Returns:
+        Tuple of (processed_sql, processed_args)
+    """
+    if not args or not sql:
+        return sql, args
+    
+    # Process differently based on whether args is a dict (named params) or tuple/list (positional)
+    if isinstance(args, dict):
+        return _handle_null_is_named_params(sql, args)
+    else:
+        return _handle_null_is_positional_params(sql, args)
+
+
+def _handle_null_is_positional_params(sql, args):
+    """
+    Handle NULL values with IS/IS NOT for positional parameters (%s, ?).
+    
+    Args:
+        sql: SQL query string
+        args: List or tuple of parameters
+        
+    Returns:
+        Tuple of (processed_sql, processed_args)
+    """
+    # Pattern to find IS or IS NOT followed by a positional placeholder
+    pattern = r'\b(IS\s+NOT|IS)\s+(%s|\?)\b'
+    
+    # Convert list/tuple args to a list for modification
+    args_was_tuple = isinstance(args, tuple)
+    if args_was_tuple:
+        args = list(args)
+        
+    # Find all matches of IS or IS NOT with placeholder
+    matches = list(re.finditer(pattern, sql, re.IGNORECASE))
+    
+    # Process matches in reverse to avoid position shifts
+    for match in reversed(matches):
+        # Find the position of this placeholder in the SQL
+        text_before = sql[:match.start(2)]
+        placeholder_count = text_before.count('%s') + text_before.count('?')
+        
+        # Check if we have enough arguments
+        if placeholder_count < len(args):
+            param_value = args[placeholder_count]
+            
+            # If the parameter is None, replace the pattern with IS NULL or IS NOT NULL
+            if param_value is None:
+                operator = match.group(1).upper()  # IS or IS NOT
+                replacement = f'{operator} NULL'
+                
+                # Replace in SQL
+                start_pos = match.start(0)
+                end_pos = match.end(0)
+                sql = sql[:start_pos] + replacement + sql[end_pos:]
+                
+                # Remove the parameter from args
+                args.pop(placeholder_count)
+    
+    # Convert back to tuple if the input was a tuple
+    if args_was_tuple:
+        args = tuple(args)
+        
+    return sql, args
+
+
+def _handle_null_is_named_params(sql, args):
+    """
+    Handle NULL values with IS/IS NOT for named parameters (%(name)s).
+    
+    Args:
+        sql: SQL query string
+        args: Dictionary of named parameters
+        
+    Returns:
+        Tuple of (processed_sql, processed_args)
+    """
+    # Pattern to find IS or IS NOT followed by a named parameter
+    pattern = r'\b(IS\s+NOT|IS)\s+(%\([^)]+\)s)\b'
+    
+    # Make a copy of the args dictionary
+    args = args.copy()
+    
+    # Find all matches of IS or IS NOT with named parameter
+    matches = list(re.finditer(pattern, sql, re.IGNORECASE))
+    
+    # Process each match
+    for match in matches:
+        param_placeholder = match.group(2)  # Gets "%(name)s"
+        param_name = re.search(r'%\(([^)]+)\)s', param_placeholder).group(1)
+        
+        # Check if this parameter exists and is None
+        if param_name in args and args[param_name] is None:
+            operator = match.group(1).upper()  # IS or IS NOT
+            replacement = f'{operator} NULL'
+            
+            # Replace in SQL
+            start_pos = match.start(0)
+            end_pos = match.end(0)
+            sql = sql[:start_pos] + replacement + sql[end_pos:]
+            
+            # Remove the parameter from args
+            args.pop(param_name)
+    
+    return sql, args
 
 
 def prepare_sql_params_for_execution(sql, args, cn=None):
