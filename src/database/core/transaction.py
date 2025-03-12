@@ -5,7 +5,6 @@ import logging
 import threading
 
 import pandas as pd
-from database.core.query import dumpsql
 from database.options import use_iterdict_data_loader
 from database.utils.sql import handle_query_params
 
@@ -71,7 +70,6 @@ class Transaction:
             # Always remove from active transactions, even if an exception occurred
             _local.active_transactions.pop(id(self.connection), None)
 
-    @dumpsql
     @handle_query_params
     def execute(self, sql, *args, returnid=None):
         """Execute SQL within transaction context"""
@@ -113,7 +111,6 @@ class Transaction:
                 # Return a list of values when returnid is a single field
                 return [row[returnid] for row in results]
 
-    @dumpsql
     @handle_query_params
     def select(self, sql, *args, **kwargs) -> pd.DataFrame:
         """Execute SELECT query or procedure within transaction context"""
@@ -145,7 +142,6 @@ class Transaction:
         from database.operations.query import process_multiple_result_sets
         return process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
 
-    @dumpsql
     def select_column(self, sql, *args) -> list:
         """Execute a query and return a single column as a list
 
@@ -155,7 +151,6 @@ class Transaction:
         data = self.select(sql, *args)
         return [RowStructureAdapter.create(self.connection, row).get_value() for row in data]
 
-    @dumpsql
     @use_iterdict_data_loader
     def select_row(self, sql, *args) -> attrdict:
         """Execute a query and return a single row

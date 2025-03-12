@@ -3,14 +3,31 @@ Database cursor wrappers.
 """
 import logging
 import time
+from functools import wraps
 from numbers import Number
 
 from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
+from database.utils.connection_utils import is_pyodbc_connection, isconnection
 
 from libb import collapse
 
 logger = logging.getLogger(__name__)
+
+
+def dumpsql(func):
+    """Decorator for logging SQL queries and parameters"""
+    @wraps(func)
+    def wrapper(cn, sql, *args, **kwargs):
+        from database.utils.sql import sanitize_sql_for_logging
+        this_cn = isconnection(cn) and cn or cn.connnection
+        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
+        try:
+            logger.debug(f'SQL:\n{sanitized_sql}\nargs: {sanitized_args}')
+            return func(cn, sql, *args, **kwargs)
+        except:
+            logger.error(f'Error with query:\nSQL:\n{sanitized_sql}\nargs: {sanitized_args}')
+            raise
+    return wrapper
 
 
 class CursorWrapper:
@@ -27,6 +44,7 @@ class CursorWrapper:
     def __iter__(self):
         return IterChunk(self.cursor)
 
+    @dumpsql
     def execute(self, sql, *args, **kwargs):
         """Time the call and tell the connection wrapper that created this connection."""
         from database.utils.connection_utils import is_pyodbc_connection
@@ -72,7 +90,7 @@ class CursorWrapper:
         else:
             # Execute with standard parameters for other drivers
             self.cursor.execute(sql, *args)
-            
+
     def _execute_sqlserver_query(self, sql, args):
         """Execute a query specifically for SQL Server with appropriate handling."""
         # Only add explicit names for required expressions (@@identity, etc)
@@ -126,7 +144,7 @@ class CursorWrapper:
         if not processed_args:
             self.cursor.execute(processed_sql)
             return
-            
+
         try:
             processed_args = self._adjust_parameter_count(placeholder_count, param_count, processed_args)
             self._execute_with_parameters(processed_sql, processed_args, placeholder_count)
@@ -137,7 +155,7 @@ class CursorWrapper:
             logger.error(f'Processed SQL: {processed_sql}')
             logger.error(f'Processed args: {processed_args}')
             raise
-            
+
     def _adjust_parameter_count(self, placeholder_count, param_count, processed_args):
         """Adjust parameter count to match placeholders."""
         if placeholder_count != param_count:
@@ -152,9 +170,9 @@ class CursorWrapper:
             else:
                 # Truncate if we have too many parameters
                 processed_args = processed_args[:placeholder_count]
-                
+
         return processed_args
-        
+
     def _execute_with_parameters(self, sql, params, placeholder_count):
         """Execute SQL with parameters, handling single parameter case specially."""
         # Only use tuple unpacking for single parameters with single placeholders

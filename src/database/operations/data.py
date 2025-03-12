@@ -3,9 +3,11 @@ Data operations for database access (INSERT, UPDATE, DELETE).
 """
 import logging
 
-from database.core.query import dumpsql, execute
+from database.core.query import execute
 from database.core.transaction import Transaction
-from database.utils.connection_utils import is_psycopg_connection, is_pyodbc_connection, is_sqlite3_connection
+from database.utils.connection_utils import is_psycopg_connection
+from database.utils.connection_utils import is_pyodbc_connection
+from database.utils.connection_utils import is_sqlite3_connection
 from database.utils.sql import handle_query_params, quote_identifier
 from more_itertools import flatten
 
@@ -17,12 +19,11 @@ insert = update = delete = execute
 
 
 @handle_query_params
-@dumpsql
 def insert_identity(cn, sql, *args):
     """Inject @@identity column into query for row by row unique id"""
-    from database.utils.sqlserver_utils import extract_identity_from_result
     from database.utils.connection_utils import is_pyodbc_connection
-    
+    from database.utils.sqlserver_utils import extract_identity_from_result
+
     cursor = cn.cursor()
 
     # For SQL Server, we need to handle the column name issue with @@identity
@@ -85,13 +86,13 @@ def insert_rows(cn, table, rows):
 
     # Determine database type for quoting
     if is_psycopg_connection(cn):
-        db_type = "postgresql"
+        db_type = 'postgresql'
     elif is_pyodbc_connection(cn):
-        db_type = "mssql"
+        db_type = 'mssql'
     elif is_sqlite3_connection(cn):
-        db_type = "sqlite"
+        db_type = 'sqlite'
     else:
-        db_type = "unknown"
+        db_type = 'unknown'
 
     quoted_table = quote_identifier(db_type, table)
     quoted_cols = ','.join(quote_identifier(db_type, col) for col in cols)

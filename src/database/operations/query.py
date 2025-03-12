@@ -6,7 +6,6 @@ import logging
 import pandas as pd
 from database.adapters.structure import RowStructureAdapter
 from database.core.exceptions import QueryError
-from database.core.query import dumpsql
 from database.options import use_iterdict_data_loader
 from database.utils.connection_utils import check_connection
 from database.utils.connection_utils import is_psycopg_connection
@@ -21,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 @check_connection
 @handle_query_params
-@dumpsql
 def select(cn, sql, *args, **kwargs) -> list | pd.DataFrame:
     """Execute a SELECT query or stored procedure
 

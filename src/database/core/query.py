@@ -2,32 +2,15 @@
 Basic database query execution functions.
 """
 import logging
-from functools import wraps
 
-from database.utils.connection_utils import check_connection, isconnection
-from database.utils.sql import handle_query_params, sanitize_sql_for_logging
+from database.utils.connection_utils import check_connection
+from database.utils.sql import handle_query_params
 
 logger = logging.getLogger(__name__)
 
 
-def dumpsql(func):
-    """Decorator for logging SQL queries and parameters"""
-    @wraps(func)
-    def wrapper(cn, sql, *args, **kwargs):
-        this_cn = isconnection(cn) and cn or cn.connnection
-        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
-        try:
-            logger.debug(f'SQL:\n{sanitized_sql}\nargs: {sanitized_args}')
-            return func(cn, sql, *args, **kwargs)
-        except:
-            logger.error(f'Error with query:\nSQL:\n{sanitized_sql}\nargs: {sanitized_args}')
-            raise
-    return wrapper
-
-
 @check_connection
 @handle_query_params
-@dumpsql
 def execute(cn, sql, *args):
     """Execute a SQL query with the given parameters
 
