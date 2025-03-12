@@ -40,131 +40,186 @@ class TypeHandler:
         return value
 
 
-class SqlServerIntegerHandler(TypeHandler):
-    """Handles SQL Server integer types (TINYINT, SMALLINT, INT, BIGINT)"""
+def create_simple_handler(name: str, python_type: type,
+                          type_codes: set,
+                          type_names: set | None = None) -> TypeHandler:
+    """Factory function for creating simple type handlers.
 
-    def __init__(self):
-        import pyodbc
-        super().__init__(python_type=int)
-        self.type_codes = {
-            pyodbc.SQL_TINYINT, pyodbc.SQL_SMALLINT,
-            pyodbc.SQL_INTEGER, pyodbc.SQL_BIGINT,
-            -6, 5, 4, -5,  # Standard ODBC codes
-            38, 48, 52, 56, 127  # SQL Server specific type codes
-        }
-        self.type_names = {'tinyint', 'smallint', 'int', 'bigint'}
+    This reduces duplication by creating type handler classes with consistent behavior.
 
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
+    Args:
+        name: Handler name (used for the class name)
+        python_type: Python type this handler returns
+        type_codes: Set of database type codes this handler recognizes
+        type_names: Optional set of type names this handler recognizes
 
+    Returns
+        A TypeHandler instance
+    """
+    class SimpleHandler(TypeHandler):
+        def __init__(self):
+            super().__init__(python_type=python_type)
+            self.type_codes = type_codes
+            self.type_names = type_names or set()
 
-class SqlServerNumericHandler(TypeHandler):
-    """Handles SQL Server numeric types (DECIMAL, NUMERIC, MONEY, FLOAT, REAL)"""
+        def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
+            if type_name and type_name.lower() in self.type_names:
+                return True
+            return type_code in self.type_codes
 
-    def __init__(self):
-        super().__init__(python_type=float)
-        import pyodbc
-        self.type_codes = {
-            pyodbc.SQL_DECIMAL, pyodbc.SQL_NUMERIC,
-            pyodbc.SQL_FLOAT, pyodbc.SQL_REAL, pyodbc.SQL_DOUBLE,
-            2, 3, 6, 7, 8,  # Standard ODBC codes
-            106, 108, 59, 60, 62, 122  # SQL Server specific codes
-        }
-        self.type_names = {'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
+    SimpleHandler.__name__ = f'{name}Handler'
+    return SimpleHandler()
 
 
-class SqlServerBooleanHandler(TypeHandler):
-    """Handles SQL Server BIT type"""
+# Create SQL Server handlers using the factory function
+try:
+    import pyodbc
 
-    def __init__(self):
-        super().__init__(python_type=bool)
-        import pyodbc
-        self.type_codes = {pyodbc.SQL_BIT, -7, 104}  # ODBC + SQL Server specific
-        self.type_names = {'bit'}
+    # SQL Server integer handler
+    SqlServerIntegerHandler = create_simple_handler(
+        'SqlServerInteger',
+        int,
+        {pyodbc.SQL_TINYINT, pyodbc.SQL_SMALLINT, pyodbc.SQL_INTEGER, pyodbc.SQL_BIGINT,
+         -6, 5, 4, -5, 38, 48, 52, 56, 127},
+        {'tinyint', 'smallint', 'int', 'bigint'}
+    )
 
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
+    # SQL Server numeric handler
+    SqlServerNumericHandler = create_simple_handler(
+        'SqlServerNumeric',
+        float,
+        {pyodbc.SQL_DECIMAL, pyodbc.SQL_NUMERIC, pyodbc.SQL_FLOAT,
+         pyodbc.SQL_REAL, pyodbc.SQL_DOUBLE, 2, 3, 6, 7, 8,
+         106, 108, 59, 60, 62, 122},
+        {'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real'}
+    )
+
+    # SQL Server boolean handler
+    SqlServerBooleanHandler = create_simple_handler(
+        'SqlServerBoolean',
+        bool,
+        {pyodbc.SQL_BIT, -7, 104},
+        {'bit'}
+    )
+
+    # SQL Server string handler
+    SqlServerStringHandler = create_simple_handler(
+        'SqlServerString',
+        str,
+        {pyodbc.SQL_CHAR, pyodbc.SQL_VARCHAR, pyodbc.SQL_LONGVARCHAR,
+         pyodbc.SQL_WCHAR, pyodbc.SQL_WVARCHAR, pyodbc.SQL_WLONGVARCHAR,
+         1, 12, -1, -8, -9, -10, 167, 175, 231, 239, 241, 99, 173, -11},
+        {'char', 'varchar', 'text', 'nchar', 'nvarchar', 'ntext', 'xml', 'uniqueidentifier'}
+    )
+
+    # SQL Server date handler
+    SqlServerDateHandler = create_simple_handler(
+        'SqlServerDate',
+        datetime.date,
+        {pyodbc.SQL_TYPE_DATE, 91, 40},
+        {'date'}
+    )
+
+    # SQL Server time handler
+    SqlServerTimeHandler = create_simple_handler(
+        'SqlServerTime',
+        datetime.time,
+        {pyodbc.SQL_TYPE_TIME, 92, 41, -154},
+        {'time'}
+    )
+
+    # SQL Server datetime handler
+    SqlServerDateTimeHandler = create_simple_handler(
+        'SqlServerDateTime',
+        datetime.datetime,
+        {pyodbc.SQL_TYPE_TIMESTAMP, 93, 36, 9, 61, 58, 42},
+        {'datetime', 'smalldatetime', 'datetime2'}
+    )
+
+    # SQL Server binary handler
+    SqlServerBinaryHandler = create_simple_handler(
+        'SqlServerBinary',
+        bytes,
+        {pyodbc.SQL_BINARY, pyodbc.SQL_VARBINARY, pyodbc.SQL_LONGVARBINARY,
+         -2, -3, -4, 34, 35, 165},
+        {'binary', 'varbinary', 'image'}
+    )
+
+    # SQL Server guid handler
+    SqlServerGuidHandler = create_simple_handler(
+        'SqlServerGuid',
+        str,
+        {-11, 36},
+        {'uniqueidentifier'}
+    )
+
+except ImportError:
+    # Fallbacks when pyodbc not available - use literal type codes
+    SqlServerIntegerHandler = create_simple_handler(
+        'SqlServerInteger',
+        int,
+        {-6, 5, 4, -5, 38, 48, 52, 56, 127},
+        {'tinyint', 'smallint', 'int', 'bigint'}
+    )
+
+    SqlServerNumericHandler = create_simple_handler(
+        'SqlServerNumeric',
+        float,
+        {2, 3, 6, 7, 8, 106, 108, 59, 60, 62, 122},
+        {'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real'}
+    )
+
+    SqlServerBooleanHandler = create_simple_handler(
+        'SqlServerBoolean',
+        bool,
+        {-7, 104},
+        {'bit'}
+    )
+
+    SqlServerStringHandler = create_simple_handler(
+        'SqlServerString',
+        str,
+        {1, 12, -1, -8, -9, -10, 167, 175, 231, 239, 241, 99, 173, -11},
+        {'char', 'varchar', 'text', 'nchar', 'nvarchar', 'ntext', 'xml', 'uniqueidentifier'}
+    )
+
+    SqlServerDateHandler = create_simple_handler(
+        'SqlServerDate',
+        datetime.date,
+        {91, 40},
+        {'date'}
+    )
+
+    SqlServerTimeHandler = create_simple_handler(
+        'SqlServerTime',
+        datetime.time,
+        {92, 41, -154},
+        {'time'}
+    )
+
+    SqlServerDateTimeHandler = create_simple_handler(
+        'SqlServerDateTime',
+        datetime.datetime,
+        {93, 36, 9, 61, 58, 42},
+        {'datetime', 'smalldatetime', 'datetime2'}
+    )
+
+    SqlServerBinaryHandler = create_simple_handler(
+        'SqlServerBinary',
+        bytes,
+        {-2, -3, -4, 34, 35, 165},
+        {'binary', 'varbinary', 'image'}
+    )
+
+    SqlServerGuidHandler = create_simple_handler(
+        'SqlServerGuid',
+        str,
+        {-11, 36},
+        {'uniqueidentifier'}
+    )
 
 
-class SqlServerStringHandler(TypeHandler):
-    """Handles SQL Server string types (CHAR, VARCHAR, TEXT, NVARCHAR, etc.)"""
-
-    def __init__(self):
-        super().__init__(python_type=str)
-        import pyodbc
-        self.type_codes = {
-            pyodbc.SQL_CHAR, pyodbc.SQL_VARCHAR, pyodbc.SQL_LONGVARCHAR,
-            pyodbc.SQL_WCHAR, pyodbc.SQL_WVARCHAR, pyodbc.SQL_WLONGVARCHAR,
-            1, 12, -1, -8, -9, -10,  # Standard ODBC codes
-            167, 175, 231, 239, 241, 99, 173, -11  # SQL Server specific
-        }
-        self.type_names = {'char', 'varchar', 'text', 'nchar', 'nvarchar',
-                           'ntext', 'xml', 'uniqueidentifier'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
-class SqlServerDateHandler(TypeHandler):
-    """Handles SQL Server DATE type"""
-
-    def __init__(self):
-        super().__init__(python_type=datetime.date)
-        import pyodbc
-        self.type_codes = {pyodbc.SQL_TYPE_DATE, 91, 40}  # ODBC + SQL Server specific
-        self.type_names = {'date'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
-class SqlServerTimeHandler(TypeHandler):
-    """Handles SQL Server TIME type"""
-
-    def __init__(self):
-        super().__init__(python_type=datetime.time)
-        import pyodbc
-        self.type_codes = {pyodbc.SQL_TYPE_TIME, 92, 41, -154}  # ODBC + SQL Server specific
-        self.type_names = {'time'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
-class SqlServerDateTimeHandler(TypeHandler):
-    """Handles SQL Server DATETIME types (DATETIME, SMALLDATETIME, DATETIME2)"""
-
-    def __init__(self):
-        super().__init__(python_type=datetime.datetime)
-        import pyodbc
-        self.type_codes = {
-            pyodbc.SQL_TYPE_TIMESTAMP, 93, 36,
-            9,  # ODBC 2.x datetime
-            61, 58, 42  # SQL Server specific
-        }
-        self.type_names = {'datetime', 'smalldatetime', 'datetime2'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
+# Define the SQL Server DATETIMEOFFSET handler separately as it needs custom handling
 class SqlServerDateTimeOffsetHandler(TypeHandler):
     """Handles SQL Server DATETIMEOFFSET type"""
 
@@ -188,39 +243,6 @@ class SqlServerDateTimeOffsetHandler(TypeHandler):
         return bool(isinstance(type_code, str) and type_code.lower() in self.type_names)
 
 
-class SqlServerBinaryHandler(TypeHandler):
-    """Handles SQL Server binary types (BINARY, VARBINARY, IMAGE)"""
-
-    def __init__(self):
-        super().__init__(python_type=bytes)
-        import pyodbc
-        self.type_codes = {
-            pyodbc.SQL_BINARY, pyodbc.SQL_VARBINARY, pyodbc.SQL_LONGVARBINARY,
-            -2, -3, -4,  # Standard ODBC codes
-            34, 35, 165  # SQL Server specific
-        }
-        self.type_names = {'binary', 'varbinary', 'image'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
-class SqlServerGuidHandler(TypeHandler):
-    """Handles SQL Server UNIQUEIDENTIFIER type"""
-
-    def __init__(self):
-        super().__init__(python_type=str)  # Use string as Python type for compatibility
-        self.type_codes = {-11, 36}  # ODBC + SQL Server specific
-        self.type_names = {'uniqueidentifier'}
-
-    def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        if type_name and type_name.lower() in self.type_names:
-            return True
-        return type_code in self.type_codes
-
-
 class TypeHandlerRegistry:
     """Registry for database type handlers
 
@@ -240,23 +262,52 @@ class TypeHandlerRegistry:
     def __init__(self):
         self._handlers: dict[str, list[TypeHandler]] = {
             'mssql': [
-                SqlServerIntegerHandler(),
-                SqlServerNumericHandler(),
-                SqlServerBooleanHandler(),
-                SqlServerStringHandler(),
-                SqlServerDateHandler(),
-                SqlServerTimeHandler(),
-                SqlServerDateTimeHandler(),
-                SqlServerDateTimeOffsetHandler(),
-                SqlServerBinaryHandler(),
-                SqlServerGuidHandler()
+                SqlServerIntegerHandler,
+                SqlServerNumericHandler,
+                SqlServerBooleanHandler,
+                SqlServerStringHandler,
+                SqlServerDateHandler,
+                SqlServerTimeHandler,
+                SqlServerDateTimeHandler,
+                SqlServerDateTimeOffsetHandler(),  # Instance needed for special handling
+                SqlServerBinaryHandler,
+                SqlServerGuidHandler
             ],
             'postgresql': [],
             'sqlite': []
         }
 
         # Default handlers for all databases
-        self._default_handler = SqlServerStringHandler()  # Uses str type
+        self._default_handler = SqlServerStringHandler  # Uses str type
+
+    def get_type_from_type_code(self, db_type: str, type_code: Any) -> type | None:
+        """Find a Python type based strictly on the database type code.
+
+        This method only uses handlers that can determine the type based solely
+        on the type_code, without considering column names or other contextual
+        information. This ensures we trust the database's type system.
+
+        Args:
+            db_type: Database engine type ('postgresql', 'mssql', 'sqlite')
+            type_code: Database-specific type code
+
+        Returns
+            Python type or None if no handler matches just the type code
+        """
+        # Fast path for already-Python types
+        if isinstance(type_code, type):
+            return type_code
+
+        if db_type not in self._handlers:
+            return None
+
+        for handler in self._handlers.get(db_type, []):
+            # Call handles_type with type_name=None to test if the handler
+            # can determine the type based solely on the type_code
+            if handler.handles_type(type_code, None):
+                return handler.python_type
+
+        return None
 
     def register_handler(self, db_type: str, handler: TypeHandler):
         """Register a new type handler"""
@@ -271,6 +322,10 @@ class TypeHandlerRegistry:
         This method only identifies the appropriate Python type for a database type.
         It does not perform any conversion of values.
         """
+        # Fast path for already-Python types
+        if isinstance(type_code, type):
+            return type_code
+
         handlers = self._handlers.get(db_type, [])
 
         # Try each handler in order
@@ -558,10 +613,11 @@ class TypeResolver:
     that is handled by the database drivers and registered adapters.
 
     The resolver uses multiple sources of type information in priority order:
-    1. Type handler registry (customizable type mapping)
-    2. Configuration-based type overrides
-    3. Column name pattern matching
-    4. Built-in type maps for each database
+    1. Direct database type code mapping (highest priority)
+    2. Type handler registry (customizable type mapping)
+    3. Configuration-based type overrides
+    4. Column name pattern matching
+    5. Built-in type maps for each database
     """
 
     def __init__(self):
@@ -569,6 +625,41 @@ class TypeResolver:
         self._type_maps: dict[str, dict[Any, type]] = {}
         self._registry = TypeHandlerRegistry.get_instance()
         self._initialize_type_maps()
+
+    def _is_python_type(self, type_code: Any) -> bool:
+        """Check if the type_code is already a Python type."""
+        return isinstance(type_code, type)
+
+    def _use_type_directly_if_python_type(self, type_code: Any) -> type | None:
+        """Return type_code if it's already a Python type, otherwise None."""
+        return type_code if self._is_python_type(type_code) else None
+
+    def get_type_from_type_code(self, db_type: str, type_code: Any) -> type | None:
+        """Resolve type based only on database type code.
+
+        This method prioritizes the database's own type information
+        without considering column names or patterns. It strictly uses
+        the type code provided by the database.
+
+        Args:
+            db_type: Database type ('postgresql', 'mssql', 'sqlite')
+            type_code: Database-specific type code
+
+        Returns
+            Python type or None if unmappable
+        """
+        # Fast path: If type_code is already a Python type, use it directly
+        direct_type = self._use_type_directly_if_python_type(type_code)
+        if direct_type:
+            return direct_type
+
+        # Check direct mappings from type maps first (fastest lookup)
+        if db_type in self._type_maps and type_code in self._type_maps[db_type]:
+            return self._type_maps[db_type][type_code]
+
+        # Fall back to type handler registry but only use handlers
+        # that make decisions purely on type_code
+        return self._registry.get_type_from_type_code(db_type, type_code)
 
     def _initialize_type_maps(self):
         """Load type mapping dictionaries for supported database systems."""
@@ -579,19 +670,61 @@ class TypeResolver:
             'mssql_codes': mssql_type_codes
         }
 
-        # Register missing handlers for PostgreSQL based on type maps
+        # Register handlers for PostgreSQL based on type maps
         for type_code, python_type in self._type_maps['postgresql'].items():
-            # Create a simple handler that just returns the mapped Python type
-            class SimplePostgresHandler(TypeHandler):
-                def __init__(self, code, py_type):
-                    super().__init__(py_type)
-                    self.code = code
-
-                def handles_type(self, type_code, type_name=None):
-                    return type_code == self.code
-
+            # Use the factory to create PostgreSQL handlers
+            postgres_handler = create_simple_handler(
+                f'PostgreSQL_{type_code}',
+                python_type,
+                {type_code},
+                None
+            )
             # Register with registry
-            self._registry.register_handler('postgresql', SimplePostgresHandler(type_code, python_type))
+            self._registry.register_handler('postgresql', postgres_handler)
+
+    def _resolve_type_with_context(
+        self,
+        db_type: str,
+        type_code: Any,
+        column_name: str | None,
+        table_name: str | None,
+        type_map: dict[Any, type] | None = None
+    ) -> type:
+        """Common type resolution logic across database types.
+
+        This centralizes the common resolution pattern to reduce duplication.
+
+        Args:
+            db_type: Database type identifier
+            type_code: Database-specific type code
+            column_name: Optional column name for context
+            table_name: Optional table name for configuration lookup
+            type_map: Optional type map for direct lookups
+
+        Returns
+            Python type
+        """
+        # Check configuration first if column_name available
+        if column_name:
+            config = TypeMappingConfig.get_instance()
+            config_type = config.get_type_for_column(db_type, table_name, column_name)
+            if config_type:
+                python_type = self._map_config_type_to_python(config_type)
+                if python_type:
+                    return python_type
+
+        # Check column name patterns
+        if column_name:
+            python_type = self._resolve_by_column_name(column_name, type_code, table_name, db_type)
+            if python_type:
+                return python_type
+
+        # Use type map if provided
+        if type_map and type_code in type_map:
+            return type_map[type_code]
+
+        # Default fallback
+        return str
 
     def resolve_python_type(
         self,
@@ -622,8 +755,9 @@ class TypeResolver:
             Python type (e.g., int, str, datetime.date)
         """
         # Fast path: If type_code is already a Python type, use it directly
-        if isinstance(type_code, type):
-            return type_code
+        direct_type = self._use_type_directly_if_python_type(type_code)
+        if direct_type:
+            return direct_type
 
         # Try the handler registry first
         # Handle SQL Server string type codes specially
@@ -672,23 +806,10 @@ class TypeResolver:
         Returns
             Python type
         """
-        # First check configuration
-        if column_name:
-            config = TypeMappingConfig.get_instance()
-            config_type = config.get_type_for_column('postgresql', table_name, column_name)
-            if config_type:
-                python_type = self._map_config_type_to_python(config_type)
-                if python_type:
-                    return python_type
-
-        # Check for column name patterns
-        if column_name:
-            python_type = self._resolve_by_column_name(column_name, type_code, table_name, 'postgresql')
-            if python_type:
-                return python_type
-
-        # Direct lookup from type maps
-        return self._type_maps['postgresql'].get(type_code, str)
+        return self._resolve_type_with_context(
+            'postgresql', type_code, column_name, table_name,
+            self._type_maps['postgresql']
+        )
 
     def _resolve_sqlite_type(
         self,
@@ -713,28 +834,16 @@ class TypeResolver:
         Returns
             Python type
         """
-        # First check configuration
-        if column_name:
-            config = TypeMappingConfig.get_instance()
-            config_type = config.get_type_for_column('sqlite', table_name, column_name)
-            if config_type:
-                python_type = self._map_config_type_to_python(config_type)
-                if python_type:
-                    return python_type
-
-        # Check for column name patterns
-        if column_name:
-            python_type = self._resolve_by_column_name(column_name, type_code, table_name, 'sqlite')
-            if python_type:
-                return python_type
-
-        # Handle string type codes with parameters (e.g., "NUMERIC(10,2)")
+        # Handle string type codes with parameters before using common resolution logic
         if isinstance(type_code, str):
             base_type = type_code.split('(')[0].upper()
-            return self._type_maps['sqlite'].get(base_type, str)
+            if base_type in self._type_maps['sqlite']:
+                return self._type_maps['sqlite'][base_type]
 
-        # Default fallback
-        return str
+        return self._resolve_type_with_context(
+            'sqlite', type_code, column_name, table_name,
+            self._type_maps['sqlite']
+        )
 
     def _resolve_mssql_type(
         self,
@@ -759,29 +868,12 @@ class TypeResolver:
         Returns
             Python type
         """
-        # Fast path: If type_code is already a Python type, use it directly
-        if isinstance(type_code, type):
-            return type_code
-
-        # First check configuration - highest priority
-        if column_name:
-            config = TypeMappingConfig.get_instance()
-            config_type = config.get_type_for_column('mssql', table_name, column_name)
-            if config_type:
-                python_type = self._map_config_type_to_python(config_type)
-                if python_type:
-                    return python_type
-
-        # Check for column name patterns - especially for VARCHAR types
-        if column_name and (type_code == 12 or isinstance(type_code, str) and type_code.lower() in {'varchar', 'nvarchar'}):
-            python_type = self._resolve_by_column_name(column_name, type_code, table_name, 'mssql')
-            if python_type:
-                return python_type
-
         # Try direct name match if type_code is a string
         if isinstance(type_code, str):
             type_name = type_code.lower()
-            return self._type_maps['mssql_names'].get(type_name, str)
+            python_type = self._type_maps['mssql_names'].get(type_name)
+            if python_type:
+                return python_type
 
         # Try numeric type code lookup
         if isinstance(type_code, int):
@@ -789,14 +881,10 @@ class TypeResolver:
             if python_type:
                 return python_type
 
-        # Apply name-based refinement for any other cases not handled above
-        if column_name:
-            python_type = self._resolve_by_column_name(column_name, type_code, table_name, 'mssql')
-            if python_type:
-                return python_type
-
-        # Default to string if no match
-        return str
+        # Use the common resolution logic as fallback
+        return self._resolve_type_with_context(
+            'mssql', type_code, column_name, table_name
+        )
 
     def _map_config_type_to_python(self, config_type: str) -> type | None:
         """
@@ -808,30 +896,42 @@ class TypeResolver:
         Returns
             Python type or None if no mapping found
         """
+        # This map is centralized here to avoid duplication
         type_map = {
+            # Integer types
             'int': int,
             'integer': int,
             'bigint': int,
             'smallint': int,
             'tinyint': int,
+
+            # Floating point types
             'float': float,
             'real': float,
             'double': float,
             'decimal': float,
             'numeric': float,
             'money': float,
+
+            # Boolean type
             'bit': bool,
             'boolean': bool,
+
+            # Date/time types
             'date': datetime.date,
             'datetime': datetime.datetime,
             'timestamp': datetime.datetime,
             'time': datetime.time,
+
+            # String types
             'varchar': str,
             'char': str,
             'text': str,
             'nvarchar': str,
             'nchar': str,
             'ntext': str,
+
+            # Binary types
             'binary': bytes,
             'varbinary': bytes,
             'blob': bytes
@@ -872,32 +972,42 @@ class TypeResolver:
         # Fall back to hard-coded patterns for column names
         name_lower = column_name.lower()
 
-        # ID columns are typically integers
-        if name_lower.endswith('_id') or name_lower == 'id':
-            return int
+        # Column name pattern matching - centralized here to reduce duplication
+        patterns = {
+            # ID columns are typically integers
+            'id_pattern': (lambda n: n.endswith('_id') or n == 'id', int),
 
-        # Date columns
-        if name_lower.endswith('_date') or name_lower == 'date':
-            return datetime.date
+            # Date columns
+            'date_pattern': (lambda n: n.endswith('_date') or n == 'date', datetime.date),
 
-        # DateTime columns
-        if (name_lower.endswith(('_datetime', '_at', '_timestamp')) or
-                name_lower == 'timestamp'):
-            return datetime.datetime
+            # DateTime columns
+            'datetime_pattern': (
+                lambda n: (n.endswith(('_datetime', '_at', '_timestamp')) or n == 'timestamp'),
+                datetime.datetime
+            ),
 
-        # Time columns
-        if name_lower.endswith('_time') or name_lower == 'time':
-            return datetime.time
+            # Time columns
+            'time_pattern': (lambda n: n.endswith('_time') or n == 'time', datetime.time),
 
-        # Boolean indicators
-        if (name_lower.startswith('is_') or name_lower.endswith('_flag') or
-                name_lower in {'active', 'enabled', 'disabled', 'is_deleted'}):
-            return bool
+            # Boolean indicators
+            'bool_pattern': (
+                lambda n: (n.startswith('is_') or n.endswith('_flag') or
+                           n in {'active', 'enabled', 'disabled', 'is_deleted'}),
+                bool
+            ),
 
-        # Money/currency columns
-        if (name_lower.endswith(('_price', '_cost', '_amount')) or
-                name_lower.startswith(('price_', 'cost_', 'amount_'))):
-            return float
+            # Money/currency columns
+            'money_pattern': (
+                lambda n: (n.endswith(('_price', '_cost', '_amount')) or
+                           n.startswith(('price_', 'cost_', 'amount_'))),
+                float
+            )
+        }
+
+        # Check each pattern
+        for (matcher, python_type) in patterns.values():
+            if matcher(name_lower):
+                return python_type
 
         return None
 
@@ -916,6 +1026,9 @@ def resolve_type(
     This function provides a simplified interface to the TypeResolver, creating
     a singleton instance if needed and delegating to its resolve_python_type method.
 
+    The resolution process prioritizes the database's type information over
+    name-based pattern matching, ensuring more accurate type identification.
+
     Args:
         db_type: Database type ('postgresql', 'mssql', 'sqlite')
         type_code: Database-specific type code
@@ -926,15 +1039,22 @@ def resolve_type(
     Returns
         Python type (e.g., int, str, datetime.date)
     """
-    # Fast path: If type_code is already a Python type, use it directly
-    if isinstance(type_code, type):
-        return type_code
-
     # Use a global instance of the resolver
     global _global_resolver
     if '_global_resolver' not in globals() or _global_resolver is None:
         _global_resolver = TypeResolver()
 
+    # First check if type_code is already a Python type (fastest path)
+    if isinstance(type_code, type):
+        return type_code
+
+    # Try to resolve based strictly on the database type code
+    # This ensures we trust the database's type system first
+    python_type = _global_resolver.get_type_from_type_code(db_type, type_code)
+    if python_type is not None:
+        return python_type
+
+    # Fall back to the full resolution process if type code-only resolution fails
     return _global_resolver.resolve_python_type(
         db_type,
         type_code,
