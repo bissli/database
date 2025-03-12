@@ -11,7 +11,7 @@ import math
 import pytest
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope='module', autouse=True)
 def value_dict():
     """Return a dictionary of test values for all major types"""
     return {

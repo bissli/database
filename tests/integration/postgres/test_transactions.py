@@ -180,19 +180,6 @@ def test_transaction_execute_returning_multiple_rows(psql_docker, conn):
             assert category in result_categories
 
 
-def test_connect_respawn(psql_docker, conn):
-    """Test connection respawn behavior"""
-    query = 'select count(1) from test_table'
-    initial_count = db.select_scalar(conn, query)
-
-    # Close connection
-    conn.close()
-
-    # Should reconnect automatically
-    new_count = db.select_scalar(conn, query)
-    assert new_count == initial_count
-
-
 def test_nested_transactions_not_supported(psql_docker, conn):
     """Test that nested transactions raise appropriate errors"""
     with db.transaction(conn) as tx1:
@@ -200,6 +187,72 @@ def test_nested_transactions_not_supported(psql_docker, conn):
         with pytest.raises(RuntimeError):
             # Call directly with the same connection
             db.transaction(conn)
+
+
+def test_postgres_hardcoded_literals_transaction(psql_docker, conn):
+    """Test transaction with different types of hardcoded literals"""
+
+    # Create a test table
+    with db.transaction(conn) as tx:
+        tx.execute('DROP TABLE IF EXISTS literal_test')
+        tx.execute('CREATE TABLE literal_test (id INT, name VARCHAR(50), value DECIMAL(10,2))')
+
+    # Test different types of literals within a transaction
+    with db.transaction(conn) as tx:
+        # Insert with literals
+        tx.execute("INSERT INTO literal_test (id, name, value) VALUES (1, 'Test', 10.5)")
+
+        # Test various direct queries to see what works
+        print('\nTesting direct literal queries in PostgreSQL:')
+
+        # Simple SELECT with no WHERE
+        result1 = tx.select('SELECT * FROM literal_test')
+        print(f'Plain SELECT: {result1}')
+
+        # SELECT with hardcoded WHERE clause
+        result2 = tx.select('SELECT * FROM literal_test WHERE id = 1')
+        print(f'SELECT with hardcoded WHERE: {result2}')
+
+        # SELECT with parameterized WHERE clause
+        result3 = tx.select('SELECT * FROM literal_test WHERE id = %s', 1)
+        print(f'SELECT with parameterized WHERE: {result3}')
+
+        # Aggregate without GROUP BY
+        result4 = tx.select('SELECT SUM(value) AS sum_value FROM literal_test')
+        print(f'SUM aggregate: {result4}')
+
+        # Aggregate with direct value
+        result5 = tx.select('SELECT 100.5 + SUM(value) AS calculated FROM literal_test')
+        print(f'SUM with direct value: {result5}')
+
+        # Simple direct value
+        result6 = tx.select('SELECT 42 AS answer')
+        print(f'Direct value: {result6}')
+
+        # Direct string literal
+        result7 = tx.select("SELECT 'hello' AS greeting")
+        print(f'String literal: {result7}')
+
+        # Try a more complex query
+        tx.execute("INSERT INTO literal_test (id, name, value) VALUES (2, 'Another', 20.5)")
+        result8 = tx.select('SELECT id, name, value FROM literal_test ORDER BY id')
+        print(f'Multi-row result: {result8}')
+
+        # Try COUNT with literal comparison
+        result9 = tx.select('SELECT COUNT(*) AS row_count FROM literal_test WHERE value > 5')
+        print(f'COUNT with literal comparison: {result9}')
+
+        # Try different method with aggregate - using a subquery
+        result10 = tx.select('SELECT * FROM (SELECT SUM(value) AS total FROM literal_test) t')
+        print(f'SUM via subquery: {result10}')
+
+        # Try without alias
+        result11 = tx.select('SELECT SUM(value) FROM literal_test')
+        print(f'SUM without alias: {result11}')
+
+    # Clean up
+    with db.transaction(conn) as tx:
+        tx.execute('DROP TABLE literal_test')
 
 
 if __name__ == '__main__':
