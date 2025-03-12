@@ -50,6 +50,9 @@ class CursorWrapper:
         from database.utils.connection_utils import is_pyodbc_connection
         start = time.time()
 
+        # Extract custom arguments
+        auto_commit = kwargs.pop('auto_commit', True)
+
         try:
             # Execute the SQL with appropriate parameter handling
             self._execute_sql(sql, args)
@@ -69,6 +72,11 @@ class CursorWrapper:
             end = time.time()
             self.connwrapper.addcall(end - start)
             logger.debug('Query time: %f' % (end - start))
+
+        # Commit automatically if needed and we're not in a transaction
+        if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
+            from database.utils.auto_commit import ensure_commit
+            ensure_commit(self.connwrapper)
 
         return self.cursor.rowcount
 

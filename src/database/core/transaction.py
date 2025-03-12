@@ -33,7 +33,6 @@ class Transaction:
 
     def __init__(self, cn):
         self.connection = cn
-
         self.sa_connection = getattr(cn, 'sa_connection', None)
 
         # Initialize thread-local storage if needed
@@ -45,6 +44,10 @@ class Transaction:
         if connection_id in _local.active_transactions:
             raise RuntimeError('Nested transactions are not supported')
 
+        # Mark the connection as being in a transaction
+        if hasattr(cn, 'in_transaction'):
+            cn.in_transaction = True
+
     @property
     def cursor(self):
         """Lazy cursor wrapped with timing and error handling"""
@@ -54,9 +57,16 @@ class Transaction:
     def __enter__(self):
         # Mark this connection as having an active transaction in this thread
         _local.active_transactions[id(self.connection)] = True
+
+        # Disable auto-commit for the transaction
+        from database.utils.auto_commit import disable_auto_commit
+        disable_auto_commit(self.connection)
+
         return self
 
     def __exit__(self, exc_type, value, traceback):
+        from database.utils.auto_commit import enable_auto_commit
+
         try:
             cn = getattr(self.connection, 'connection', self.connection)
 
@@ -69,6 +79,13 @@ class Transaction:
         finally:
             # Always remove from active transactions, even if an exception occurred
             _local.active_transactions.pop(id(self.connection), None)
+
+            # Reset auto-commit mode
+            enable_auto_commit(self.connection)
+
+            # Unmark the connection as being in a transaction
+            if hasattr(self.connection, 'in_transaction'):
+                self.connection.in_transaction = False
 
     @handle_query_params
     def execute(self, sql, *args, returnid=None):

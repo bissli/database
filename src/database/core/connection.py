@@ -70,6 +70,7 @@ class ConnectionWrapper:
         self.connection = sa_connection.connection  # Raw DBAPI connection
         self.calls = 0  # Count of queries executed
         self.time = 0   # Total execution time in seconds
+        self.in_transaction = False  # Track if in an explicit transaction
 
     def __enter__(self):
         """Support for context manager protocol"""
@@ -138,14 +139,27 @@ class ConnectionWrapper:
         """
         return not isinstance(self.engine.pool, sa.pool.NullPool)
 
+    def commit(self):
+        """Explicit commit that works regardless of auto-commit setting"""
+        # Try to commit on SQLAlchemy connection
+        self.sa_connection.commit()
+
+        # Also try to commit on raw connection if needed
+        # This ensures both transaction layers are committed
+        if not getattr(self.connection, 'autocommit', None):
+            self.connection.commit()
+
     def close(self):
-        """Close the SQLAlchemy connection, returning it to the pool"""
-        try:
-            if not getattr(self.sa_connection, 'closed', False):
-                self.sa_connection.close()
-                logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s')
-        except Exception as e:
-            logger.debug(f'Error closing connection: {e}')
+        """Close the SQLAlchemy connection, committing first if needed"""
+        from database.utils.auto_commit import ensure_commit
+
+        if not getattr(self.sa_connection, 'closed', False):
+            # Ensure any pending changes are committed before closing
+            if not self.in_transaction:
+                ensure_commit(self.sa_connection)
+
+            self.sa_connection.close()
+            logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s')
 
 
 # Since we're now fully using SQLAlchemy for connection management,

@@ -115,7 +115,10 @@ select skeys(hstore(null::{table})) as column
 
     def configure_connection(self, conn):
         """Configure connection settings for PostgreSQL"""
-        # No specific configuration needed
+        from database.utils.auto_commit import enable_auto_commit
+
+        # Set auto-commit for PostgreSQL connections
+        enable_auto_commit(conn)
 
     def quote_identifier(self, identifier):
         """Quote an identifier for PostgreSQL"""

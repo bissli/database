@@ -24,12 +24,14 @@ asserts = { version = "*", optional = true }
 pytest = { version = "*", optional = true }
 docker = { version = "*", optional = true }
 pytest-cov = { version = "^6.0.0", optional = true }
+pytest-mock = { version = "*", optional = true }
 
 [tool.poetry.extras]
 test = [
   "asserts",
   "pytest",
   "docker",
+  "pytest-mock",
   "pytest-cov",
 ]
 

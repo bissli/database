@@ -262,6 +262,20 @@ def _setup_mock_conn(conn_type, type_str):
     mock_conn.driver_type = conn_type  # Used by newer code
     mock_conn._driver_type = conn_type  # For property support (legacy code)
 
+    # Set database-specific autocommit properties
+    if conn_type in {'postgresql', 'mssql'}:
+        conn_mock.autocommit = False
+    elif conn_type == 'sqlite':
+        conn_mock.isolation_level = 'DEFERRED'
+
+    # Add SQLAlchemy-specific attributes needed for auto-commit testing
+    mock_conn.sa_connection = MagicMock()
+    mock_conn.sa_connection.connection = conn_mock
+    mock_conn.sa_connection.execution_options = MagicMock()
+
+    # Add transaction tracking attribute
+    mock_conn.in_transaction = False
+
     return mock_conn
 
 
@@ -1125,7 +1139,15 @@ def mock_postgres_conn():
     # These ensure that is_psycopg_connection() returns True for our mock
     patchers.append(patch(
         'database.utils.connection_utils.is_psycopg_connection',
-        side_effect=lambda x: x is mock_conn or x is mock_conn.connection or hasattr(x, 'connection') and x.connection is mock_conn.connection
+        side_effect=lambda obj, _seen=None: (
+            obj is mock_conn or 
+            obj is mock_conn.connection or 
+            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
+            (hasattr(obj, 'driver_connection') and (
+                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn.connection
+            ))
+        )
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',
@@ -1275,7 +1297,15 @@ def mock_postgres_conn_with_types():
     # Connection type detection patches
     patchers.append(patch(
         'database.utils.connection_utils.is_psycopg_connection',
-        side_effect=lambda x: x is mock_conn or x is mock_conn.connection or hasattr(x, 'connection') and x.connection is mock_conn.connection
+        side_effect=lambda obj, _seen=None: (
+            obj is mock_conn or 
+            obj is mock_conn.connection or 
+            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
+            (hasattr(obj, 'driver_connection') and (
+                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn.connection
+            ))
+        )
     ))
 
     # And isconnection
@@ -1388,7 +1418,15 @@ def mock_sqlserver_conn():
     # These ensure that is_pyodbc_connection() returns True for our mock
     patchers.append(patch(
         'database.utils.connection_utils.is_pyodbc_connection',
-        side_effect=lambda x: x is mock_conn or x is mock_conn.connection or hasattr(x, 'connection') and x.connection is mock_conn.connection
+        side_effect=lambda obj, _seen=None: (
+            obj is mock_conn or 
+            obj is mock_conn.connection or 
+            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
+            (hasattr(obj, 'driver_connection') and (
+                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn.connection
+            ))
+        )
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',
@@ -1542,7 +1580,15 @@ def mock_sqlserver_proc_conn():
     # Connection type detection
     patchers.append(patch(
         'database.utils.connection_utils.is_pyodbc_connection',
-        side_effect=lambda x: x is mock_conn or x is mock_conn.connection or hasattr(x, 'connection') and x.connection is mock_conn.connection
+        side_effect=lambda obj, _seen=None: (
+            obj is mock_conn or 
+            obj is mock_conn.connection or 
+            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
+            (hasattr(obj, 'driver_connection') and (
+                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn.connection
+            ))
+        )
     ))
 
     # And isconnection
@@ -1657,7 +1703,16 @@ def mock_sqlite_conn():
     # These ensure that is_sqlite3_connection() returns True for our mock
     patchers.append(patch(
         'database.utils.connection_utils.is_sqlite3_connection',
-        side_effect=lambda x: x is mock_conn or x is mock_conn.connection or hasattr(x, 'connection') and x.connection is mock_conn.connection
+        side_effect=lambda obj, _seen=None: (
+            obj is mock_conn or 
+            obj is mock_conn.connection or
+            # Simplify the connection checks to avoid potential recursion
+            (hasattr(obj, 'connection') and id(obj.connection) == id(mock_conn.connection)) or
+            (hasattr(obj, 'driver_connection') and (
+                id(obj.driver_connection) == id(mock_conn) or 
+                id(obj.driver_connection) == id(mock_conn.connection)
+            ))
+        )
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',

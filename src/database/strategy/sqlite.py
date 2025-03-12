@@ -60,6 +60,10 @@ select name as column from pragma_table_info('{table}')
         # Enable foreign keys by default
         conn.execute('PRAGMA foreign_keys = ON')
 
+        # Set auto-commit for SQLite connections
+        from database.utils.auto_commit import enable_auto_commit
+        enable_auto_commit(conn)
+
     def quote_identifier(self, identifier):
         """Quote an identifier for SQLite"""
         return '"' + identifier.replace('"', '""') + '"'

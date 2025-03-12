@@ -88,7 +88,10 @@ where t.name = ?
 
     def configure_connection(self, conn):
         """Configure connection settings for SQL Server"""
-        # No specific configuration needed
+        from database.utils.auto_commit import enable_auto_commit
+
+        # Set auto-commit for SQL Server connections
+        enable_auto_commit(conn)
 
     def quote_identifier(self, identifier):
         """Quote an identifier for SQL Server"""
