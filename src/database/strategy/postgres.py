@@ -1,5 +1,13 @@
 """
 PostgreSQL-specific strategy implementation.
+
+This module implements the DatabaseStrategy interface with PostgreSQL-specific operations.
+It handles PostgreSQL's unique features such as:
+- VACUUM and ANALYZE for table optimization
+- REINDEX for index rebuilding
+- CLUSTER for physical reordering of table data
+- Sequence management for auto-increment columns
+- Metadata retrieval using PostgreSQL system catalogs
 """
 import logging
 
@@ -82,8 +90,17 @@ from
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
 
-    def get_primary_keys(self, cn, table):
-        """Get primary key columns for a table"""
+    def get_primary_keys(self, cn, table, bypass_cache=False):
+        """Get primary key columns for a table
+
+        Args:
+            cn: Database connection object
+            table: Table name to get primary keys for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of primary key column names
+        """
         sql = """
 select a.attname as column
 from pg_index i
@@ -93,8 +110,17 @@ where i.indrelid = %s::regclass and i.indisprimary
         from database.operations.query import select_column
         return select_column(cn, sql, table)
 
-    def get_columns(self, cn, table):
-        """Get all columns for a table"""
+    def get_columns(self, cn, table, bypass_cache=False):
+        """Get all columns for a table
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names for the specified table
+        """
         # This PostgreSQL-specific query gives all columns
         sql = f"""
 select skeys(hstore(null::{table})) as column
@@ -102,8 +128,17 @@ select skeys(hstore(null::{table})) as column
         from database.operations.query import select_column
         return select_column(cn, sql)
 
-    def get_sequence_columns(self, cn, table):
-        """Get columns with sequences"""
+    def get_sequence_columns(self, cn, table, bypass_cache=False):
+        """Get columns with sequences
+
+        Args:
+            cn: Database connection object
+            table: Table name to get sequence columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of sequence/identity column names for the specified table
+        """
         sql = """
         SELECT column_name as column
         FROM information_schema.columns
@@ -124,7 +159,16 @@ select skeys(hstore(null::{table})) as column
         """Quote an identifier for PostgreSQL"""
         return '"' + identifier.replace('"', '""') + '"'
 
-    def _find_sequence_column(self, cn, table):
-        """Find the best column to reset sequence for"""
+    def _find_sequence_column(self, cn, table, bypass_cache=False):
+        """Find the best column to reset sequence for
+
+        Args:
+            cn: Database connection object
+            table: Table name to analyze for sequence columns
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            str: Column name best suited for sequence resetting
+        """
         # Use the common implementation from base class
-        return super()._find_sequence_column(cn, table)
+        return super()._find_sequence_column(cn, table, bypass_cache=bypass_cache)
