@@ -297,12 +297,12 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
         # Create a new engine with provided settings
         url = create_url_from_options(options)
 
-        # SQLAlchemy 2.0 recommended settings
+        # SQLAlchemy 2.0
         engine_kwargs = {
             'pool_pre_ping': True,
             'pool_reset_on_return': 'rollback',
-            'future': True,  # SQLAlchemy 2.0 behavior
-            'echo': False    # Set to True for SQL logging
+            'future': True,
+            'echo':  False
         }
 
         # Configure pooling based on use_pool parameter

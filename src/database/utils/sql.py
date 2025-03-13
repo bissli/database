@@ -213,8 +213,8 @@ def chunk_sql_parameters(sql, args, param_limit):
     return chunks
 
 
-def prepare_parameters_for_execution(sql: str, args: tuple, 
-                                   db_type: str, param_limit: int) -> list:
+def prepare_parameters_for_execution(sql: str, args: tuple,
+                                     db_type: str, param_limit: int) -> list:
     """
     Prepare SQL parameters for execution, handling chunking if needed.
 
@@ -230,7 +230,7 @@ def prepare_parameters_for_execution(sql: str, args: tuple,
     # No chunking needed for empty args or parameters within limits
     if not args or len(args) <= param_limit:
         return [args]
-    
+
     # Return list of parameter chunks
     return chunk_sql_parameters(sql, args, param_limit)
 
@@ -238,31 +238,31 @@ def prepare_parameters_for_execution(sql: str, args: tuple,
 def prepare_stored_procedure_parameters(sql: str, args: tuple) -> tuple:
     """
     Prepare parameters for SQL Server stored procedure execution.
-    
+
     Converts named parameters in stored procedures to positional parameters
     and adjusts parameter counts to match placeholders.
-    
+
     Args:
         sql: SQL query string for a stored procedure
         args: Original parameters
-        
-    Returns:
-        tuple: (processed_sql, processed_args_list) where processed_args_list is 
+
+    Returns
+        tuple: (processed_sql, processed_args_list) where processed_args_list is
                a list of parameter chunks (usually just one for stored procedures)
     """
     # This incorporates the SQL Server-specific parameter handling logic
     from database.utils.sqlserver_utils import prepare_sqlserver_params
-    
+
     # Convert parameters to positional placeholders
     processed_sql, processed_args = prepare_sqlserver_params(sql, args)
-    
+
     # Count placeholders in the SQL
     placeholder_count = processed_sql.count('?')
     param_count = len(processed_args) if processed_args else 0
-    
+
     if not processed_args:
         return processed_sql, [[]]
-    
+
     # Adjust parameter count to match placeholders
     if placeholder_count != param_count:
         if placeholder_count > param_count:
@@ -272,11 +272,11 @@ def prepare_stored_procedure_parameters(sql: str, args: tuple) -> tuple:
         else:
             # Truncate if we have too many parameters
             processed_args = processed_args[:placeholder_count]
-    
+
     # Handle single parameter case specially
     if placeholder_count == 1 and len(processed_args) >= 1:
         return processed_sql, [[processed_args[0]]]
-    
+
     return processed_sql, [processed_args]
 
 
