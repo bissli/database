@@ -70,7 +70,7 @@ DBCC CHECKIDENT ('{table}', RESEED, @max);
             list: List of primary key column names
         """
         sql = """
-SELECT c.name as column
+SELECT c.name as column_name
 FROM sys.indexes i
 JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
 JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
@@ -92,7 +92,7 @@ AND OBJECT_NAME(i.object_id) = ?
             list: List of column names for the specified table
         """
         sql = """
-select c.name as column
+select c.name as column_name
 from sys.columns c
 join sys.tables t on c.object_id = t.object_id
 where t.name = ?
@@ -112,7 +112,7 @@ where t.name = ?
             list: List of sequence/identity column names for the specified table
         """
         sql = """
-        SELECT c.name as column
+        SELECT c.name as column_name
         FROM sys.columns c
         JOIN sys.tables t ON c.object_id = t.object_id
         WHERE t.name = ? AND c.is_identity = 1
