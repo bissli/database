@@ -39,7 +39,7 @@ def process_query_parameters(cn, sql, args):
 
     # 1. Standardize placeholders based on DB type
     sql = standardize_placeholders(cn, sql)
-    
+
     # 2. Handle NULL values with IS/IS NOT operators
     sql, args = handle_null_is_operators(sql, args)
 
@@ -171,6 +171,115 @@ def escape_like_clause_placeholders(sql):
     return sql
 
 
+def get_param_limit_for_db(db_type):
+    """
+    Get the parameter limit for a given database type.
+
+    Args:
+        db_type: Database type ('postgresql', 'sqlite', 'mssql', or other)
+
+    Returns
+        int: Parameter limit for the database
+    """
+    if db_type == 'postgresql':
+        return 65000  # PostgreSQL limit is 65535, using 65000 for safety
+    if db_type == 'sqlite':
+        return 900    # SQLite default is 999, using 900 for safety
+    if db_type == 'mssql':
+        return 2000   # SQL Server limit is 2100, using 2000 for safety
+    return 900    # Conservative default for unknown databases
+
+
+def chunk_sql_parameters(sql, args, param_limit):
+    """
+    Split parameters into chunks to avoid database parameter limits.
+
+    Args:
+        sql: SQL statement
+        args: Parameters (tuple or list)
+        param_limit: Maximum parameters per execution
+
+    Returns
+        List of parameter chunks to execute separately
+    """
+    if not args or len(args) <= param_limit:
+        return [args]
+
+    # Create chunks of parameters
+    chunks = []
+    for i in range(0, len(args), param_limit):
+        chunks.append(args[i:i + param_limit])
+
+    return chunks
+
+
+def prepare_parameters_for_execution(sql: str, args: tuple, 
+                                   db_type: str, param_limit: int) -> list:
+    """
+    Prepare SQL parameters for execution, handling chunking if needed.
+
+    Args:
+        sql: SQL query to execute
+        args: Parameters for the query
+        db_type: Database type (postgresql, sqlite, mssql)
+        param_limit: Parameter limit for this database type
+
+    Returns
+        list: List of parameter chunks to execute
+    """
+    # No chunking needed for empty args or parameters within limits
+    if not args or len(args) <= param_limit:
+        return [args]
+    
+    # Return list of parameter chunks
+    return chunk_sql_parameters(sql, args, param_limit)
+
+
+def prepare_stored_procedure_parameters(sql: str, args: tuple) -> tuple:
+    """
+    Prepare parameters for SQL Server stored procedure execution.
+    
+    Converts named parameters in stored procedures to positional parameters
+    and adjusts parameter counts to match placeholders.
+    
+    Args:
+        sql: SQL query string for a stored procedure
+        args: Original parameters
+        
+    Returns:
+        tuple: (processed_sql, processed_args_list) where processed_args_list is 
+               a list of parameter chunks (usually just one for stored procedures)
+    """
+    # This incorporates the SQL Server-specific parameter handling logic
+    from database.utils.sqlserver_utils import prepare_sqlserver_params
+    
+    # Convert parameters to positional placeholders
+    processed_sql, processed_args = prepare_sqlserver_params(sql, args)
+    
+    # Count placeholders in the SQL
+    placeholder_count = processed_sql.count('?')
+    param_count = len(processed_args) if processed_args else 0
+    
+    if not processed_args:
+        return processed_sql, [[]]
+    
+    # Adjust parameter count to match placeholders
+    if placeholder_count != param_count:
+        if placeholder_count > param_count:
+            # Add None values if we need more parameters
+            processed_args = list(processed_args)
+            processed_args.extend([None] * (placeholder_count - param_count))
+        else:
+            # Truncate if we have too many parameters
+            processed_args = processed_args[:placeholder_count]
+    
+    # Handle single parameter case specially
+    if placeholder_count == 1 and len(processed_args) >= 1:
+        return processed_sql, [[processed_args[0]]]
+    
+    return processed_sql, [processed_args]
+
+
 def sanitize_sql_for_logging(sql, args=None):
     """
     Remove sensitive information from SQL for logging.
@@ -292,21 +401,21 @@ def handle_query_params(func):
 def handle_null_is_operators(sql, args):
     """
     Handle NULL values used with IS and IS NOT operators.
-    
+
     Converts 'IS %s' and 'IS NOT %s' with None parameters to 'IS NULL' and 'IS NOT NULL'
     instead of trying to use parameterized NULL values which causes syntax errors.
     Also handles named parameters like 'IS %(param)s'.
-    
+
     Args:
         sql: SQL query string
         args: Query parameters
-        
-    Returns:
+
+    Returns
         Tuple of (processed_sql, processed_args)
     """
     if not args or not sql:
         return sql, args
-    
+
     # Process differently based on whether args is a dict (named params) or tuple/list (positional)
     if isinstance(args, dict):
         return _handle_null_is_named_params(sql, args)
@@ -317,93 +426,93 @@ def handle_null_is_operators(sql, args):
 def _handle_null_is_positional_params(sql, args):
     """
     Handle NULL values with IS/IS NOT for positional parameters (%s, ?).
-    
+
     Args:
         sql: SQL query string
         args: List or tuple of parameters
-        
-    Returns:
+
+    Returns
         Tuple of (processed_sql, processed_args)
     """
     # Pattern to find IS or IS NOT followed by a positional placeholder
     pattern = r'\b(IS\s+NOT|IS)\s+(%s|\?)\b'
-    
+
     # Convert list/tuple args to a list for modification
     args_was_tuple = isinstance(args, tuple)
     if args_was_tuple:
         args = list(args)
-        
+
     # Find all matches of IS or IS NOT with placeholder
     matches = list(re.finditer(pattern, sql, re.IGNORECASE))
-    
+
     # Process matches in reverse to avoid position shifts
     for match in reversed(matches):
         # Find the position of this placeholder in the SQL
         text_before = sql[:match.start(2)]
         placeholder_count = text_before.count('%s') + text_before.count('?')
-        
+
         # Check if we have enough arguments
         if placeholder_count < len(args):
             param_value = args[placeholder_count]
-            
+
             # If the parameter is None, replace the pattern with IS NULL or IS NOT NULL
             if param_value is None:
                 operator = match.group(1).upper()  # IS or IS NOT
                 replacement = f'{operator} NULL'
-                
+
                 # Replace in SQL
                 start_pos = match.start(0)
                 end_pos = match.end(0)
                 sql = sql[:start_pos] + replacement + sql[end_pos:]
-                
+
                 # Remove the parameter from args
                 args.pop(placeholder_count)
-    
+
     # Convert back to tuple if the input was a tuple
     if args_was_tuple:
         args = tuple(args)
-        
+
     return sql, args
 
 
 def _handle_null_is_named_params(sql, args):
     """
     Handle NULL values with IS/IS NOT for named parameters (%(name)s).
-    
+
     Args:
         sql: SQL query string
         args: Dictionary of named parameters
-        
-    Returns:
+
+    Returns
         Tuple of (processed_sql, processed_args)
     """
     # Pattern to find IS or IS NOT followed by a named parameter
     pattern = r'\b(IS\s+NOT|IS)\s+(%\([^)]+\)s)\b'
-    
+
     # Make a copy of the args dictionary
     args = args.copy()
-    
+
     # Find all matches of IS or IS NOT with named parameter
     matches = list(re.finditer(pattern, sql, re.IGNORECASE))
-    
+
     # Process each match
     for match in matches:
         param_placeholder = match.group(2)  # Gets "%(name)s"
         param_name = re.search(r'%\(([^)]+)\)s', param_placeholder).group(1)
-        
+
         # Check if this parameter exists and is None
         if param_name in args and args[param_name] is None:
             operator = match.group(1).upper()  # IS or IS NOT
             replacement = f'{operator} NULL'
-            
+
             # Replace in SQL
             start_pos = match.start(0)
             end_pos = match.end(0)
             sql = sql[:start_pos] + replacement + sql[end_pos:]
-            
+
             # Remove the parameter from args
             args.pop(param_name)
-    
+
     return sql, args
 
 
