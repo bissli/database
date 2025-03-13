@@ -11,21 +11,6 @@ The module maintains the same API as before while using SQLAlchemy under the hoo
 - All existing code that uses our database connection API continues to work
 - ConnectionWrapper continues to provide timing and statistics tracking
 
-Usage example:
-    # Create a connection with default settings
-    cn = connect('postgresql+psycopg://user:pass@localhost/dbname')
-
-    # Use connection pooling
-    cn = connect(
-        'postgresql+psycopg://user:pass@localhost/dbname',
-        use_pool=True,
-        pool_max_connections=10,
-        pool_max_idle_time=600
-    )
-
-    # Use as a context manager
-    with connect('postgresql+psycopg://user:pass@localhost/dbname') as cn:
-        data = select(cn, "SELECT * FROM my_table")
 """
 import logging
 import re
@@ -160,32 +145,6 @@ class ConnectionWrapper:
 
             self.sa_connection.close()
             logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s')
-
-
-# Since we're now fully using SQLAlchemy for connection management,
-# we don't need the _create_connection function or LoggingCursor class anymore
-# class LoggingCursor(ClientCursor):
-    # """Cursor that logs all SQL operations for PostgreSQL
-
-    # This specialized cursor extends psycopg's ClientCursor to provide
-    # complete logging of SQL statements with parameter substitution.
-    # It shows the actual SQL being sent to the database with all
-    # parameters properly formatted.
-    # """
-
-    # def execute(self, query, params=None, *args):
-        # """Execute a query with logging"""
-        # try:
-            # # Format the query with parameters for logging
-            # formatted = self.mogrify(query, params)
-            # if isinstance(formatted, bytes):
-                # formatted = formatted.decode()
-            # logger.debug(f'SQL:\n{formatted}')
-        # except Exception:
-            # # Fall back to basic logging if mogrify fails
-            # logger.debug(f'SQL:\n{query}\nParameters: {params}')
-
-        # return super().execute(query, params, *args)
 
 
 @load_options(cls=DatabaseOptions)
