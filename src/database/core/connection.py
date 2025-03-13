@@ -19,7 +19,9 @@ from dataclasses import fields
 import sqlalchemy as sa
 from database.core.cursor import CursorWrapper
 from database.options import DatabaseOptions
+from database.utils.connection_utils import close_sqlalchemy_connection
 from database.utils.connection_utils import get_connection_from_engine
+from database.utils.connection_utils import get_dialect_name
 from database.utils.connection_utils import get_engine_for_options
 
 from libb import load_options
@@ -143,7 +145,7 @@ class ConnectionWrapper:
             if not self.in_transaction:
                 ensure_commit(self.sa_connection)
 
-            self.sa_connection.close()
+            close_sqlalchemy_connection(self.sa_connection)
             logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s')
 
 
@@ -208,11 +210,12 @@ def connect(options, config=None, **kw):
 
     # Register appropriate adapters for the database type
     from database import adapter_registry
-    if options.drivername == 'postgresql':
+    dialect_name = get_dialect_name(sa_connection)
+    if dialect_name == 'postgresql':
         sa_connection.connection.adapters = adapter_registry.postgres()
-    elif options.drivername == 'sqlite':
+    elif dialect_name == 'sqlite':
         adapter_registry.sqlite(sa_connection.connection)
-    elif options.drivername == 'mssql':
+    elif dialect_name == 'mssql':
         adapter_registry.sqlserver(sa_connection.connection)
 
     # Return wrapped connection

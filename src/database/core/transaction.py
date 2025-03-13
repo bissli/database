@@ -6,6 +6,7 @@ import threading
 
 import pandas as pd
 from database.options import use_iterdict_data_loader
+from database.utils.connection_utils import check_connection
 from database.utils.sql import handle_query_params
 
 from libb import attrdict, isiterable
@@ -87,9 +88,10 @@ class Transaction:
             if hasattr(self.connection, 'in_transaction'):
                 self.connection.in_transaction = False
 
+    @check_connection
     @handle_query_params
     def execute(self, sql, *args, returnid=None):
-        """Execute SQL within transaction context"""
+        """Execute SQL within transaction context with connection retry"""
         cursor = self.cursor
 
         # Use existing parameter handling function from utils.sql

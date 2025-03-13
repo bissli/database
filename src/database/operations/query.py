@@ -262,6 +262,35 @@ def select_scalar(cn, sql, *args):
     return RowStructureAdapter.create(cn, data[0]).get_value()
 
 
+def execute_many(connection, sql, params_list, chunk_size=1000):
+    """Execute a query with multiple parameter sets in chunks
+
+    This method handles large volumes of data by executing in chunks,
+    which prevents memory issues and improves efficiency.
+
+    Args:
+        connection: Database connection
+        sql: SQL query with placeholders
+        params_list: List of parameter sets to execute
+        chunk_size: Number of parameter sets to execute per batch
+
+    Returns
+        int: Total number of affected rows
+    """
+    from database.utils.connection_utils import managed_connection
+
+    total_rows = 0
+
+    with managed_connection(connection) as conn:
+        # Process in chunks to avoid memory issues
+        for i in range(0, len(params_list), chunk_size):
+            chunk = params_list[i:i+chunk_size]
+            result = conn.execute(sql, chunk)
+            total_rows += result.rowcount
+
+    return total_rows
+
+
 def select_scalar_or_none(cn, sql, *args):
     """Execute a query and return a single scalar value or None if no rows found"""
     try:

@@ -7,7 +7,9 @@ from functools import wraps
 from numbers import Number
 
 from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection, isconnection
+from database.utils.connection_utils import is_pyodbc_connection
+from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import isconnection
 
 from libb import collapse
 
@@ -219,14 +221,12 @@ def IterChunk(cursor, size=5000):
 
 def get_dict_cursor(cn):
     """Get a cursor that returns rows as dictionaries for the given connection type"""
-    from database.utils.connection_utils import is_psycopg_connection
-    from database.utils.connection_utils import is_sqlite3_connection
-
     if hasattr(cn, 'connection'):
         raw_conn = cn.connection
     else:
         raw_conn = cn
 
+    # Enhanced type detection with better support for connection wrappers
     if is_psycopg_connection(cn):
         cursor = raw_conn.cursor(row_factory=DictRowFactory)
     elif is_pyodbc_connection(cn):

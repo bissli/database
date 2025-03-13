@@ -18,6 +18,7 @@ import atexit
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from functools import wraps
 
 import sqlalchemy as sa
@@ -36,6 +37,7 @@ __all__ = [
     'get_connection_from_engine',
     'close_sqlalchemy_connection',
     'get_dialect_name',
+    'managed_connection',
 ]
 
 logger = logging.getLogger(__name__)
@@ -45,118 +47,111 @@ _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
 
 
-def _check_connection_type(obj, type_str, checker_func, _seen=None):
-    """Common helper to check for connection type with recursion prevention.
+def _check_connection_features(obj, dialect_name=None, type_str=None, _seen=None):
+    """Check connection object for specific features or type signature.
+
+    This internal helper reduces duplication in connection type detection.
+
+    Args:
+        obj: Object to check
+        dialect_name: SQLAlchemy dialect name to match (e.g., 'postgresql')
+        type_str: Type string to look for (e.g., 'psycopg.Connection')
+        _seen: Set of already seen object IDs (for cycle detection)
+
+    Returns
+        bool: True if connection matches criteria
     """
     if _seen is None:
         _seen = set()
 
-    if id(obj) not in _seen:
-        _seen.add(id(obj))
+    if id(obj) in _seen:
+        return False
 
-        # Handle SQLAlchemy Connection objects by accessing driver_connection
-        if hasattr(obj, 'driver_connection'):
-            return checker_func(obj.driver_connection, _seen)
+    _seen.add(id(obj))
 
-        # Handle ConnectionWrapper objects
-        if hasattr(obj, 'connection'):
-            return checker_func(obj.connection, _seen)
-
-        # Handle SQLAlchemy Engine objects
-        if hasattr(obj, 'dialect'):
-            dialect_name = str(obj.dialect.name).lower()
-            if type_str == 'psycopg.Connection' and dialect_name == 'postgresql':
-                return True
-            if type_str == 'pyodbc.Connection' and dialect_name == 'mssql':
-                return True
-            if type_str == 'sqlite3.Connection' and dialect_name == 'sqlite':
-                return True
-
-    conn_str = str(type(obj))
-    return type_str in conn_str
-
-
-def is_psycopg_connection(obj, _seen=None):
-    """Check if object is a psycopg connection or wrapper containing one."""
-    # Check if it's a SQLAlchemy connection with PostgreSQL dialect
-    if hasattr(obj, 'dialect') and str(obj.dialect.name).lower() == 'postgresql':
-        return True
-
-    # For SQLAlchemy Connection objects
-    if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
-        if str(obj.engine.dialect.name).lower() == 'postgresql':
+    # Check dialect for SQLAlchemy objects
+    if dialect_name and hasattr(obj, 'dialect'):
+        if str(obj.dialect.name).lower() == dialect_name:
             return True
+
+    # Check engine dialect for SQLAlchemy connections
+    if dialect_name and hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
+        if str(obj.engine.dialect.name).lower() == dialect_name:
+            return True
+
+    # Check string type for direct connections
+    if type_str and type_str in str(type(obj)):
+        return True
 
     # Check for SQLAlchemy 2.0 driver_connection attribute
     if hasattr(obj, 'driver_connection'):
-        conn_type = str(type(obj.driver_connection))
-        if 'psycopg.Connection' in conn_type:
-            return True
+        driver_conn = obj.driver_connection
+        if driver_conn is not obj:  # Prevent infinite recursion
+            return _check_connection_features(
+                driver_conn, dialect_name, type_str, _seen
+            )
 
-    return _check_connection_type(
+    # Check ConnectionWrapper objects
+    if hasattr(obj, 'connection'):
+        conn = obj.connection
+        if conn is not obj:  # Prevent infinite recursion
+            return _check_connection_features(
+                conn, dialect_name, type_str, _seen
+            )
+
+    return False
+
+
+def is_psycopg_connection(obj):
+    """Check if object is a psycopg connection or wrapper containing one.
+
+    Args:
+        obj: Object to check
+
+    Returns
+        bool: True if the object is or contains a psycopg connection
+    """
+    return _check_connection_features(
         obj,
-        'psycopg.Connection',
-        is_psycopg_connection,
-        _seen
+        dialect_name='postgresql',
+        type_str='psycopg.Connection'
     )
 
 
-def is_pyodbc_connection(obj, _seen=None):
-    """Check if object is a pyodbc connection or wrapper containing one."""
-    # Check if it's a SQLAlchemy connection with SQL Server dialect
-    if hasattr(obj, 'dialect') and str(obj.dialect.name).lower() == 'mssql':
-        return True
+def is_pyodbc_connection(obj):
+    """Check if object is a pyodbc connection or wrapper containing one.
 
-    # For SQLAlchemy Connection objects
-    if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
-        if str(obj.engine.dialect.name).lower() == 'mssql':
-            return True
+    Args:
+        obj: Object to check
 
-    # Check for SQLAlchemy 2.0 driver_connection attribute
-    if hasattr(obj, 'driver_connection'):
-        conn_type = str(type(obj.driver_connection))
-        if 'pyodbc.Connection' in conn_type:
-            return True
-
-    return _check_connection_type(
+    Returns
+        bool: True if the object is or contains a pyodbc connection
+    """
+    return _check_connection_features(
         obj,
-        'pyodbc.Connection',
-        is_pyodbc_connection,
-        _seen
+        dialect_name='mssql',
+        type_str='pyodbc.Connection'
     )
 
 
-def is_sqlite3_connection(obj, _seen=None):
-    """Check if object is a sqlite3 connection or wrapper containing one."""
-    # Check if it's a SQLAlchemy connection with SQLite dialect
-    if hasattr(obj, 'dialect') and str(obj.dialect.name).lower() == 'sqlite':
-        return True
+def is_sqlite3_connection(obj):
+    """Check if object is a sqlite3 connection or wrapper containing one.
 
-    # For SQLAlchemy Connection objects
-    if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
-        if str(obj.engine.dialect.name).lower() == 'sqlite':
-            return True
+    Args:
+        obj: Object to check
 
-    # Check for SQLAlchemy 2.0 driver_connection attribute
-    if hasattr(obj, 'driver_connection'):
-        conn_type = str(type(obj.driver_connection))
-        if 'sqlite3.Connection' in conn_type:
-            return True
-
-    return _check_connection_type(
+    Returns
+        bool: True if the object is or contains a sqlite3 connection
+    """
+    return _check_connection_features(
         obj,
-        'sqlite3.Connection',
-        is_sqlite3_connection,
-        _seen
+        dialect_name='sqlite',
+        type_str='sqlite3.Connection'
     )
 
 
 def isconnection(obj):
     """Check if object is any supported database connection"""
-    # Check for SQLAlchemy Connection
-    if hasattr(obj, '__class__') and 'sqlalchemy' in str(obj.__class__) and 'Connection' in str(obj.__class__):
-        return True
-    # Check for SQLAlchemy 2.0+ Connection with driver_connection
     if hasattr(obj, 'driver_connection'):
         return True
     if is_psycopg_connection(obj):
@@ -166,34 +161,37 @@ def isconnection(obj):
     return is_sqlite3_connection(obj)
 
 
-def create_url_from_options(options):
+def create_url_from_options(options, url_creator=sa.URL.create):
     """Convert DatabaseOptions to SQLAlchemy URL.
 
     Args:
         options: DatabaseOptions object with connection parameters
+        url_creator: Function used to create URL objects (default: sqlalchemy.URL.create)
 
     Returns
         sqlalchemy.URL: SQLAlchemy URL object for database connection
     """
     if options.drivername == 'sqlite':
         # SQLite connection string is simple
-        return sa.URL.create(
+        return url_creator(
             drivername='sqlite',
             database=options.database
         )
 
     elif options.drivername == 'postgresql':
-        # PostgreSQL connection with psycopg driver
-        return sa.URL.create(
+        # PostgreSQL connection with psycopg driver (SQLAlchemy 2.0 preferred driver)
+        query = {}
+        if options.timeout:
+            query['connect_timeout'] = str(options.timeout)
+
+        return url_creator(
             drivername='postgresql+psycopg',
             username=options.username,
             password=options.password,
             host=options.hostname,
             port=options.port,
             database=options.database,
-            query={
-                'connect_timeout': str(options.timeout) if options.timeout else None
-            }
+            query=query
         )
 
     elif options.drivername == 'mssql':
@@ -210,7 +208,7 @@ def create_url_from_options(options):
         if options.appname:
             query_params['APP'] = options.appname
 
-        return sa.URL.create(
+        return url_creator(
             drivername='mssql+pyodbc',
             username=options.username,
             password=options.password,
@@ -224,7 +222,7 @@ def create_url_from_options(options):
 
 
 def check_connection(func=None, *, max_retries=3, retry_delay=1,
-                     retry_errors=None, retry_backoff=1.5):
+                     retry_errors=None, retry_backoff=1.5, sleep_func=time.sleep):
     """Connection retry decorator with backoff
 
     Decorator that handles connection errors by automatically retrying the operation.
@@ -238,6 +236,7 @@ def check_connection(func=None, *, max_retries=3, retry_delay=1,
         retry_delay: Initial delay between retries in seconds
         retry_errors: Exception types that trigger a retry (default: DbConnectionError)
         retry_backoff: Multiplier for delay between retries (exponential backoff)
+        sleep_func: Function to use for delay between retries (default: time.sleep)
 
     Returns
         Decorated function with retry logic
@@ -262,7 +261,7 @@ def check_connection(func=None, *, max_retries=3, retry_delay=1,
                         logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
                         raise
                     logger.warning(f'Connection error (attempt {tries}/{max_retries}): {err}')
-                    time.sleep(delay)
+                    sleep_func(delay)
                     delay *= retry_backoff
 
         return inner
@@ -272,16 +271,19 @@ def check_connection(func=None, *, max_retries=3, retry_delay=1,
     return decorator(func)
 
 
-def get_engine_for_options(options, use_pool=False, pool_size=1,
-                           pool_recycle=300, pool_timeout=30, **kwargs):
+def get_engine_for_options(options, use_pool=False, pool_size=5,
+                           pool_recycle=300, pool_timeout=30,
+                           engine_factory=sa.create_engine, **kwargs):
     """Get or create a SQLAlchemy engine for the given options.
 
     Args:
         options: DatabaseOptions object
         use_pool: Whether to use connection pooling
-        pool_size: Maximum number of connections in the pool
+        pool_size: Maximum number of connections in the pool (default 5)
         pool_recycle: Number of seconds after which a connection is recycled
         pool_timeout: Number of seconds to wait for a connection from the pool
+        engine_factory: Function to create engines (defaults to sqlalchemy.create_engine)
+        **kwargs: Additional arguments passed to engine factory
 
     Returns
         sqlalchemy.engine.Engine: SQLAlchemy engine
@@ -297,10 +299,12 @@ def get_engine_for_options(options, use_pool=False, pool_size=1,
         # Create a new engine with provided settings
         url = create_url_from_options(options)
 
+        # SQLAlchemy 2.0 recommended settings
         engine_kwargs = {
             'pool_pre_ping': True,
             'pool_reset_on_return': 'rollback',
-            'echo': False  # Set to True for SQL logging
+            'future': True,  # SQLAlchemy 2.0 behavior
+            'echo': False    # Set to True for SQL logging
         }
 
         # Configure pooling based on use_pool parameter
@@ -315,8 +319,8 @@ def get_engine_for_options(options, use_pool=False, pool_size=1,
         # Add any additional engine parameters
         engine_kwargs.update(kwargs)
 
-        # Create the engine
-        engine = sa.create_engine(url, **engine_kwargs)
+        # Create the engine using the factory
+        engine = engine_factory(url, **engine_kwargs)
 
         # Store in registry
         _engine_registry[key] = engine
@@ -355,6 +359,9 @@ atexit.register(dispose_all_engines)
 def get_connection_from_engine(engine):
     """Get a connection from the engine.
 
+    This function uses SQLAlchemy 2.0 recommended connection patterns.
+    For better connection management, consider using managed_connection() instead.
+
     Args:
         engine: SQLAlchemy engine
 
@@ -362,6 +369,35 @@ def get_connection_from_engine(engine):
         sqlalchemy.engine.Connection: SQLAlchemy connection
     """
     return engine.connect()
+
+
+@contextmanager
+def managed_connection(engine_or_options):
+    """Context manager for automatically managing database connections.
+
+    This ensures connections are properly closed even if exceptions occur.
+    Uses SQLAlchemy 2.0 connection management patterns.
+
+    Args:
+        engine_or_options: Either a SQLAlchemy engine or DatabaseOptions
+
+    Yields
+        Connection: A SQLAlchemy connection object with SQLAlchemy 2.0 API
+
+    Example:
+        with managed_connection(engine) as conn:
+            result = conn.execute(sa.text("SELECT * FROM users"))
+            for row in result:
+                print(row)
+    """
+    engine = engine_or_options
+    if not isinstance(engine, sa.engine.Engine):
+        engine = get_engine_for_options(engine_or_options)
+
+    with engine.begin() as connection:
+        # Using SQLAlchemy 2.0 connection context manager with automatic commit/rollback
+        yield connection
+    # No need to explicitly close - the context manager handles it
 
 
 def close_sqlalchemy_connection(connection):
