@@ -48,7 +48,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def integer_handler(self):
         """Fixture that returns a SqlServerIntegerHandler"""
-        return SqlServerIntegerHandler()
+        return SqlServerIntegerHandler
 
     def test_sqlserver_integer_handler(self, integer_handler):
         """Test SqlServerIntegerHandler identifies integer types correctly"""
@@ -75,7 +75,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def numeric_handler(self):
         """Fixture that returns a SqlServerNumericHandler"""
-        return SqlServerNumericHandler()
+        return SqlServerNumericHandler
 
     def test_sqlserver_numeric_handler(self, numeric_handler):
         """Test SqlServerNumericHandler identifies numeric types correctly"""
@@ -105,7 +105,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def boolean_handler(self):
         """Fixture that returns a SqlServerBooleanHandler"""
-        return SqlServerBooleanHandler()
+        return SqlServerBooleanHandler
 
     def test_sqlserver_boolean_handler(self, boolean_handler):
         """Test SqlServerBooleanHandler identifies boolean types correctly"""
@@ -123,7 +123,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def date_handler(self):
         """Fixture that returns a SqlServerDateHandler"""
-        return SqlServerDateHandler()
+        return SqlServerDateHandler
 
     def test_sqlserver_date_handler(self, date_handler):
         """Test SqlServerDateHandler identifies date types correctly"""
@@ -141,7 +141,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def time_handler(self):
         """Fixture that returns a SqlServerTimeHandler"""
-        return SqlServerTimeHandler()
+        return SqlServerTimeHandler
 
     def test_sqlserver_time_handler(self, time_handler):
         """Test SqlServerTimeHandler identifies time types correctly"""
@@ -160,7 +160,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def datetime_handler(self):
         """Fixture that returns a SqlServerDateTimeHandler"""
-        return SqlServerDateTimeHandler()
+        return SqlServerDateTimeHandler
 
     def test_sqlserver_datetime_handler(self, datetime_handler):
         """Test SqlServerDateTimeHandler identifies datetime types correctly"""
@@ -179,7 +179,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def datetimeoffset_handler(self):
         """Fixture that returns a SqlServerDateTimeOffsetHandler"""
-        return SqlServerDateTimeOffsetHandler()
+        return SqlServerDateTimeOffsetHandler()  # This one needs to be instantiated
 
     def test_sqlserver_datetimeoffset_handler(self, datetimeoffset_handler):
         """Test SqlServerDateTimeOffsetHandler identifies datetimeoffset correctly"""
@@ -200,7 +200,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def string_handler(self):
         """Fixture that returns a SqlServerStringHandler"""
-        return SqlServerStringHandler()
+        return SqlServerStringHandler
 
     def test_sqlserver_string_handler(self, string_handler):
         """Test SqlServerStringHandler identifies string types correctly"""
@@ -228,7 +228,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def binary_handler(self):
         """Fixture that returns a SqlServerBinaryHandler"""
-        return SqlServerBinaryHandler()
+        return SqlServerBinaryHandler
 
     def test_sqlserver_binary_handler(self, binary_handler):
         """Test SqlServerBinaryHandler identifies binary types correctly"""
@@ -252,7 +252,7 @@ class TestTypeHandlers:
     @pytest.fixture
     def guid_handler(self):
         """Fixture that returns a SqlServerGuidHandler"""
-        return SqlServerGuidHandler()
+        return SqlServerGuidHandler
 
     def test_sqlserver_guid_handler(self, guid_handler):
         """Test SqlServerGuidHandler identifies uniqueidentifier correctly"""
