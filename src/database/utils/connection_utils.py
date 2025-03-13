@@ -18,7 +18,6 @@ import atexit
 import logging
 import threading
 import time
-from contextlib import contextmanager
 from functools import wraps
 
 import sqlalchemy as sa
@@ -37,7 +36,6 @@ __all__ = [
     'get_connection_from_engine',
     'close_sqlalchemy_connection',
     'get_dialect_name',
-    'managed_connection',
 ]
 
 logger = logging.getLogger(__name__)
@@ -360,7 +358,6 @@ def get_connection_from_engine(engine):
     """Get a connection from the engine.
 
     This function uses SQLAlchemy 2.0 recommended connection patterns.
-    For better connection management, consider using managed_connection() instead.
 
     Args:
         engine: SQLAlchemy engine
@@ -369,35 +366,6 @@ def get_connection_from_engine(engine):
         sqlalchemy.engine.Connection: SQLAlchemy connection
     """
     return engine.connect()
-
-
-@contextmanager
-def managed_connection(engine_or_options):
-    """Context manager for automatically managing database connections.
-
-    This ensures connections are properly closed even if exceptions occur.
-    Uses SQLAlchemy 2.0 connection management patterns.
-
-    Args:
-        engine_or_options: Either a SQLAlchemy engine or DatabaseOptions
-
-    Yields
-        Connection: A SQLAlchemy connection object with SQLAlchemy 2.0 API
-
-    Example:
-        with managed_connection(engine) as conn:
-            result = conn.execute(sa.text("SELECT * FROM users"))
-            for row in result:
-                print(row)
-    """
-    engine = engine_or_options
-    if not isinstance(engine, sa.engine.Engine):
-        engine = get_engine_for_options(engine_or_options)
-
-    with engine.begin() as connection:
-        # Using SQLAlchemy 2.0 connection context manager with automatic commit/rollback
-        yield connection
-    # No need to explicitly close - the context manager handles it
 
 
 def close_sqlalchemy_connection(connection):

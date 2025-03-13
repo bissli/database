@@ -5,11 +5,11 @@ import logging
 
 from database.core.query import execute
 from database.core.transaction import Transaction
+from database.operations.query import execute_many
 from database.utils.connection_utils import is_psycopg_connection
 from database.utils.connection_utils import is_pyodbc_connection
 from database.utils.connection_utils import is_sqlite3_connection
 from database.utils.sql import handle_query_params, quote_identifier
-from more_itertools import flatten
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,27 @@ def insert_rows(cn, table, rows):
     else:
         db_type = 'unknown'
 
-    # Use chunking to handle large parameter sets or rows
-    return _insert_rows_chunked(cn, table, rows, db_type)
+    # Prepare the SQL INSERT statement
+    cols = tuple(rows[0].keys())
+
+    # Handle unknown database type by using a safe fallback (no quoting)
+    try:
+        quoted_table = quote_identifier(db_type, table)
+        quoted_cols = ','.join(quote_identifier(db_type, col) for col in cols)
+    except ValueError:
+        # For unknown database types, use the identifiers without quoting
+        quoted_table = table
+        quoted_cols = ','.join(cols)
+
+    # Create placeholders for the VALUES clause
+    placeholders = ','.join(['%s'] * len(cols))
+    sql = f'INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})'
+
+    # Extract the values from the row dictionaries
+    all_params = [tuple(row.values()) for row in rows]
+
+    # Use execute_many with database-specific parameter limits - handles batching internally
+    return execute_many(cn, sql, all_params)
 
 
 def update_row(cn, table, keyfields, keyvalues, datafields, datavalues):
@@ -110,82 +129,6 @@ def update_row_sql(table, keyfields, datafields):
     keycols = ' and '.join([f'{f}=%s' for f in keyfields])
     datacols = ','.join([f'{f}=%s' for f in datafields])
     return f'update {table} set {datacols} where {keycols}'
-
-
-def _insert_rows_chunked(cn, table, rows, db_type):
-    """Insert rows with chunking to avoid parameter limits
-
-    Different databases have different parameter limits:
-    - PostgreSQL: 65535 parameters
-    - SQLite: Default 999 (configurable up to 32766)
-    - SQL Server: 2100 parameters
-
-    This function handles chunking for all database types with appropriate limits.
-
-    Args:
-        cn: Database connection
-        table: Table name
-        rows: List of row dictionaries to insert
-        db_type: Database type ('postgresql', 'sqlite', 'mssql', or other)
-    """
-    if not rows:
-        return 0
-
-    from database.utils.sql import get_param_limit_for_db
-    param_limit = get_param_limit_for_db(db_type)
-
-    cols = tuple(rows[0].keys())
-    num_columns = len(cols)
-
-    # Calculate max rows per batch based on parameter limits
-    max_rows_per_batch = param_limit // num_columns
-
-    # If we're below the limit, do a regular insert
-    if len(rows) <= max_rows_per_batch:
-        vals = tuple(flatten([tuple(row.values()) for row in rows]))
-
-        def genvals(cols, vals):
-            this = ','.join(['%s']*len(cols))
-            return ','.join([f'({this})']*int(len(vals)/len(cols)))
-
-        # Handle unknown database type by using a safe fallback (no quoting)
-        try:
-            quoted_table = quote_identifier(db_type, table)
-            quoted_cols = ','.join(quote_identifier(db_type, col) for col in cols)
-        except ValueError:
-            # For unknown database types, use the identifiers without quoting
-            quoted_table = table
-            quoted_cols = ','.join(cols)
-
-        sql = f'insert into {quoted_table} ({quoted_cols}) values {genvals(cols, vals)}'
-        return insert(cn, sql, *vals)
-
-    # If we're above the limit, chunk the rows and perform multiple inserts
-    total_rows_affected = 0
-
-    # Process in chunks
-    for i in range(0, len(rows), max_rows_per_batch):
-        chunk = rows[i:i + max_rows_per_batch]
-        vals = tuple(flatten([tuple(row.values()) for row in chunk]))
-
-        def genvals(cols, vals):
-            this = ','.join(['%s']*len(cols))
-            return ','.join([f'({this})']*int(len(vals)/len(cols)))
-
-        # Handle unknown database type by using a safe fallback (no quoting)
-        try:
-            quoted_table = quote_identifier(db_type, table)
-            quoted_cols = ','.join(quote_identifier(db_type, col) for col in cols)
-        except ValueError:
-            # For unknown database types, use the identifiers without quoting
-            quoted_table = table
-            quoted_cols = ','.join(cols)
-
-        sql = f'insert into {quoted_table} ({quoted_cols}) values {genvals(cols, vals)}'
-        rows_affected = insert(cn, sql, *vals)
-        total_rows_affected += rows_affected or 0
-
-    return total_rows_affected
 
 
 def filter_table_columns(cn, table, row_dicts):

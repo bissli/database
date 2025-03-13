@@ -262,31 +262,56 @@ def select_scalar(cn, sql, *args):
     return RowStructureAdapter.create(cn, data[0]).get_value()
 
 
-def execute_many(connection, sql, params_list, chunk_size=1000):
-    """Execute a query with multiple parameter sets in chunks
+def execute_many(cn, sql, args):
+    """Execute a query with multiple parameter sets using database-specific batching
 
-    This method handles large volumes of data by executing in chunks,
-    which prevents memory issues and improves efficiency.
+    This method automatically determines the optimal batch size based on the
+    database engine's parameter limits.
 
     Args:
-        connection: Database connection
+        cn: Database connection
         sql: SQL query with placeholders
-        params_list: List of parameter sets to execute
-        chunk_size: Number of parameter sets to execute per batch
+        args: List of parameter sets to execute
 
     Returns
         int: Total number of affected rows
     """
-    from database.utils.connection_utils import managed_connection
+    # Handle empty parameter list
+    if not args:
+        return 0
 
-    total_rows = 0
+    # Determine database type
+    from database.utils.connection_utils import is_psycopg_connection
+    from database.utils.connection_utils import is_pyodbc_connection
+    from database.utils.connection_utils import is_sqlite3_connection
 
-    with managed_connection(connection) as conn:
-        # Process in chunks to avoid memory issues
-        for i in range(0, len(params_list), chunk_size):
-            chunk = params_list[i:i+chunk_size]
-            result = conn.execute(sql, chunk)
-            total_rows += result.rowcount
+    if is_psycopg_connection(cn):
+        db_type = 'postgresql'
+    elif is_pyodbc_connection(cn):
+        db_type = 'mssql'
+    elif is_sqlite3_connection(cn):
+        db_type = 'sqlite'
+    else:
+        db_type = 'unknown'
+
+    # Get parameter limit and calculate optimal batch size
+    from database.utils.sql import get_param_limit_for_db
+    param_limit = get_param_limit_for_db(db_type)
+
+    # Calculate parameters per row
+    params_per_row = len(args[0]) if isinstance(args[0], list | tuple) else 1
+    max_batch_size = max(1, param_limit // params_per_row)
+
+    # Execute with direct DBAPI using Transaction for safety
+    from database.core.transaction import Transaction
+
+    with Transaction(cn) as tx:
+        total_rows = 0
+        for i in range(0, len(args), max_batch_size):
+            chunk = args[i:i+max_batch_size]
+            cursor = tx.cursor
+            cursor.executemany(sql, chunk)
+            total_rows += cursor.rowcount
 
     return total_rows
 
