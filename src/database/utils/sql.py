@@ -29,6 +29,25 @@ def process_query_parameters(cn, sql, args):
     Returns
         Tuple of (processed_sql, processed_args)
     """
+    # Quick exit for empty parameters
+    if not args:
+        return sql, args
+        
+    # Handle nested parameters for multi-statement queries
+    # This case handles patterns like [(param1, param2, param3)] when multiple
+    # statements with multiple placeholders are present
+    has_multiple_statements = ';' in sql
+    if has_multiple_statements and isinstance(args, (list, tuple)) and len(args) == 1:
+        if isinstance(args[0], (list, tuple)):
+            # Count placeholders to see if the inner tuple has the exact parameters we need
+            placeholder_count = sql.count('%s') + sql.count('?')
+            inner_params = args[0]
+            
+            # If the inner parameter collection matches our placeholder count,
+            # we'll unwrap it to be the primary parameter collection
+            if len(inner_params) == placeholder_count:
+                args = inner_params
+
     # Special handling for named parameters with IN clauses
     if ' in ' in sql.lower():
         if isinstance(args, dict):

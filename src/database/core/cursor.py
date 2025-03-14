@@ -2,6 +2,7 @@
 Database cursor wrappers.
 """
 import logging
+import re
 import time
 from functools import wraps
 from numbers import Number
@@ -87,19 +88,38 @@ class CursorWrapper:
         # Store original SQL for debugging
         self._original_sql = sql
 
-        # Handle dictionary parameters
+        # Handle dictionary parameters (for named placeholders)
         for arg in collapse(args):
             if isinstance(arg, dict):
                 logger.debug('Executing with dictionary parameter')
+
+                # Check if we're dealing with multiple statements in PostgreSQL
+                is_multi_statement = ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
+
+                if is_multi_statement and is_psycopg_connection(self.connwrapper):
+                    # PostgreSQL doesn't support multi-statement prepared statements with named parameters
+                    self._execute_multi_statement_postgresql_named(sql, arg)
+                    return
+
+                # Standard execution for single statements
                 self.cursor.execute(sql, arg)
                 return
 
-        # Handle SQL Server
+        # Handle SQL Server with its own specific method
         if is_pyodbc_connection(self.connwrapper):
             self._execute_sqlserver_query(sql, args)
-        else:
-            # Execute with standard parameters for other drivers
-            self.cursor.execute(sql, *args)
+            return
+
+        # Check if we're dealing with multiple statements in PostgreSQL
+        is_multi_statement = ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
+
+        if is_multi_statement and is_psycopg_connection(self.connwrapper) and args:
+            # PostgreSQL doesn't support multi-statement prepared statements
+            self._execute_multi_statement_postgresql(sql, args)
+            return
+
+        # Standard execution for all other cases
+        self.cursor.execute(sql, *args)
 
     def _execute_sqlserver_query(self, sql, args):
         """Execute a query specifically for SQL Server with appropriate handling."""
@@ -192,6 +212,62 @@ class CursorWrapper:
         else:
             # For multiple parameters, pass as a list
             self.cursor.execute(sql, params)
+
+    def _execute_multi_statement_postgresql(self, sql, args):
+        """Execute multiple PostgreSQL statements with proper parameter handling."""
+        # Split into individual statements, keeping only non-empty ones
+        statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
+
+        # Unwrap nested parameters if needed
+        params = args[0] if len(args) == 1 and isinstance(args[0], list | tuple) else args
+
+        # Count total placeholders across all statements
+        placeholder_count = sum(stmt.count('%s') for stmt in statements)
+
+        # Validate parameter count
+        if len(params) != placeholder_count:
+            raise ValueError(
+                f'Parameter count mismatch: SQL needs {placeholder_count} parameters '
+                f'but {len(params)} were provided'
+            )
+
+        # Execute statements individually with their parameters
+        param_index = 0
+        for stmt in statements:
+            placeholder_count = stmt.count('%s')
+
+            if placeholder_count > 0:
+                # Extract just the parameters needed for this statement
+                stmt_params = params[param_index:param_index + placeholder_count]
+                param_index += placeholder_count
+                self.cursor.execute(stmt, stmt_params)
+            else:
+                # Execute without parameters
+                self.cursor.execute(stmt)
+
+    def _execute_multi_statement_postgresql_named(self, sql, params_dict):
+        """Execute multiple PostgreSQL statements with named parameter handling."""
+        # Split into individual statements, keeping only non-empty ones
+        statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
+
+        # Execute each statement individually
+        for stmt in statements:
+            if not stmt:
+                continue
+
+            # Extract the parameter names used in this statement
+            param_names = re.findall(r'%\(([^)]+)\)s', stmt)
+
+            # If no parameters in this statement, execute it directly
+            if not param_names:
+                self.cursor.execute(stmt)
+                continue
+
+            # Create a filtered dictionary with only the parameters needed for this statement
+            stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
+
+            # Execute the statement with its parameters
+            self.cursor.execute(stmt, stmt_params)
 
     def _handle_sqlserver_error(self, error, sql, args):
         """Handle SQL Server specific errors with automatic fixes."""
