@@ -43,8 +43,8 @@ def process_query_parameters(cn, sql, args):
     # 2. Handle NULL values with IS/IS NOT operators
     sql, args = handle_null_is_operators(sql, args)
 
-    # 3. Handle LIKE clause escaping
-    sql = escape_like_clause_placeholders(sql)
+    # 3. Escape percent signs in all string literals
+    sql = escape_percent_signs_in_literals(sql)
 
     # 4. Handle IN clause parameters
     sql, args = handle_in_clause_params(sql, args)
@@ -148,27 +148,6 @@ def quote_identifier(db_type, identifier):
         return '[' + identifier.replace(']', ']]') + ']'
     else:
         raise ValueError(f'Unknown database type: {db_type}')
-
-
-def escape_like_clause_placeholders(sql):
-    """
-    Escape percent signs in LIKE clauses to avoid conflict with parameter placeholders.
-
-    Double the percent signs in string literals within LIKE clauses so that
-    database drivers interpret them as literal percent signs rather than placeholders.
-
-    Args:
-        sql: SQL query string
-
-    Returns
-        str: SQL with escaped LIKE clause placeholders
-    """
-    if ' LIKE ' in sql or ' like ' in sql:
-        # Only double percent signs in LIKE patterns, not in placeholders
-        sql = re.sub(r"(LIKE|like)\s+('[^']*'|\"[^\"]*\")",
-                     lambda m: m.group(1) + ' ' + m.group(2).replace('%', '%%'),
-                     sql)
-    return sql
 
 
 def get_param_limit_for_db(db_type):
@@ -386,7 +365,10 @@ def handle_query_params(func):
     """
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
-        # Skip processing if no arguments provided
+        # Always escape percent signs in literals for all SQL queries
+        sql = escape_percent_signs_in_literals(sql)
+
+        # Skip the rest of the processing if no arguments provided
         if not args:
             return func(cn, sql, *args, **kwargs)
 
@@ -396,6 +378,48 @@ def handle_query_params(func):
         return func(cn, processed_sql, *processed_args, **kwargs)
 
     return wrapper
+
+
+def escape_percent_signs_in_literals(sql):
+    """
+    Escape percent signs in all string literals to avoid conflict with parameter placeholders.
+
+    This function ensures that any % character inside string literals gets properly escaped as %%
+    so that the database driver doesn't interpret it as a parameter placeholder.
+
+    Args:
+        sql: SQL query string
+
+    Returns
+        str: SQL with escaped percent signs in string literals
+    """
+    if not sql or '%' not in sql:
+        return sql
+
+    # Helper function to escape % in single-quoted strings
+    # Handles SQL escaping of quotes ('' → ')
+    def escape_single_quoted(match):
+        content = match.group(1)
+        # Replace single % with %%, but only if not already part of %%
+        return "'" + re.sub(r'(?<!%)%(?!%)', '%%', content) + "'"
+
+    # Helper function to escape % in double-quoted strings
+    # Handles SQL escaping of quotes ("" → ")
+    def escape_double_quoted(match):
+        content = match.group(1)
+        # Replace single % with %%, but only if not already part of %%
+        return '"' + re.sub(r'(?<!%)%(?!%)', '%%', content) + '"'
+
+    # First pass: handle single-quoted strings with '' escaping
+    # The regex pattern (?:[^']|'')*? matches content allowing for '' as escaped '
+    pattern_single = r"'((?:[^']|'')*?)'"
+    sql = re.sub(pattern_single, escape_single_quoted, sql)
+
+    # Second pass: handle double-quoted strings with "" escaping
+    pattern_double = r'"((?:[^"]|"")*?)"'
+    sql = re.sub(pattern_double, escape_double_quoted, sql)
+
+    return sql
 
 
 def handle_null_is_operators(sql, args):
@@ -543,7 +567,6 @@ def prepare_sql_params_for_execution(sql, args, cn=None):
 
         # Continue with regular parameter processing
         sql = standardize_placeholders(cn, sql)
-        sql = escape_like_clause_placeholders(sql)
         sql, args = handle_in_clause_params(sql, args)
 
         # Convert special types

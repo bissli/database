@@ -20,6 +20,11 @@ This document provides detailed API documentation and advanced usage information
   - [Type Information](#type-information)
   - [Column Static Helpers](#column-static-helpers)
   - [Stored Procedures and Multiple Result Sets](#stored-procedures-and-multiple-result-sets)
+  - [SQL Parameter Handling](#sql-parameter-handling)
+    - [LIKE Clauses and Percent Signs](#like-clauses-and-percent-signs)
+    - [IS NULL / IS NOT NULL Handling](#is-null--is-not-null-handling)
+    - [IN Clause Parameter Conventions](#in-clause-parameter-conventions)
+    - [Troubleshooting Parameter Issues](#troubleshooting-parameter-issues)
 - [Data Manipulation](#data-manipulation)
   - [Insert Operations](#insert-operations)
   - [Update Operations](#update-operations)
@@ -44,7 +49,7 @@ This document provides detailed API documentation and advanced usage information
   - [Custom Data Loaders](#custom-data-loaders)
   - [Connection Pooling](#connection-pooling)
   - [Caching](#caching)
-  - [Parameter Handling](#parameter-handling)
+  - [Parameter Handling](#sql-parameter-handling)
   - [Common Table Expressions (CTEs)](#common-table-expressions-ctes)
 - [Database-Specific Features](#database-specific-features)
   - [PostgreSQL Features](#postgresql-features)
@@ -1181,63 +1186,46 @@ print(stats['my_cache']['size'])  # Current number of items in cache
 TTLCacheManager.clear_all()
 ```
 
-### Parameter Handling
+### SQL Parameter Handling
 
-The module automatically adapts SQL parameters based on database type and handles:
+The module automatically adapts SQL parameters based on database type and handles special cases like SQL `IN` clauses, LIKE patterns, and NULL values.
 
-- Converting `?` to `%s` placeholders between SQLite and PostgreSQL/SQL Server
-- Special handling for SQL `IN` clauses with list/tuple parameters:
+Note that SQL keywords such as NULL, IN, and LIKE are not case sensitive.
 
-```python
-# This works seamlessly across all database types
-user_ids = [1, 2, 3]
-db.select(cn, "SELECT * FROM users WHERE id IN %s", (user_ids,))
+#### LIKE Clauses and Percent Signs
 
-# For named parameters (PostgreSQL/SQL Server)
-statuses = ['active', 'pending']
-db.select(cn, "SELECT * FROM users WHERE status IN %(statuses)s",
-         {'statuses': statuses})
-```
+| What you write | What the driver receives |
+|----------------|--------------------------|
+| `db.select(cn, "SELECT * FROM users WHERE name LIKE 'test%'")` | `"SELECT * FROM users WHERE name LIKE 'test%%'"` |
+| `db.select(cn, "SELECT * FROM users WHERE code LIKE '%%CODE'")` | `"SELECT * FROM users WHERE code LIKE '%%CODE'"` |
+| `db.select(cn, "SELECT * FROM users WHERE name LIKE %s", "test%")` | `"SELECT * FROM users WHERE name LIKE %s", "test%"` |
+| `db.select(cn, "SELECT * FROM products WHERE code LIKE 'PRD-%' AND name LIKE %s", "Chair%")` | `"SELECT * FROM products WHERE code LIKE 'PRD-%%' AND name LIKE %s", "Chair%"` |
 
-#### IN Clause Parameter Conventions
+The module automatically escapes percent signs in string literals while preserving percent signs in parameters.
 
-When working with SQL `IN` clauses, you have several ways to pass parameters:
+#### IS NULL / IS NOT NULL Handling
 
-1. **Inline List Parameters (Simplified Syntax):**
-   ```python
-   # You can pass list parameters directly for IN clauses
-   db.select(cn, "SELECT * FROM users WHERE id IN %s", [1, 2, 3])
+| What you write | What the driver receives |
+|----------------|--------------------------|
+| `db.select(cn, "SELECT * FROM users WHERE last_login IS NULL")` | `"SELECT * FROM users WHERE last_login IS NULL"` |
+| `db.select(cn, "SELECT * FROM users WHERE email IS NOT NULL")` | `"SELECT * FROM users WHERE email IS NOT NULL"` |
+| `db.select(cn, "SELECT * FROM users WHERE last_login IS %s", None)` | `"SELECT * FROM users WHERE last_login IS NULL"` |
+| `db.select(cn, "SELECT * FROM users WHERE email IS NOT %s", None)` | `"SELECT * FROM users WHERE email IS NOT NULL"` |
+| `db.select(cn, "SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date)` | `"SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date` |
 
-   # This also works with single-item lists
-   db.select(cn, "SELECT * FROM users WHERE status IN %s", ['active'])
+The module handles `NULL` values consistently across all database backends.
 
-   # And with multiple IN clauses
-   db.select(cn, "SELECT * FROM users WHERE id IN %s AND status IN %s",
-            [1, 2, 3], ['active', 'pending'])
-   ```
-   This format provides a more intuitive syntax that aligns with how you would naturally
-   write SQL queries with list parameters. The module automatically expands these into
-   the appropriate placeholders and parameter values for the database driver.
+#### IN Clause Parameter Handling
 
-2. **Wrapped List Parameters (Standard DB-API Compatibility):**
-   ```python
-   # Pass a sequence as a single parameter in a tuple
-   user_ids = [1, 2, 3]
-   db.select(cn, "SELECT * FROM users WHERE id IN %s", (user_ids,))
+| What you write | What the driver receives |
+|----------------|--------------------------|
+| `db.select(cn, "SELECT * FROM users WHERE id IN %s", [1, 2, 3])` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
+| `db.select(cn, "SELECT * FROM users WHERE status IN %s", ['active'])` | `"SELECT * FROM users WHERE status IN (%s)", "active"` |
+| `db.select(cn, "SELECT * FROM users WHERE id IN %s", ([1, 2, 3],))` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
+| `db.select(cn, "SELECT * FROM users WHERE id IN %(ids)s", {'ids': [1, 2, 3]})` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
+| `db.select(cn, """SELECT * FROM products WHERE category IN %(cat)s AND status IN %(status)s""", {'cat': ['electronics'], 'status': ['active', 'new']})` | `"SELECT * FROM products WHERE category IN (%s) AND status IN (%s, %s)", "electronics", "active", "new"` |
 
-   # This also works with a tuple directly
-   db.select(cn, "SELECT * FROM users WHERE id IN %s", ([1, 2, 3],))
-   ```
-
-3. **Named parameters with tuple/list:**
-   ```python
-   # Use a dictionary with named parameter
-   user_ids = [1, 2, 3]
-   db.select(cn, "SELECT * FROM users WHERE id IN %(ids)s", {'ids': user_ids})
-
-   # Works with single-item tuples/lists too
-   db.select(cn, "SELECT * FROM users WHERE status IN %(status)s", {'status': ['active']})
-   ```
+The module automatically handles all necessary SQL and parameter transformations for each database backend.
 
 ### Common Table Expressions (CTEs)
 
