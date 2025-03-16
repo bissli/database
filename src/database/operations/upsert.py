@@ -379,12 +379,29 @@ def upsert_rows(
     if db_type == 'mssql':
         logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
 
-    # Filter and validate rows and columns
+    # Get table columns to validate input
+    from database.operations.schema import get_table_columns
+    table_columns = set(get_table_columns(cn, table))
+
+    # Filter and validate rows
     rows = _prepare_rows_for_upsert(cn, table, rows)
     if not rows:
         return 0
 
-    columns = tuple(rows[0].keys())
+    # Get columns from the first row
+    input_columns = set(rows[0].keys())
+
+    # Find columns that don't exist in the table
+    invalid_columns = input_columns - table_columns
+    if invalid_columns:
+        logger.warning(f'Ignoring columns not present in the table schema: {invalid_columns}')
+
+    # Filter to only valid columns, maintaining original order from the input
+    columns = tuple(col for col in rows[0] if col in table_columns)
+
+    if not columns:
+        logger.warning(f'No valid columns provided for table {table}')
+        return 0
 
     # Get primary keys if not specified
     update_cols_key = update_cols_key or get_table_primary_keys(cn, table)

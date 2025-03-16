@@ -1,4 +1,5 @@
 import database as db
+import pytest
 
 
 def test_upsert_basic(psql_docker, conn):
@@ -294,6 +295,194 @@ def test_upsert_no_primary_keys(psql_docker, conn):
     assert result[2]['value'] == 200
     assert result[3]['name'] == 'NoPK2'
     assert result[3]['value'] == 201
+
+
+def test_upsert_invalid_column_filtering(psql_docker, conn):
+    """Test that invalid columns are properly filtered in upsert_rows"""
+
+    # Make sure we have a clean connection state
+    try:
+        conn.rollback()
+    except:
+        pass
+
+    # Create test data with both valid and invalid columns
+    rows = [
+        {
+            'name': 'ValidationTest1',  # Valid column
+            'value': 100,               # Valid column
+            'nonexistent_column': 'This should be filtered out'  # Invalid column
+        },
+        {
+            'name': 'ValidationTest2',  # Valid column
+            'value': 200,               # Valid column
+            'another_bad_column': 42    # Invalid column
+        }
+    ]
+
+    # Insert with mixed valid/invalid columns
+    row_count = db.upsert_rows(conn, 'test_table', rows)
+
+    # Verify the correct number of rows were inserted
+    assert row_count == 2, 'Expected 2 rows to be inserted'
+
+    # Verify the rows were inserted correctly with only valid data
+    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+                       'ValidationTest%')
+
+    assert len(result) == 2, 'Expected 2 rows to be returned'
+    assert result[0]['name'] == 'ValidationTest1'
+    assert result[0]['value'] == 100
+    assert result[1]['name'] == 'ValidationTest2'
+    assert result[1]['value'] == 200
+
+    # Verify the invalid columns don't exist in the table
+    with pytest.raises(Exception):
+        db.select(conn, 'SELECT nonexistent_column FROM test_table')
+
+    with pytest.raises(Exception):
+        db.select(conn, 'SELECT another_bad_column FROM test_table')
+
+
+def test_upsert_column_order_independence(psql_docker, conn):
+    """Test that upsert works correctly regardless of column order in dictionaries"""
+
+    # Clean up any existing test data
+    db.execute(conn, "DELETE FROM test_table WHERE name LIKE 'OrderTest%'")
+
+    # Create test data with different column orders
+    rows = [
+        {
+            'name': 'OrderTest1',   # name first
+            'value': 300
+        },
+        {
+            'value': 400,           # value first
+            'name': 'OrderTest2'
+        }
+    ]
+
+    # Insert the rows with different column orders
+    row_count = db.upsert_rows(conn, 'test_table', rows)
+    assert row_count == 2, 'Expected 2 rows to be inserted'
+
+    # Verify all data was inserted correctly
+    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+                       'OrderTest%')
+
+    assert len(result) == 2, 'Expected 2 rows to be returned'
+    assert result[0]['name'] == 'OrderTest1'
+    assert result[0]['value'] == 300
+    assert result[1]['name'] == 'OrderTest2'
+    assert result[1]['value'] == 400
+
+
+def test_upsert_all_invalid_columns(psql_docker, conn):
+    """Test that upsert properly handles the case where all columns are invalid"""
+
+    # Create test data with only invalid columns
+    rows = [
+        {
+            'nonexistent1': 'Invalid data',
+            'nonexistent2': 123
+        }
+    ]
+
+    # This should return 0 rows affected and log a warning
+    row_count = db.upsert_rows(conn, 'test_table', rows)
+    assert row_count == 0, 'Expected 0 rows to be inserted when all columns are invalid'
+
+
+def test_upsert_with_column_order_mismatch(psql_docker, conn):
+    """Test that upsert correctly handles when column order in dictionaries doesn't match DB schema order"""
+
+    # Create a test table with a specific column order
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_column_order (
+        id SERIAL PRIMARY KEY,
+        last_name VARCHAR(50) NOT NULL,
+        first_name VARCHAR(50) NOT NULL,
+        age INTEGER NOT NULL,
+        email VARCHAR(100) NULL
+    )
+    """)
+
+    # Insert data with columns in a completely different order than the schema
+    rows = [
+        {
+            'email': 'john.doe@example.com',     # 5th in schema, 1st in dict
+            'age': 30,                           # 4th in schema, 2nd in dict
+            'first_name': 'John',                # 3rd in schema, 3rd in dict
+            'last_name': 'Doe',                  # 2nd in schema, 4th in dict
+            'id': 1                              # 1st in schema, 5th in dict
+        },
+        {
+            'first_name': 'Jane',                # Different order for second row
+            'email': 'jane.smith@example.com',
+            'id': 2,
+            'last_name': 'Smith',
+            'age': 28
+        }
+    ]
+
+    # Insert with mismatched column order
+    row_count = db.upsert_rows(conn, 'test_column_order', rows)
+    assert row_count == 2, 'Expected 2 rows to be inserted'
+
+    # Verify all data was inserted correctly despite the column order mismatch
+    result = db.select(conn, 'SELECT id, first_name, last_name, age, email FROM test_column_order ORDER BY id')
+
+    assert len(result) == 2, 'Expected 2 rows to be returned'
+
+    assert result[0]['id'] == 1
+    assert result[0]['first_name'] == 'John'
+    assert result[0]['last_name'] == 'Doe'
+    assert result[0]['age'] == 30
+    assert result[0]['email'] == 'john.doe@example.com'
+
+    assert result[1]['id'] == 2
+    assert result[1]['first_name'] == 'Jane'
+    assert result[1]['last_name'] == 'Smith'
+    assert result[1]['age'] == 28
+    assert result[1]['email'] == 'jane.smith@example.com'
+
+    # Now test updates with different column orders
+    # Include all non-null fields needed for the upsert to work
+    update_rows = [
+        {
+            'last_name': 'Doe-Updated',          # Different update order
+            'id': 1,
+            'age': 31,
+            'first_name': 'John'                 # Include non-null field
+        },
+        {
+            'age': 29,                           # Different order for second update
+            'id': 2,
+            'last_name': 'Smith-Updated',
+            'first_name': 'Jane'                 # Include non-null field
+        }
+    ]
+
+    # Update with mismatched column order
+    update_count = db.upsert_rows(
+        conn,
+        'test_column_order',
+        update_rows,
+        update_cols_key=['id'],
+        update_cols_always=['last_name', 'age']  # Only update these fields
+    )
+    assert update_count == 2, 'Expected 2 rows to be updated'
+
+    # Verify updates were applied correctly despite column order differences
+    result = db.select(conn, 'SELECT id, last_name, age FROM test_column_order ORDER BY id')
+
+    assert result[0]['id'] == 1
+    assert result[0]['last_name'] == 'Doe-Updated'
+    assert result[0]['age'] == 31
+
+    assert result[1]['id'] == 2
+    assert result[1]['last_name'] == 'Smith-Updated'
+    assert result[1]['age'] == 29
 
 
 if __name__ == '__main__':
