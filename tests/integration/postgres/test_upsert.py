@@ -342,6 +342,36 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
 
     with pytest.raises(Exception):
         db.select(conn, 'SELECT another_bad_column FROM test_table')
+        
+    # Test case-insensitive column filtering - mixed case with invalid columns
+    rows_mixed_case = [
+        {
+            'NAME': 'ValidationTest3',        # Valid column (different case)
+            'Value': 300,                     # Valid column (different case)
+            'INVALID_COLUMN': 'Should filter' # Invalid column
+        },
+        {
+            'NaMe': 'ValidationTest4',        # Valid column (mixed case)
+            'VaLuE': 400,                     # Valid column (mixed case)
+            'bad_col': False                  # Invalid column
+        }
+    ]
+    
+    # Insert with mixed case and invalid columns
+    row_count = db.upsert_rows(conn, 'test_table', rows_mixed_case)
+    
+    # Verify the correct number of rows were inserted
+    assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive column filtering'
+    
+    # Verify the rows were inserted correctly with only valid data
+    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name IN (%s, %s) ORDER BY name',
+                      'ValidationTest3', 'ValidationTest4')
+    
+    assert len(result) == 2, 'Expected 2 rows to be returned with case-insensitive column filtering'
+    assert result[0]['name'] == 'ValidationTest3'
+    assert result[0]['value'] == 300
+    assert result[1]['name'] == 'ValidationTest4'
+    assert result[1]['value'] == 400
 
 
 def test_upsert_column_order_independence(psql_docker, conn):
@@ -392,6 +422,232 @@ def test_upsert_all_invalid_columns(psql_docker, conn):
     row_count = db.upsert_rows(conn, 'test_table', rows)
     assert row_count == 0, 'Expected 0 rows to be inserted when all columns are invalid'
 
+
+def test_upsert_case_insensitive_columns(psql_docker, conn):
+    """Test that upsert works with case-insensitive column matching"""
+    
+    # Clean up any existing test data
+    db.execute(conn, "DELETE FROM test_table WHERE name LIKE 'CaseTest%'")
+    
+    # Assuming the table has columns 'name' and 'value' with that exact case
+    # Insert with different column cases
+    rows = [
+        {
+            'NAME': 'CaseTest1',    # Uppercase column name
+            'Value': 101            # Mixed case column name
+        },
+        {
+            'name': 'CaseTest2',    # Exact case column name
+            'VALUE': 102            # Uppercase column name
+        }
+    ]
+    
+    # Insert should work despite case differences
+    row_count = db.upsert_rows(conn, 'test_table', rows)
+    assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive columns'
+    
+    # Verify rows were inserted with correct values
+    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+                      'CaseTest%')
+    
+    assert len(result) == 2, 'Expected 2 rows with case-insensitive column matching'
+    assert result[0]['name'] == 'CaseTest1'
+    assert result[0]['value'] == 101
+    assert result[1]['name'] == 'CaseTest2' 
+    assert result[1]['value'] == 102
+    
+    # Now test updates with different column case
+    update_rows = [
+        {
+            'NAme': 'CaseTest1',    # Different mixed case
+            'vaLUE': 201            # Different mixed case
+        }
+    ]
+    
+    # Update should work despite case differences
+    # Note: keys must match the column names in the database (case-sensitive for conflict clause)
+    db.upsert_rows(conn, 'test_table', update_rows, 
+                  update_cols_key=['name'],  # Using exact case as in database 
+                  update_cols_always=['value'])  # Using exact case as in database
+    
+    # Verify update worked
+    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest1')
+    assert result['value'] == 201, 'Expected value to be updated with case-insensitive column matching'
+    
+    # Test with extreme case variations
+    extreme_case_rows = [
+        {
+            'NaME': 'CaseTest3',    # Random capitalization
+            'vALue': 303            # Random capitalization
+        }
+    ]
+    
+    # Should handle even unusual case variations
+    row_count = db.upsert_rows(conn, 'test_table', extreme_case_rows)
+    assert row_count == 1, 'Expected 1 row to be inserted with extreme case variations'
+    
+    # Verify row inserted correctly
+    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest3')
+    assert result['value'] == 303, 'Expected correct value with extreme case variation'
+    
+    # Test case-insensitive query parameter columns 
+    db.upsert_rows(conn, 'test_table', 
+                  [{'name': 'CaseTest4', 'value': 404}],
+                  update_cols_key=['name'],   # Must use exact case for keys
+                  update_cols_always=['value'])  # Must use exact case for update columns
+    
+    # Insert another row with the same primary key but different case to test update
+    db.upsert_rows(conn, 'test_table',
+                  [{'name': 'CaseTest4', 'value': 444}],
+                  update_cols_key=['name'],
+                  update_cols_always=['value'])
+    
+    # Verify the update worked with case-insensitive key & update columns
+    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest4')
+    assert result['value'] == 444, 'Expected value to be updated with case-insensitive parameter columns'
+
+
+def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
+    """Comprehensive test for case sensitivity in column operations"""
+    
+    # Create a test table with mixed case column names if possible
+    # PostgreSQL folds unquoted identifiers to lowercase, so this is just
+    # to make our test logic clearer - column names are still lowercase in PostgreSQL
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE case_test_table (
+        "Id" SERIAL PRIMARY KEY,        -- Mixed case with quotes
+        "UserName" VARCHAR(50) NOT NULL, -- Mixed case with quotes
+        "email" VARCHAR(100) NOT NULL,   -- lowercase
+        "PHONE" VARCHAR(20) NULL,        -- uppercase
+        "lastLogin" TIMESTAMP NULL       -- camelCase
+    )
+    """)
+    
+    # Case variations for each column
+    test_cases = [
+        # Test case 1: Exact case match
+        {
+            'row_data': {
+                'Id': 1,
+                'UserName': 'user1',
+                'email': 'user1@example.com',
+                'PHONE': '555-1234',
+                'lastLogin': '2023-01-01'
+            },
+            'expected_name': 'user1'
+        },
+        # Test case 2: All uppercase
+        {
+            'row_data': {
+                'ID': 2,
+                'USERNAME': 'user2',
+                'EMAIL': 'user2@example.com',
+                'PHONE': '555-5678',
+                'LASTLOGIN': '2023-01-02'
+            },
+            'expected_name': 'user2'
+        },
+        # Test case 3: All lowercase
+        {
+            'row_data': {
+                'id': 3,
+                'username': 'user3',
+                'email': 'user3@example.com',
+                'phone': '555-9012',
+                'lastlogin': '2023-01-03'
+            },
+            'expected_name': 'user3'
+        },
+        # Test case 4: Mixed case variations
+        {
+            'row_data': {
+                'iD': 4,
+                'UsErNaMe': 'user4',
+                'EMail': 'user4@example.com',
+                'pHoNe': '555-3456',
+                'LaStLoGiN': '2023-01-04'
+            },
+            'expected_name': 'user4'
+        },
+        # Test case 5: Invalid columns mixed with valid columns in different cases
+        {
+            'row_data': {
+                'ID': 5,
+                'UserNAME': 'user5',
+                'email': 'user5@example.com',
+                'INVALID_COL': 'should be filtered',
+                'another_bad': 12345,
+                'phoneNumber': '555-7890'  # Slightly different name, should be filtered
+            },
+            'expected_name': 'user5'
+        }
+    ]
+    
+    # Insert all test cases
+    for test_case in test_cases:
+        row_count = db.upsert_rows(conn, 'case_test_table', [test_case['row_data']])
+        assert row_count == 1, f"Expected 1 row to be inserted for test case with {test_case['expected_name']}"
+    
+    # Verify all rows were inserted correctly
+    result = db.select(conn, 'SELECT "Id", "UserName", "email", "PHONE" FROM case_test_table ORDER BY "Id"')
+    assert len(result) == 5, "Expected 5 rows to be inserted"
+    
+    # Check specific values
+    for i, test_case in enumerate(test_cases):
+        row = result[i]
+        assert row["UserName"] == test_case["expected_name"], f"Wrong username for test case {i+1}"
+        
+    # Test updates with case-insensitive key columns
+    update_row = {
+        'ID': 1,  # Different case from the actual column
+        'username': 'user1-updated',
+        'EMAIL': 'updated1@example.com'
+    }
+    
+    # Get column names with exact case from the database
+    column_info = db.select(conn, """
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'case_test_table'
+    """)
+    db_columns = [row['column_name'] for row in column_info]
+    
+    # Important: Use exact case from the database for the key and update columns
+    db.upsert_rows(conn, 'case_test_table', [update_row], 
+                  update_cols_key=['Id'],  # Must match the exact case in the database
+                  update_cols_always=['UserName', 'email'])
+    
+    # Verify update worked
+    result = db.select_row(conn, 'SELECT "UserName", "email" FROM case_test_table WHERE "Id" = 1')
+    assert result["UserName"] == 'user1-updated', "Update failed with case-insensitive key"
+    assert result["email"] == 'updated1@example.com', "Update failed with case-insensitive column"
+    
+    # Test batch updates with mixed case variations
+    batch_updates = [
+        {
+            'iD': 2,
+            'username': 'user2-updated',
+            'EMAIL': 'updated2@example.com'
+        },
+        {
+            'Id': 3,
+            'USERNAME': 'user3-updated',
+            'email': 'updated3@example.com'
+        }
+    ]
+    
+    db.upsert_rows(conn, 'case_test_table', batch_updates,
+                  update_cols_key=['Id'],   # Exact case to match database
+                  update_cols_always=['UserName', 'email'])  # Exact case to match database
+    
+    # Verify batch updates
+    result = db.select(conn, 'SELECT "Id", "UserName", "email" FROM case_test_table WHERE "Id" IN (2, 3) ORDER BY "Id"')
+    assert len(result) == 2, "Expected 2 rows to be updated"
+    assert result[0]["UserName"] == 'user2-updated', "Batch update 1 failed"
+    assert result[1]["UserName"] == 'user3-updated', "Batch update 2 failed"
+    
+    # Final verification: all rows should still be present with correct updates
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM case_test_table')
+    assert count == 5, "Expected all 5 rows to be present after updates"
 
 def test_upsert_with_column_order_mismatch(psql_docker, conn):
     """Test that upsert correctly handles when column order in dictionaries doesn't match DB schema order"""

@@ -764,16 +764,28 @@ def test_transaction_with_multiple_statement_combinations(psql_docker, conn):
     # CASE 5: Transaction with complex multi-statement INSERT/UPDATE/DELETE mix with RETURNING
     param_value = 500
     with db.transaction(conn) as tx:
-        # Execute with parameters in various positions and get returned values
-        id1, id2 = tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('return-test-1', 'return-cat', %s) RETURNING id;
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('return-test-2', 'return-cat', 502) RETURNING id;
+        # Execute first INSERT with RETURNING clause to get id1
+        id1 = tx.execute("""
+        INSERT INTO tx_matrix_test (name, category, value)
+        VALUES ('return-test-1', 'return-cat', %s)
+        RETURNING id
+        """, param_value, returnid='id')
+
+        # Execute second INSERT with RETURNING clause to get id2
+        id2 = tx.execute("""
+        INSERT INTO tx_matrix_test (name, category, value)
+        VALUES ('return-test-2', 'return-cat', 502)
+        RETURNING id
+        """, returnid='id')
+
+        # Execute remaining statements that don't need to return values
+        tx.execute("""
         UPDATE tx_matrix_test SET value = value + 10 WHERE category = 'return-cat';
         DELETE FROM tx_matrix_test WHERE name = 'tx-mixed-1';
         UPDATE tx_matrix_test SET value = %s WHERE id IN (
             SELECT id FROM tx_matrix_test WHERE category = 'return-cat' LIMIT 1
         );
-        """, param_value, 600, returnid=['id', 'id'])
+        """, 600)
 
     # Verify case 5
     assert id1 is not None

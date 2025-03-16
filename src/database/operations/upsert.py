@@ -5,7 +5,7 @@ import logging
 
 from database.adapters.structure import RowStructureAdapter
 from database.core.transaction import Transaction
-from database.operations.data import filter_table_columns, insert_rows
+from database.operations.data import insert_rows
 from database.operations.query import select
 from database.operations.schema import get_table_primary_keys
 from database.operations.schema import reset_table_sequence
@@ -66,7 +66,8 @@ def _build_upsert_sql(
         # build the basic insert part
         insert_sql = _build_insert_sql(cn, table, columns)
 
-        # build the on conflict clause
+        # For PostgreSQL, we need to use the exact case for the key columns
+        # The key_columns should already have the correct case after filtering
         conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
 
         # If no updates requested, do nothing
@@ -173,20 +174,57 @@ def _build_insert_sql(cn, table: str, columns: tuple[str]) -> str:
 
 
 def _prepare_rows_for_upsert(cn, table, rows):
-    """Prepare and validate rows for upsert operation"""
-    # Include only columns that exist in the table
-    filtered_rows = filter_table_columns(cn, table, rows)
+    """Prepare and validate rows for upsert operation with case-insensitive matching"""
+    if not rows:
+        return None
+
+    # Get table columns with exact case
+    from database.operations.schema import get_table_columns
+    table_columns = get_table_columns(cn, table)
+
+    # Create case mapping for case-insensitive lookup
+    case_map = {col.lower(): col for col in table_columns}
+
+    # Filter rows - keep only valid columns with database's exact column case
+    filtered_rows = []
+    for row in rows:
+        corrected_row = {}
+        for col, val in row.items():
+            # Case-insensitive lookup of the column name
+            exact_col = case_map.get(col.lower())
+            if exact_col:
+                corrected_row[exact_col] = val
+
+        # Only include rows that have at least one valid column
+        if corrected_row:
+            filtered_rows.append(corrected_row)
+
     if not filtered_rows:
         logger.warning(f'No valid columns found for {table} after filtering')
         return None
+
     return tuple(filtered_rows)
 
 
 def _filter_update_columns(columns, update_cols, key_cols):
-    """Filter update columns to ensure they're valid"""
+    """Filter update columns to ensure they're valid using case-insensitive matching"""
     if not update_cols:
         return []
-    return [c for c in update_cols if c in columns and c not in key_cols]
+
+    # Create case-insensitive lookup sets
+    columns_lower = {col.lower() for col in columns}
+    key_cols_lower = {col.lower() for col in key_cols}
+
+    # Map for converting to database's exact column case
+    case_map = {col.lower(): col for col in columns}
+
+    # Filter columns, keeping only valid ones that aren't key columns
+    # and convert to the exact case used in the database
+    return [
+        case_map[col.lower()]
+        for col in update_cols
+        if col.lower() in columns_lower and col.lower() not in key_cols_lower
+    ]
 
 
 def _execute_standard_upsert(cn, table, rows, columns, key_cols,
@@ -391,13 +429,18 @@ def upsert_rows(
     # Get columns from the first row
     input_columns = set(rows[0].keys())
 
-    # Find columns that don't exist in the table
-    invalid_columns = input_columns - table_columns
+    # Create case mapping for case-insensitive validation
+    case_map = {col.lower(): col for col in table_columns}
+    table_columns_lower = set(case_map.keys())
+
+    # Find columns that don't exist in the table (case-insensitive check)
+    invalid_columns = [col for col in input_columns if col.lower() not in table_columns_lower]
     if invalid_columns:
         logger.warning(f'Ignoring columns not present in the table schema: {invalid_columns}')
 
-    # Filter to only valid columns, maintaining original order from the input
-    columns = tuple(col for col in rows[0] if col in table_columns)
+    # Filter to only valid columns with database's exact case, maintaining order from input
+    columns = tuple(case_map.get(col.lower()) for col in rows[0]
+                    if col.lower() in table_columns_lower)
 
     if not columns:
         logger.warning(f'No valid columns provided for table {table}')
