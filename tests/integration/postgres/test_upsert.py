@@ -1,3 +1,5 @@
+import datetime
+
 import database as db
 import pytest
 
@@ -158,7 +160,7 @@ def test_upsert_empty_rows(psql_docker, conn):
 
 
 def test_upsert_large_batch(psql_docker, conn):
-    """Test upsert with a batch size that exceeds parameter limits"""
+    """Test upsert with a large number of rows that exceeds parameter limits"""
     import time
 
     # Create a temporary table for this test with a simple structure
@@ -175,7 +177,7 @@ def test_upsert_large_batch(psql_docker, conn):
     start_time = time.time()
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 35001)]
 
-    # First insert the rows (should use batching internally)
+    # Insert the rows
     batch_insert_time = time.time()
     row_count = db.upsert_rows(conn, 'test_large_batch', rows)
     insert_end_time = time.time()
@@ -342,13 +344,13 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
 
     with pytest.raises(Exception):
         db.select(conn, 'SELECT another_bad_column FROM test_table')
-        
+
     # Test case-insensitive column filtering - mixed case with invalid columns
     rows_mixed_case = [
         {
             'NAME': 'ValidationTest3',        # Valid column (different case)
             'Value': 300,                     # Valid column (different case)
-            'INVALID_COLUMN': 'Should filter' # Invalid column
+            'INVALID_COLUMN': 'Should filter'  # Invalid column
         },
         {
             'NaMe': 'ValidationTest4',        # Valid column (mixed case)
@@ -356,17 +358,17 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
             'bad_col': False                  # Invalid column
         }
     ]
-    
+
     # Insert with mixed case and invalid columns
     row_count = db.upsert_rows(conn, 'test_table', rows_mixed_case)
-    
+
     # Verify the correct number of rows were inserted
     assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive column filtering'
-    
+
     # Verify the rows were inserted correctly with only valid data
     result = db.select(conn, 'SELECT name, value FROM test_table WHERE name IN (%s, %s) ORDER BY name',
-                      'ValidationTest3', 'ValidationTest4')
-    
+                       'ValidationTest3', 'ValidationTest4')
+
     assert len(result) == 2, 'Expected 2 rows to be returned with case-insensitive column filtering'
     assert result[0]['name'] == 'ValidationTest3'
     assert result[0]['value'] == 300
@@ -425,10 +427,10 @@ def test_upsert_all_invalid_columns(psql_docker, conn):
 
 def test_upsert_case_insensitive_columns(psql_docker, conn):
     """Test that upsert works with case-insensitive column matching"""
-    
+
     # Clean up any existing test data
     db.execute(conn, "DELETE FROM test_table WHERE name LIKE 'CaseTest%'")
-    
+
     # Assuming the table has columns 'name' and 'value' with that exact case
     # Insert with different column cases
     rows = [
@@ -441,21 +443,21 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
             'VALUE': 102            # Uppercase column name
         }
     ]
-    
+
     # Insert should work despite case differences
     row_count = db.upsert_rows(conn, 'test_table', rows)
     assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive columns'
-    
+
     # Verify rows were inserted with correct values
     result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
-                      'CaseTest%')
-    
+                       'CaseTest%')
+
     assert len(result) == 2, 'Expected 2 rows with case-insensitive column matching'
     assert result[0]['name'] == 'CaseTest1'
     assert result[0]['value'] == 101
-    assert result[1]['name'] == 'CaseTest2' 
+    assert result[1]['name'] == 'CaseTest2'
     assert result[1]['value'] == 102
-    
+
     # Now test updates with different column case
     update_rows = [
         {
@@ -463,17 +465,17 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
             'vaLUE': 201            # Different mixed case
         }
     ]
-    
+
     # Update should work despite case differences
     # Note: keys must match the column names in the database (case-sensitive for conflict clause)
-    db.upsert_rows(conn, 'test_table', update_rows, 
-                  update_cols_key=['name'],  # Using exact case as in database 
-                  update_cols_always=['value'])  # Using exact case as in database
-    
+    db.upsert_rows(conn, 'test_table', update_rows,
+                   update_cols_key=['name'],  # Using exact case as in database
+                   update_cols_always=['value'])  # Using exact case as in database
+
     # Verify update worked
     result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest1')
     assert result['value'] == 201, 'Expected value to be updated with case-insensitive column matching'
-    
+
     # Test with extreme case variations
     extreme_case_rows = [
         {
@@ -481,27 +483,27 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
             'vALue': 303            # Random capitalization
         }
     ]
-    
+
     # Should handle even unusual case variations
     row_count = db.upsert_rows(conn, 'test_table', extreme_case_rows)
     assert row_count == 1, 'Expected 1 row to be inserted with extreme case variations'
-    
+
     # Verify row inserted correctly
     result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest3')
     assert result['value'] == 303, 'Expected correct value with extreme case variation'
-    
-    # Test case-insensitive query parameter columns 
-    db.upsert_rows(conn, 'test_table', 
-                  [{'name': 'CaseTest4', 'value': 404}],
-                  update_cols_key=['name'],   # Must use exact case for keys
-                  update_cols_always=['value'])  # Must use exact case for update columns
-    
+
+    # Test case-insensitive query parameter columns
+    db.upsert_rows(conn, 'test_table',
+                   [{'name': 'CaseTest4', 'value': 404}],
+                   update_cols_key=['name'],   # Must use exact case for keys
+                   update_cols_always=['value'])  # Must use exact case for update columns
+
     # Insert another row with the same primary key but different case to test update
     db.upsert_rows(conn, 'test_table',
-                  [{'name': 'CaseTest4', 'value': 444}],
-                  update_cols_key=['name'],
-                  update_cols_always=['value'])
-    
+                   [{'name': 'CaseTest4', 'value': 444}],
+                   update_cols_key=['name'],
+                   update_cols_always=['value'])
+
     # Verify the update worked with case-insensitive key & update columns
     result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest4')
     assert result['value'] == 444, 'Expected value to be updated with case-insensitive parameter columns'
@@ -509,7 +511,7 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
 
 def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
     """Comprehensive test for case sensitivity in column operations"""
-    
+
     # Create a test table with mixed case column names if possible
     # PostgreSQL folds unquoted identifiers to lowercase, so this is just
     # to make our test logic clearer - column names are still lowercase in PostgreSQL
@@ -522,7 +524,7 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
         "lastLogin" TIMESTAMP NULL       -- camelCase
     )
     """)
-    
+
     # Case variations for each column
     test_cases = [
         # Test case 1: Exact case match
@@ -582,45 +584,45 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
             'expected_name': 'user5'
         }
     ]
-    
+
     # Insert all test cases
     for test_case in test_cases:
         row_count = db.upsert_rows(conn, 'case_test_table', [test_case['row_data']])
         assert row_count == 1, f"Expected 1 row to be inserted for test case with {test_case['expected_name']}"
-    
+
     # Verify all rows were inserted correctly
     result = db.select(conn, 'SELECT "Id", "UserName", "email", "PHONE" FROM case_test_table ORDER BY "Id"')
-    assert len(result) == 5, "Expected 5 rows to be inserted"
-    
+    assert len(result) == 5, 'Expected 5 rows to be inserted'
+
     # Check specific values
     for i, test_case in enumerate(test_cases):
         row = result[i]
-        assert row["UserName"] == test_case["expected_name"], f"Wrong username for test case {i+1}"
-        
+        assert row['UserName'] == test_case['expected_name'], f'Wrong username for test case {i+1}'
+
     # Test updates with case-insensitive key columns
     update_row = {
         'ID': 1,  # Different case from the actual column
         'username': 'user1-updated',
         'EMAIL': 'updated1@example.com'
     }
-    
+
     # Get column names with exact case from the database
     column_info = db.select(conn, """
-        SELECT column_name FROM information_schema.columns 
+        SELECT column_name FROM information_schema.columns
         WHERE table_name = 'case_test_table'
     """)
     db_columns = [row['column_name'] for row in column_info]
-    
+
     # Important: Use exact case from the database for the key and update columns
-    db.upsert_rows(conn, 'case_test_table', [update_row], 
-                  update_cols_key=['Id'],  # Must match the exact case in the database
-                  update_cols_always=['UserName', 'email'])
-    
+    db.upsert_rows(conn, 'case_test_table', [update_row],
+                   update_cols_key=['Id'],  # Must match the exact case in the database
+                   update_cols_always=['UserName', 'email'])
+
     # Verify update worked
     result = db.select_row(conn, 'SELECT "UserName", "email" FROM case_test_table WHERE "Id" = 1')
-    assert result["UserName"] == 'user1-updated', "Update failed with case-insensitive key"
-    assert result["email"] == 'updated1@example.com', "Update failed with case-insensitive column"
-    
+    assert result['UserName'] == 'user1-updated', 'Update failed with case-insensitive key'
+    assert result['email'] == 'updated1@example.com', 'Update failed with case-insensitive column'
+
     # Test batch updates with mixed case variations
     batch_updates = [
         {
@@ -634,20 +636,504 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
             'email': 'updated3@example.com'
         }
     ]
-    
+
     db.upsert_rows(conn, 'case_test_table', batch_updates,
-                  update_cols_key=['Id'],   # Exact case to match database
-                  update_cols_always=['UserName', 'email'])  # Exact case to match database
-    
+                   update_cols_key=['Id'],   # Exact case to match database
+                   update_cols_always=['UserName', 'email'])  # Exact case to match database
+
     # Verify batch updates
     result = db.select(conn, 'SELECT "Id", "UserName", "email" FROM case_test_table WHERE "Id" IN (2, 3) ORDER BY "Id"')
-    assert len(result) == 2, "Expected 2 rows to be updated"
-    assert result[0]["UserName"] == 'user2-updated', "Batch update 1 failed"
-    assert result[1]["UserName"] == 'user3-updated', "Batch update 2 failed"
-    
+    assert len(result) == 2, 'Expected 2 rows to be updated'
+    assert result[0]['UserName'] == 'user2-updated', 'Batch update 1 failed'
+    assert result[1]['UserName'] == 'user3-updated', 'Batch update 2 failed'
+
     # Final verification: all rows should still be present with correct updates
     count = db.select_scalar(conn, 'SELECT COUNT(*) FROM case_test_table')
-    assert count == 5, "Expected all 5 rows to be present after updates"
+    assert count == 5, 'Expected all 5 rows to be present after updates'
+
+
+def test_upsert_error_handling(psql_docker, conn):
+    """Test that upsert properly handles different types of updates and conflicts"""
+    # Create a test table with a unique constraint
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_error_handling (
+        id INTEGER PRIMARY KEY,
+        name VARCHAR(50) UNIQUE NOT NULL,
+        value INTEGER NOT NULL
+    )
+    """)
+
+    # Insert initial data
+    db.execute(conn, 'INSERT INTO test_error_handling VALUES (1, %s, %s)', 'Item1', 100)
+    db.execute(conn, 'INSERT INTO test_error_handling VALUES (2, %s, %s)', 'Item2', 200)
+
+    # Test updating via PRIMARY KEY constraint
+    pk_update = [{'id': 1, 'name': 'UpdatedItem1', 'value': 150}]
+
+    row_count = db.upsert_rows(
+        conn,
+        'test_error_handling',
+        pk_update,
+        update_cols_key=['id'],  # Using id as conflict key
+        update_cols_always=['name', 'value']
+    )
+
+    # Verify the row was updated via PRIMARY KEY
+    result = db.select_row(conn, 'SELECT name, value FROM test_error_handling WHERE id = 1')
+    assert result.name == 'UpdatedItem1', 'Row should be updated by ID'
+    assert result.value == 150, 'Value should be updated'
+
+    # Test updating via UNIQUE constraint
+    unique_update = [{'id': 3, 'name': 'Item2', 'value': 250}]
+
+    row_count = db.upsert_rows(
+        conn,
+        'test_error_handling',
+        unique_update,
+        update_cols_key=['name'],  # Using name as conflict key
+        update_cols_always=['id', 'value']
+    )
+
+    # Verify the row was updated via UNIQUE constraint
+    result = db.select_row(conn, 'SELECT id, value FROM test_error_handling WHERE name = %s', 'Item2')
+    assert result.id == 3, 'ID should be updated when using name as conflict key'
+    assert result.value == 250, 'Value should be updated'
+
+    # Test inserting a completely new row
+    new_row = [{'id': 4, 'name': 'Item4', 'value': 400}]
+
+    row_count = db.upsert_rows(
+        conn,
+        'test_error_handling',
+        new_row,
+        update_cols_key=['id'],
+        update_cols_always=['name', 'value']
+    )
+
+    # Verify the new row was inserted
+    result = db.select_row(conn, 'SELECT name, value FROM test_error_handling WHERE id = 4')
+    assert result.name == 'Item4', 'New row should be inserted'
+    assert result.value == 400, 'New row should have correct value'
+
+    # Test that constraint violations are properly caught
+    # Since we're in a test, we'll verify that the exception is raised
+    conflict_row = [{'id': 5, 'name': 'Item4', 'value': 500}]  # Name conflicts with existing
+
+    with pytest.raises(Exception) as excinfo:
+        db.upsert_rows(
+            conn,
+            'test_error_handling',
+            conflict_row,
+            update_cols_key=['id'],  # Only handling ID conflicts
+            update_cols_always=['name', 'value']
+        )
+
+    # Verify the specific type of error raised
+    assert 'unique constraint' in str(excinfo.value).lower() or 'duplicate key' in str(excinfo.value).lower(), \
+        'Should raise unique constraint violation error'
+
+    # Test a more complex scenario: multiple rows where some would succeed
+    # We'll process them individually to avoid batch errors
+    rows_with_mixed_conflicts = [
+        {'id': 6, 'name': 'Item6', 'value': 600},  # New row - should succeed
+        {'id': 7, 'name': 'Item4', 'value': 700},  # Name conflicts - would fail
+        {'id': 8, 'name': 'Item8', 'value': 800}   # New row - should succeed
+    ]
+
+    # Process each row individually to simulate what would happen with row-by-row processing
+    for row in rows_with_mixed_conflicts:
+        try:
+            db.upsert_rows(
+                conn,
+                'test_error_handling',
+                [row],  # Single row at a time
+                update_cols_key=['id'],
+                update_cols_always=['name', 'value']
+            )
+        except Exception as e:
+            # Expected exception for the conflicting row
+            assert 'Item4' in str(e) or 'unique constraint' in str(e).lower() or 'duplicate key' in str(e).lower(), \
+                f'Unexpected error: {e}'
+
+    # Verify the non-conflicting rows were inserted
+    result = db.select(conn, 'SELECT id, name, value FROM test_error_handling WHERE id IN (6, 8) ORDER BY id')
+    assert len(result) == 2, 'Two new rows should be inserted'
+    assert result[0]['name'] == 'Item6', 'Row with id=6 should be inserted'
+    assert result[1]['name'] == 'Item8', 'Row with id=8 should be inserted'
+
+    # Finally, verify that no row with id=7 exists (it should have failed)
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_error_handling WHERE id = 7')
+    assert count == 0, 'Conflicting row with id=7 should not be inserted'
+
+
+def test_upsert_with_constraint_name(psql_docker, conn):
+    """Test upsert using a constraint name instead of key columns"""
+    # Create a test table with a named constraint
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_constraint (
+        id INTEGER,
+        name VARCHAR(50),
+        value INTEGER NOT NULL,
+        CONSTRAINT test_unique_constraint UNIQUE (id, name)
+    )
+    """)
+
+    # Insert initial data
+    db.execute(conn, 'INSERT INTO test_constraint VALUES (1, %s, %s)', 'ConstraintTest', 100)
+
+    # Test upsert with constraint name
+    rows = [{'id': 1, 'name': 'ConstraintTest', 'value': 200}]
+
+    row_count = db.upsert_rows(
+        conn,
+        'test_constraint',
+        rows,
+        constraint_name='test_unique_constraint',
+        update_cols_always=['value']
+    )
+
+    # Verify the row was updated
+    result = db.select_scalar(conn, 'SELECT value FROM test_constraint WHERE id = 1')
+    assert result == 200, 'Row should be updated using constraint-based conflict detection'
+
+    # Test inserting a new row
+    rows = [{'id': 2, 'name': 'ConstraintTest2', 'value': 300}]
+
+    row_count = db.upsert_rows(
+        conn,
+        'test_constraint',
+        rows,
+        constraint_name='test_unique_constraint',
+        update_cols_always=['value']
+    )
+
+    # Verify new row was inserted
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_constraint')
+    assert count == 2, 'New row should be inserted'
+
+
+def test_upsert_with_standard_constraint(psql_docker, conn):
+    """Test upsert behavior with regular constraint
+
+    This test verifies that the upsert functionality correctly handles:
+    1. Regular ALTER TABLE ADD CONSTRAINT for standard unique constraints
+    2. Proper detection of constraint columns
+    3. Correct update behavior when constraint values match
+    4. With standard constraints (id, name), changing only value results in an update
+    """
+    # Create a test table for testing with a standard unique constraint
+    db.execute(conn, 'DROP TABLE IF EXISTS test_complex_constraint;')
+
+    db.execute(conn, """
+        CREATE TABLE test_complex_constraint (
+            id INTEGER NOT NULL,
+            name VARCHAR(100),
+            value INTEGER,
+            last_updated TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    # Add a standard unique constraint without expressions
+    # This creates a constraint that only includes id and name, NOT value
+    # A row with same id and name but different value SHOULD update the existing row
+    db.execute(conn, """
+        ALTER TABLE test_complex_constraint
+        ADD CONSTRAINT complex_unique_constraint
+        UNIQUE (id, name)
+    """)
+
+    # Test with the CONSTRAINT
+    _test_complex_upsert_scenarios(
+        conn,
+        'test_complex_constraint',
+        'complex_unique_constraint'
+    )
+
+
+def test_upsert_with_complex_index(psql_docker, conn):
+    """Test upsert behavior with complex unique index
+
+    This test verifies that the upsert functionality correctly handles:
+    1. Complex UNIQUE INDEX with expressions
+    2. Proper detection of index columns and expressions
+    3. Correct update behavior when ALL index values match
+    4. Update of non-constrained columns when the constraint matches exactly
+    """
+    # Create a test table with a complex unique index
+    db.execute(conn, 'DROP TABLE IF EXISTS test_complex_index')
+
+    db.execute(conn, """
+        CREATE TABLE test_complex_index (
+            id INTEGER NOT NULL,
+            name VARCHAR(100),
+            value INTEGER,
+            last_updated TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    # Create the unique index with expressions that include id, name and value
+    db.execute(conn, """
+        CREATE UNIQUE INDEX complex_unique_index
+        ON test_complex_index (id, COALESCE(name, ''), COALESCE(value, -1))
+    """)
+
+    # Insert initial test row
+    initial_row = {
+        'id': 1,
+        'name': 'ComplexTest',
+        'value': 100,
+        'last_updated': datetime.datetime(2023, 3, 17, 17, 47, 15, 906191)
+    }
+    
+    # Insert the row
+    db.insert(conn, """
+        INSERT INTO test_complex_index (id, name, value, last_updated)
+        VALUES (%s, %s, %s, %s)
+    """, initial_row['id'], initial_row['name'], initial_row['value'], initial_row['last_updated'])
+
+    # Verify initial state
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    assert count == 1, 'Should have 1 row initially'
+
+    # First test: Try to update with all constraint columns matching
+    # This should update the existing row's last_updated field
+    same_constraint_row = {
+        'id': 1,                    # Same as original (part of constraint)
+        'name': 'ComplexTest',      # Same as original (part of constraint)
+        'value': 100,               # Same as original (part of constraint)
+        'last_updated': datetime.datetime(2023, 3, 18, 10, 0, 0)  # Different (not in constraint)
+    }
+
+    db.upsert_rows(
+        conn,
+        'test_complex_index',
+        [same_constraint_row],
+        constraint_name='complex_unique_index',
+        update_cols_always=['last_updated']  # Only update the timestamp
+    )
+
+    # Verify we still have just 1 row (it was updated, not inserted)
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    assert count == 1, 'Should still have 1 row after updating non-constraint column'
+
+    # Verify last_updated was changed
+    updated_time = db.select_scalar(conn, 'SELECT last_updated FROM test_complex_index WHERE id = 1')
+    assert updated_time.date() == datetime.date(2023, 3, 18), 'The last_updated field should be updated'
+
+    # Second test: Now change one of the constraint columns (value)
+    # This should insert a new row since the constraint won't match
+    different_value_row = {
+        'id': 1,                    # Same as original (part of constraint) 
+        'name': 'ComplexTest',      # Same as original (part of constraint)
+        'value': 200,               # Different from original (part of constraint)
+        'last_updated': datetime.datetime(2023, 3, 19, 10, 0, 0)  # Different (not in constraint)
+    }
+
+    db.upsert_rows(
+        conn,
+        'test_complex_index',
+        [different_value_row],
+        constraint_name='complex_unique_index',
+        update_cols_always=['last_updated']  # Trying to update timestamp, but should insert instead
+    )
+
+    # Verify we now have 2 rows (new one inserted because constraint didn't match)
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    assert count == 2, 'Should have 2 rows after trying to update with different constraint value'
+
+    # Verify both rows exist with different values
+    rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
+    
+    assert len(rows) == 2, 'Should have 2 distinct rows'
+    assert rows[0]['value'] == 100, 'First row should have original value=100'
+    assert rows[0]['last_updated'].date() == datetime.date(2023, 3, 18), 'First row should have timestamp from first update'
+    assert rows[1]['value'] == 200, 'Second row should have new value=200'
+    assert rows[1]['last_updated'].date() == datetime.date(2023, 3, 19), 'Second row should have new timestamp'
+
+    # Third test: Update just the second row by matching its exact constraint values
+    update_second_row = {
+        'id': 1,                    # Match both rows
+        'name': 'ComplexTest',      # Match both rows
+        'value': 200,               # Match only second row (part of constraint)
+        'last_updated': datetime.datetime(2023, 3, 20, 10, 0, 0)  # New timestamp
+    }
+
+    db.upsert_rows(
+        conn,
+        'test_complex_index',
+        [update_second_row],
+        constraint_name='complex_unique_index',
+        update_cols_always=['last_updated']  # Only update timestamp
+    )
+
+    # Verify we still have 2 rows (one updated, not inserted) 
+    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    assert count == 2, 'Should still have 2 rows after selective update'
+
+    # Verify only the second row's timestamp was updated
+    rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
+    
+    assert len(rows) == 2, 'Should still have 2 distinct rows'
+    assert rows[0]['value'] == 100, 'First row should have original value'
+    assert rows[0]['last_updated'].date() == datetime.date(2023, 3, 18), 'First row should have unchanged timestamp'
+    assert rows[1]['value'] == 200, 'Second row should have same value'
+    assert rows[1]['last_updated'].date() == datetime.date(2023, 3, 20), 'Second row should have updated timestamp'
+
+
+def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
+    """Helper function to run the same test scenarios on different tables"""
+    # Insert initial test row
+    initial_row = {
+        'id': 1,
+        'name': 'ComplexTest',
+        'value': 100,
+        'last_updated': datetime.datetime(2023, 3, 17, 17, 47, 15, 906191)
+    }
+    # Use insert rather than insert_row
+    db.insert(conn, f'INSERT INTO {table_name} (id, name, value, last_updated) VALUES (%s, %s, %s, %s)',
+              initial_row['id'], initial_row['name'], initial_row['value'], initial_row['last_updated'])
+
+    # Verify initial state
+    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    assert count == 1, 'Should have 1 row initially'
+
+    # Scenario 1: Update with matching constraint values
+    update_same_constraint = {
+        'id': 1,
+        'name': 'ComplexTest',  # Same name
+        'value': 100,  # Same value
+        'last_updated': datetime.datetime(2023, 3, 17, 21, 47, 15, 908775)  # Different timestamp
+    }
+
+    result = db.upsert_rows(
+        conn,
+        table_name,
+        [update_same_constraint],
+        constraint_name=constraint_name,
+        update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
+    )
+
+    # Should still be only one row as it updated
+    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    assert count == 1, 'Should still have 1 row after update with matching constraint'
+
+    # Check the timestamp was updated
+    updated_time = db.select_scalar(conn, f'SELECT last_updated FROM {table_name} WHERE id = 1')
+    assert updated_time > initial_row['last_updated'], 'The last_updated field should be updated'
+
+    # Scenario 2: Insert with different constraint value
+    different_value_row = {
+        'id': 1,
+        'name': 'ComplexTest',  # Same name
+        'value': 200,  # Different value - part of the constraint!
+        'last_updated': datetime.datetime(2023, 3, 17, 22, 47, 15, 908775)
+    }
+
+    db.upsert_rows(
+        conn,
+        table_name,
+        [different_value_row],
+        constraint_name=constraint_name,
+        update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
+    )
+
+    # With our standard constraint (id, name), changing just the value will UPDATE not INSERT
+    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    assert count == 1, 'Should have 1 row after upsert (value is not part of constraint)'
+
+    # Verify the value was updated
+    current_value = db.select_scalar(conn, f'SELECT value FROM {table_name} WHERE id = 1')
+    assert current_value == 200, 'Value should be updated to 200'
+
+    # For the second part with complex index, this check will only pass
+    # if we're using the second table with the index that includes value
+    if 'complex_unique_index' in constraint_name:
+        rows = db.select(conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1 ORDER BY value')
+        assert len(rows) == 2, f'Expected 2 rows for {table_name} with constraint {constraint_name}'
+        assert rows[0]['value'] == 100
+        assert rows[1]['value'] == 200
+
+        # For complex_unique_index, we expect 2 rows after updates
+        count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+        assert count == 2, f'Should have 2 rows for {table_name} with constraint {constraint_name}'
+    else:
+        # For the first table, we only expect one row since value isn't in the constraint
+        rows = db.select(conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1')
+        assert len(rows) == 1, f'Expected 1 row for {table_name} with constraint {constraint_name}'
+        assert rows[0]['value'] == 200
+
+        # For complex_unique_constraint, we expect 1 row after updates
+        count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+        assert count == 1, f'Should have 1 row for {table_name} with constraint {constraint_name}'
+
+    # Scenario 3: Update specific row by matching the constraint exactly
+    update_specific_row = {
+        'id': 1,
+        'name': 'ComplexTest',
+        'value': 200,  # Target the second row specifically
+        'last_updated': datetime.datetime(2023, 3, 18, 10, 0, 0)
+    }
+
+    db.upsert_rows(
+        conn,
+        table_name,
+        [update_specific_row],
+        constraint_name=constraint_name,
+        update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
+    )
+
+    # Row count depends on constraint type - will be checked in the next section
+
+    # Check the timestamp was updated only for the row with value=200
+    last_updated_200 = db.select_scalar(conn,
+                                        f'SELECT last_updated FROM {table_name} WHERE id = 1 AND value = 200')
+    assert last_updated_200.date() == datetime.date(2023, 3, 18), 'Only the targeted row should be updated'
+
+    # Scenario 4: Test with NULL value in the constrained column
+    null_value_row = {
+        'id': 2,
+        'name': 'NullTest',
+        'value': None,  # NULL value in a constrained column
+        'last_updated': datetime.datetime(2023, 3, 19, 10, 0, 0)
+    }
+
+    db.upsert_rows(
+        conn,
+        table_name,
+        [null_value_row],
+        constraint_name=constraint_name,
+        update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
+    )
+
+    # Verify row was inserted
+    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
+    assert count == 1, 'Should have inserted row with NULL value'
+
+    # Update the NULL value row
+    update_null_row = {
+        'id': 2,
+        'name': 'NullTest',
+        'value': None,  # Still NULL
+        'last_updated': datetime.datetime(2023, 3, 20, 10, 0, 0)
+    }
+
+    db.upsert_rows(
+        conn,
+        table_name,
+        [update_null_row],
+        constraint_name=constraint_name,
+        update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
+    )
+
+    # Should still have 1 row with id=2
+    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
+    assert count == 1, 'Should still have 1 row with id=2 after update'
+
+    # Check timestamp was updated
+    last_updated_null = db.select_scalar(conn,
+                                         f'SELECT last_updated FROM {table_name} WHERE id = 2')
+    assert last_updated_null.date() == datetime.date(2023, 3, 20), 'Row with NULL should be updated'
+
 
 def test_upsert_with_column_order_mismatch(psql_docker, conn):
     """Test that upsert correctly handles when column order in dictionaries doesn't match DB schema order"""

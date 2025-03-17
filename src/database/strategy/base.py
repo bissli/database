@@ -115,6 +115,19 @@ class DatabaseStrategy(ABC):
             str: Properly quoted identifier according to database-specific rules
         """
 
+    @abstractmethod
+    def get_constraint_definition(self, cn, table, constraint_name):
+        """Get the definition of a constraint by name
+
+        Args:
+            cn: Database connection object
+            table: The table containing the constraint
+            constraint_name: Name of the constraint
+
+        Returns
+            dict: Constraint information including columns and definition
+        """
+
     # Common implementation shared by all strategies
     @cacheable_strategy('sequence_column_finder', ttl=300, maxsize=50)
     def _find_sequence_column(self, cn, table, bypass_cache=False):

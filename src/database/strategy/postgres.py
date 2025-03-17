@@ -10,8 +10,10 @@ It handles PostgreSQL's unique features such as:
 - Metadata retrieval using PostgreSQL system catalogs
 """
 import logging
+import re
 
 from database.core.transaction import Transaction
+from database.operations.query import select
 from database.strategy.base import DatabaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -159,6 +161,79 @@ select skeys(hstore(null::{table})) as column
         """Quote an identifier for PostgreSQL"""
         return '"' + identifier.replace('"', '""') + '"'
 
+    def get_constraint_definition(self, cn, table, constraint_name):
+        """Get the definition of a constraint or unique index by name
+
+        Args:
+            cn: Database connection object
+            table: The table containing the constraint
+            constraint_name: Name of the constraint or unique index
+
+        Returns
+            str: SQL expression defining the constraint for use in ON CONFLICT
+        """
+        # Extract table and schema names
+        parts = table.split('.')
+        schema_name = parts[0].strip('"') if len(parts) > 1 else 'public'
+        table_name = parts[-1].strip('"')
+
+        # Use a UNION query to check both constraints and indexes in one go
+        union_query = """
+        -- Check for indexes
+        SELECT
+            indexdef AS definition,
+            'index' AS source
+        FROM
+            pg_indexes
+        WHERE
+            indexname = %s
+            AND tablename = %s
+            AND indexdef ~ 'CREATE UNIQUE INDEX'
+
+        UNION ALL
+
+        -- Check for primary key
+        SELECT
+            pg_get_constraintdef(c.oid) AS definition,
+            'constraint' AS source
+        FROM
+            pg_constraint c
+            JOIN pg_class tbl ON c.conrelid = tbl.oid
+            JOIN pg_namespace n ON tbl.relnamespace = n.oid
+        WHERE
+            c.conname = %s
+            AND tbl.relname = %s
+            AND c.contype IN ('c', 'p', 'u')
+
+        """
+
+        result = select(cn, union_query, constraint_name, table_name, constraint_name, table_name)
+
+        if not result:
+            raise ValueError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
+
+        # Process result based on source
+        definition = result[0]['definition']
+        source = result[0]['source']
+
+        definition = definition.strip()
+
+        if source == 'constraint':
+            # For constraints, extract column list from UNIQUE/PRIMARY KEY constraint
+            match = re.search(r'(?:UNIQUE|PRIMARY KEY)\s*\(([^)]+)\)', definition, re.IGNORECASE)
+            if match:
+                return match.group(1)
+            # For complex constraints with expressions, try to extract the column list
+            # This handles cases with COALESCE or other expressions
+            match = re.search(r'\(([^)]+)\)', definition)
+            if match:
+                return match.group(1)
+        else:
+            # For indexes, extract column list from CREATE INDEX statement
+            return extract_index_definition(definition)
+
+        raise ValueError(f'Failed to extract regex from definition: {definition}')
+
     def _find_sequence_column(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for
 
@@ -172,3 +247,52 @@ select skeys(hstore(null::{table})) as column
         """
         # Use the common implementation from base class
         return super()._find_sequence_column(cn, table, bypass_cache=bypass_cache)
+
+
+def extract_index_definition(definition):
+    """Extract column list and WHERE clause from a PostgreSQL unique index definition.
+
+    This function parses PostgreSQL CREATE UNIQUE INDEX statements to extract:
+    1. The column specification, which may include functions like COALESCE
+    2. Any WHERE clause that makes the uniqueness conditional
+
+    Args:
+        definition: The full CREATE UNIQUE INDEX statement
+
+    Returns
+        str: Column specification with optional WHERE clause for use in ON CONFLICT
+
+    Raises
+        ValueError: If the column definition cannot be extracted
+    """
+    # Pattern to extract column list and optional WHERE clause from index definitions
+    # This handles complex cases including:
+    # - Schema-qualified tables
+    # - Different index types (btree, hash, etc.)
+    # - Complex column expressions with functions like COALESCE
+    # - WHERE clauses for partial indexes
+    # - NULLS NOT DISTINCT option
+    pattern = r'CREATE\s+UNIQUE\s+INDEX\s+\w+\s+ON\s+(?:[a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+(?:\s+USING\s+\w+)?\s+(\(.*?\))(?:\s+NULLS\s+NOT\s+DISTINCT)?(?:\s+WHERE\s+(.*?))?$'
+
+    match = re.search(pattern, definition)
+    if match:
+        column_clause = match.group(1)
+        where_clause = match.group(2)
+        if where_clause:
+            return f'{column_clause} WHERE {where_clause}'
+        else:
+            return column_clause
+
+    # If regex didn't match, try a simpler fallback approach
+    # Look for parentheses that likely contain the column definitions
+    paren_match = re.search(r'\(([^()]*(?:\([^()]*\)[^()]*)*)\)', definition)
+    if paren_match:
+        column_def = paren_match.group(0)  # Get the entire parenthetical expression
+
+        # Check for WHERE clause after the column definition
+        where_match = re.search(r'\)\s+WHERE\s+(.*?)(?:\s*$|\s+NULLS)', definition)
+        if where_match:
+            return f'{column_def} WHERE {where_match.group(1)}'
+        return column_def
+
+    raise ValueError(f'Failed to extract column definition from index: {definition}')

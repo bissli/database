@@ -4,15 +4,17 @@ Upsert operations for database tables.
 import logging
 
 from database.adapters.structure import RowStructureAdapter
-from database.core.transaction import Transaction
 from database.operations.data import insert_rows
-from database.operations.query import select
+from database.operations.query import execute_many, select
+from database.operations.schema import get_table_columns
 from database.operations.schema import get_table_primary_keys
 from database.operations.schema import reset_table_sequence
+from database.strategy import get_db_strategy
 from database.utils.connection_utils import is_psycopg_connection
 from database.utils.connection_utils import is_pyodbc_connection
 from database.utils.connection_utils import is_sqlite3_connection
-from database.utils.sql import quote_identifier
+from database.utils.sql import get_param_limit_for_db, quote_identifier
+from database.utils.sql_generation import build_insert_sql
 
 from libb import is_null
 
@@ -36,7 +38,8 @@ def _build_upsert_sql(
     cn,
     table: str,
     columns: tuple[str],
-    key_columns: list[str],
+    key_columns: list[str] = None,
+    constraint_name: str = None,
     update_always: list[str] = None,
     update_if_null: list[str] = None,
     db_type: str = 'postgresql',
@@ -48,27 +51,39 @@ def _build_upsert_sql(
         table: Target table name
         columns: All columns to insert
         key_columns: Columns that form conflict constraint (primary/unique keys)
+        constraint_name: Name of the constraint to use for conflict detection (PostgreSQL only)
         update_always: Columns that should always be updated on conflict
         update_if_null: Columns that should only be updated if target is null
         db_type: Database type ('postgresql', 'sqlite', 'mssql')
     """
-    # Validate inputs
-    if not key_columns:
+    # Validate inputs for non-PostgreSQL databases
+    if constraint_name and db_type != 'postgresql':
+        raise ValueError(f'Constraint name is only supported for PostgreSQL, not {db_type}')
+
+    # Fall back to regular insert if no conflict detection is requested
+    if not key_columns and not constraint_name:
         return _build_insert_sql(cn, table, columns)
+
+    if update_always and set(update_always)-set(columns) != set():
+        raise ValueError('There are columns in `update_always` that are not in columns')
+
+    if update_if_null and set(update_if_null)-set(columns) != set():
+        raise ValueError('There are columns in `update_if_null` that are not in columns')
 
     # Quote table name and all column names
     quoted_table = quote_identifier(db_type, table)
     quoted_columns = [quote_identifier(db_type, col) for col in columns]
-    quoted_key_columns = [quote_identifier(db_type, col) for col in key_columns]
+    quoted_key_columns = [quote_identifier(db_type, col) for col in key_columns] if key_columns else []
 
     # PostgreSQL uses INSERT ... ON CONFLICT DO UPDATE
     if db_type == 'postgresql':
-        # build the basic insert part
         insert_sql = _build_insert_sql(cn, table, columns)
 
-        # For PostgreSQL, we need to use the exact case for the key columns
-        # The key_columns should already have the correct case after filtering
-        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
+        if not constraint_name:
+            conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
+        else:
+            expressions = get_db_strategy(cn).get_constraint_definition(cn, table, constraint_name)
+            conflict_sql = f'on conflict {expressions}'
 
         # If no updates requested, do nothing
         if not (update_always or update_if_null):
@@ -166,8 +181,6 @@ def _build_upsert_sql(
 def _build_insert_sql(cn, table: str, columns: tuple[str]) -> str:
     """Builds the INSERT part of the SQL statement
     """
-    from database.utils.sql_generation import build_insert_sql
-
     db_type = _get_db_type_from_connection(cn)
 
     return build_insert_sql(db_type, table, columns)
@@ -179,7 +192,6 @@ def _prepare_rows_for_upsert(cn, table, rows):
         return None
 
     # Get table columns with exact case
-    from database.operations.schema import get_table_columns
     table_columns = get_table_columns(cn, table)
 
     # Create case mapping for case-insensitive lookup
@@ -227,30 +239,35 @@ def _filter_update_columns(columns, update_cols, key_cols):
     ]
 
 
-def _execute_standard_upsert(cn, table, rows, columns, key_cols,
-                             update_always, update_ifnull, db_type):
+def _execute_standard_upsert(
+    cn,
+    table,
+    rows,
+    columns,
+    key_cols,
+    constraint_name,
+    update_always,
+    update_ifnull,
+    db_type,
+):
     """Execute standard upsert operation for supported databases using execute_many"""
-    from database.operations.query import execute_many
 
-    # Build the SQL statement
     sql = _build_upsert_sql(
         cn=cn,
         table=table,
         columns=columns,
         key_columns=key_cols,
+        constraint_name=constraint_name,
         update_always=update_always,
         update_if_null=update_ifnull,
         db_type=db_type
     )
 
-    # Create parameter sets
-    param_sets = [[row[col] for col in columns] for row in rows]
-
-    # Use execute_many which handles batching automatically based on DB parameter limits
-    rc = execute_many(cn, sql, param_sets)
+    params = [[row[col] for col in columns] for row in rows]
+    rc = execute_many(cn, sql, params)
 
     if isinstance(rc, int) and rc != len(rows):
-        logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints')
+        logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints or errors')
 
     return rc
 
@@ -274,7 +291,6 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
         return {}
 
     # Calculate a reasonable parameter limit (accounting for complex queries)
-    from database.utils.sql import get_param_limit_for_db
     safe_param_limit = max(50, get_param_limit_for_db(db_type) // 2)
 
     # Each key will consume key_cols number of parameters
@@ -340,46 +356,48 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
     return existing_rows
 
 
-def _upsert_sqlserver_with_nulls(cn, table, rows, columns, key_cols,
-                                 update_always, update_ifnull):
-    """Special handling for SQL Server with NULL-preserving updates, using execute_many where possible"""
-    from database.operations.query import execute_many
+def _upsert_sqlserver_with_nulls(
+    cn,
+    table,
+    rows,
+    columns,
+    key_cols,
+    update_always,
+    update_ifnull,
+):
+    """Special handling for SQL Server with NULL-preserving updates"""
 
     logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
     db_type = 'mssql'
 
-    with Transaction(cn) as tx:
-        # First retrieve existing rows to handle COALESCE logic
-        existing_rows = _fetch_existing_rows(tx, table, rows, key_cols)
+    # First retrieve existing rows to handle COALESCE logic
+    existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
 
-        # Apply NULL-preservation logic to each row
-        for row in rows:
-            row_key = tuple(row[key] for key in key_cols)
-            existing_row = existing_rows.get(row_key)
+    # Apply NULL-preservation logic to each row
+    for row in rows:
+        row_key = tuple(row[key] for key in key_cols)
+        existing_row = existing_rows.get(row_key)
 
-            if existing_row:
-                # Apply update_cols_ifnull logic manually
-                for col in update_ifnull:
-                    if col in existing_row and not is_null(existing_row.get(col)):
-                        # Keep existing non-NULL value
-                        row[col] = existing_row.get(col)
+        if existing_row:
+            # Apply update_cols_ifnull logic manually
+            for col in update_ifnull:
+                if col in existing_row and not is_null(existing_row.get(col)):
+                    # Keep existing non-NULL value
+                    row[col] = existing_row.get(col)
 
-        # Build MERGE statement with only update_always columns
-        sql = _build_upsert_sql(
-            cn=tx,
-            table=table,
-            columns=columns,
-            key_columns=key_cols,
-            update_always=update_always,  # Only handle "always update" columns
-            update_if_null=[],  # No special NULL handling needed anymore since we modified the rows
-            db_type=db_type
-        )
+    # Build MERGE statement with only update_always columns
+    sql = _build_upsert_sql(
+        cn=cn,
+        table=table,
+        columns=columns,
+        key_columns=key_cols,
+        update_always=update_always,  # Only handle "always update" columns
+        update_if_null=[],  # No special NULL handling needed anymore since we modified the rows
+        db_type=db_type
+    )
 
-        # Create parameter sets for all rows
-        param_sets = [[row[col] for col in columns] for row in rows]
-
-        # Use execute_many with the transaction
-        return execute_many(tx, sql, param_sets)
+    params = [[row[col] for col in columns] for row in rows]
+    rc = execute_many(cn, sql, params)
 
 
 def upsert_rows(
@@ -387,6 +405,7 @@ def upsert_rows(
     table: str,
     rows: tuple[dict],
     update_cols_key: list = None,
+    constraint_name: str = None,
     update_cols_always: list = None,
     update_cols_ifnull: list = None,
     reset_sequence: bool = False,
@@ -400,6 +419,7 @@ def upsert_rows(
         table: Target table name
         rows: Rows to insert/update
         update_cols_key: Columns that form the conflict constraint
+        constraint_name: Name of the constraint to use for conflict detection (PostgreSQL only)
         update_cols_always: Columns that should always be updated on conflict
         update_cols_ifnull: Columns that should only be updated if target is null
         reset_sequence: Whether to reset the table's sequence after operation
@@ -413,12 +433,15 @@ def upsert_rows(
     if db_type == 'unknown':
         raise ValueError('Unsupported database connection for upsert_rows')
 
+    # Check constraint name is only used with PostgreSQL
+    if constraint_name and db_type != 'postgresql':
+        raise ValueError(f'Constraint name is only supported for PostgreSQL, not {db_type}')
+
     # Warning for SQL Server implementation
     if db_type == 'mssql':
         logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
 
     # Get table columns to validate input
-    from database.operations.schema import get_table_columns
     table_columns = set(get_table_columns(cn, table))
 
     # Filter and validate rows
@@ -446,15 +469,12 @@ def upsert_rows(
         logger.warning(f'No valid columns provided for table {table}')
         return 0
 
-    # Get primary keys if not specified
-    update_cols_key = update_cols_key or get_table_primary_keys(cn, table)
-    if not update_cols_key:
-        logger.warning(f'No primary keys found for {table}, falling back to INSERT')
-        return insert_rows(cn, table, rows)
-
-    # Filter update columns to only valid ones
-    update_cols_always = _filter_update_columns(columns, update_cols_always, update_cols_key)
-    update_cols_ifnull = _filter_update_columns(columns, update_cols_ifnull, update_cols_key)
+    # Get primary keys if not specified and constraint name not used
+    if not update_cols_key and not constraint_name:
+        update_cols_key = get_table_primary_keys(cn, table)
+        if not update_cols_key and db_type != 'postgresql':
+            logger.warning(f'No primary keys found for {table}, falling back to INSERT')
+            return insert_rows(cn, table, rows)
 
     try:
         # Handle the specific database type
@@ -466,8 +486,9 @@ def upsert_rows(
         else:
             # Standard approach for PostgreSQL, SQLite and simple SQL Server cases
             rc = _execute_standard_upsert(cn, table, rows, columns,
-                                          update_cols_key, update_cols_always,
-                                          update_cols_ifnull, db_type)
+                                          update_cols_key, constraint_name,
+                                          update_cols_always, update_cols_ifnull,
+                                          db_type)
     finally:
         if reset_sequence:
             reset_table_sequence(cn, table)

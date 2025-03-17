@@ -153,7 +153,7 @@ def test_upsert_empty_rows(sconn):
 
 
 def test_upsert_large_batch(sconn):
-    """Test upsert with a batch size that exceeds parameter limits"""
+    """Test upsert with a large number of rows that exceeds parameter limits"""
     import time
 
     # Create a temporary table for this test with a simple structure
@@ -170,7 +170,7 @@ def test_upsert_large_batch(sconn):
     start_time = time.time()
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 1201)]
 
-    # First insert the rows (should use batching internally)
+    # Insert the rows
     batch_insert_time = time.time()
     row_count = db.upsert_rows(sconn, '#test_large_batch', rows)
     insert_end_time = time.time()

@@ -102,3 +102,31 @@ select name as column from pragma_table_info('{table}')
     def quote_identifier(self, identifier):
         """Quote an identifier for SQLite"""
         return '"' + identifier.replace('"', '""') + '"'
+
+    def get_constraint_definition(self, cn, table, constraint_name):
+        """Get the definition of a constraint by name (SQLite implementation)
+
+        Args:
+            cn: Database connection object
+            table: The table containing the constraint
+            constraint_name: Name of the constraint
+
+        Returns
+            dict: Constraint information
+        """
+        logger.warning("SQLite doesn't fully support constraint definition retrieval")
+        # SQLite doesn't offer the same rich constraint info as PostgreSQL
+        # but we can get basic indices info
+        sql = f"PRAGMA index_info('{constraint_name}')"
+        from database.operations.query import select
+        result = select(cn, sql)
+
+        if not result:
+            raise ValueError(f"Constraint '{constraint_name}' not found on table '{table}'")
+
+        columns = [row['name'] for row in result]
+        return {
+            'name': constraint_name,
+            'definition': f"UNIQUE ({', '.join(columns)})",
+            'columns': columns
+        }

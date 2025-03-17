@@ -152,7 +152,7 @@ def test_upsert_empty_rows(sqlite_conn):
 
 
 def test_upsert_large_batch(sqlite_conn):
-    """Test upsert with a large batch size"""
+    """Test upsert with a large number of rows"""
     import time
 
     # Create a temporary table for this test with a simple structure
@@ -163,13 +163,13 @@ def test_upsert_large_batch(sqlite_conn):
     )
     """)
 
-    # For SQLite, we don't need as many rows as PostgreSQL to test batching
+    # For SQLite, we don't need as many rows as PostgreSQL to test parameter limits
     # SQLite has a parameter limit of 999 by default
     # With 2 parameters per row (id and value), we need 500 rows to approach it
     start_time = time.time()
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 501)]
 
-    # First insert the rows (should use batching internally)
+    # Insert the rows
     batch_insert_time = time.time()
     row_count = db.upsert_rows(sqlite_conn, 'test_large_batch', rows)
     insert_end_time = time.time()

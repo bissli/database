@@ -131,6 +131,49 @@ where t.name = ?
         """Quote an identifier for SQL Server"""
         return f"[{identifier.replace(']', ']]')}]"
 
+    def get_constraint_definition(self, cn, table, constraint_name):
+        """Get the definition of a constraint by name (SQL Server implementation)
+
+        Args:
+            cn: Database connection object
+            table: The table containing the constraint
+            constraint_name: Name of the constraint
+
+        Returns
+            dict: Constraint information
+        """
+        # SQL Server doesn't support using constraint definitions directly in MERGE
+        # but we can retrieve the columns for filtering
+        sql = """
+        SELECT
+            col.name as column_name
+        FROM
+            sys.indexes idx
+            JOIN sys.index_columns idxcol ON idx.object_id = idxcol.object_id AND idx.index_id = idxcol.index_id
+            JOIN sys.columns col ON idxcol.object_id = col.object_id AND idxcol.column_id = col.column_id
+        WHERE
+            idx.name = ?
+            AND OBJECT_NAME(idx.object_id) = ?
+        ORDER BY
+            idxcol.index_column_id
+        """
+        from database.operations.query import select
+
+        # Get just the table name, removing any schema prefix
+        table_name = table.split('.')[-1].strip('"[]')
+
+        result = select(cn, sql, constraint_name, table_name)
+
+        if not result:
+            raise ValueError(f"Constraint '{constraint_name}' not found on table '{table}'")
+
+        columns = [row['column_name'] for row in result]
+        return {
+            'name': constraint_name,
+            'definition': f"UNIQUE ({', '.join(columns)})",
+            'columns': columns
+        }
+
     def _find_sequence_column(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for
 
