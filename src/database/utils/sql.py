@@ -32,17 +32,22 @@ def process_query_parameters(cn, sql, args):
     # Quick exit for empty parameters
     if not args:
         return sql, args
-        
+
+    # Check if the SQL has any placeholders - if not, return early with empty args
+    # to indicate parameters should be ignored
+    if not has_placeholders(sql):
+        return sql, ()
+
     # Handle nested parameters for multi-statement queries
     # This case handles patterns like [(param1, param2, param3)] when multiple
     # statements with multiple placeholders are present
     has_multiple_statements = ';' in sql
-    if has_multiple_statements and isinstance(args, (list, tuple)) and len(args) == 1:
-        if isinstance(args[0], (list, tuple)):
+    if has_multiple_statements and isinstance(args, list | tuple) and len(args) == 1:
+        if isinstance(args[0], list | tuple):
             # Count placeholders to see if the inner tuple has the exact parameters we need
             placeholder_count = sql.count('%s') + sql.count('?')
             inner_params = args[0]
-            
+
             # If the inner parameter collection matches our placeholder count,
             # we'll unwrap it to be the primary parameter collection
             if len(inner_params) == placeholder_count:
@@ -375,6 +380,7 @@ def handle_query_params(func):
     2. Handles IN clause parameter expansion
     3. Escapes percent signs in LIKE clauses
     4. Converts special data types (numpy, pandas)
+    5. Ignores parameters when SQL has no placeholders
 
     Args:
         func: Function to decorate
@@ -390,6 +396,12 @@ def handle_query_params(func):
         # Skip the rest of the processing if no arguments provided
         if not args:
             return func(cn, sql, *args, **kwargs)
+
+        # Check if SQL has any placeholders
+        if not has_placeholders(sql):
+            # If no placeholders but parameters provided, ignore parameters
+            # Pass an empty tuple instead of removing args from kwargs
+            return func(cn, sql, *(), **kwargs)
 
         # Get database type and process parameters
         processed_sql, processed_args = process_query_parameters(cn, sql, args)
@@ -413,6 +425,12 @@ def escape_percent_signs_in_literals(sql):
         str: SQL with escaped percent signs in string literals
     """
     if not sql or '%' not in sql:
+        return sql
+
+    # Check if this is a SELECT query with a literal containing a percent sign
+    # If it's a basic query with percent signs in literals, don't escape them
+    # This helps with queries like "SELECT * FROM table WHERE col = '%value'"
+    if sql.strip().upper().startswith('SELECT') and "'%" in sql and '%s' not in sql and '?' not in sql:
         return sql
 
     # Helper function to escape % in single-quoted strings
@@ -1105,3 +1123,21 @@ def _replace_match(sql, match, replacement):
         str: SQL with the replacement applied
     """
     return sql[:match.start(0)] + replacement + sql[match.end(0):]
+
+
+def has_placeholders(sql):
+    """
+    Check if SQL has any parameter placeholders.
+
+    Args:
+        sql: SQL query string
+
+    Returns
+        bool: True if SQL contains placeholders (%s, ?, or %(name)s)
+    """
+    # Check for positional placeholders (%s, ?)
+    if '%s' in sql or '?' in sql:
+        return True
+
+    # Check for named placeholders like %(name)s
+    return bool(re.search('%\\([^)]+\\)s', sql))

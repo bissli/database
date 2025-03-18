@@ -88,6 +88,15 @@ class CursorWrapper:
         # Store original SQL for debugging
         self._original_sql = sql
 
+        # Check if SQL has placeholders - if not and we have args, ignore the args
+        from database.utils.sql import has_placeholders
+        if args and not has_placeholders(sql):
+            # Use tuple() to ensure we get a length instead of a generator
+            args_count = len(tuple(collapse(args)))
+            logger.info(f"SQL has no placeholders, ignoring {args_count} parameter(s)")
+            self.cursor.execute(sql)
+            return
+
         # Handle dictionary parameters (for named placeholders)
         for arg in collapse(args):
             if isinstance(arg, dict):
