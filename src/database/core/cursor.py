@@ -7,10 +7,16 @@ import time
 from functools import wraps
 from numbers import Number
 
+from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import is_psycopg_connection
 from database.utils.connection_utils import is_pyodbc_connection
 from database.utils.connection_utils import is_sqlite3_connection
 from database.utils.connection_utils import isconnection
+from database.utils.sql import has_placeholders, sanitize_sql_for_logging
+from database.utils.sql import standardize_placeholders
+from database.utils.sqlserver_utils import ensure_identity_column_named
+from database.utils.sqlserver_utils import handle_unnamed_columns_error
+from database.utils.sqlserver_utils import prepare_sqlserver_params
 
 from libb import collapse
 
@@ -21,7 +27,6 @@ def dumpsql(func):
     """Decorator for logging SQL queries and parameters"""
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
-        from database.utils.sql import sanitize_sql_for_logging
         this_cn = isconnection(cn) and cn or cn.connnection
         sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
         try:
@@ -50,7 +55,6 @@ class CursorWrapper:
     @dumpsql
     def execute(self, sql, *args, **kwargs):
         """Time the call and tell the connection wrapper that created this connection."""
-        from database.utils.connection_utils import is_pyodbc_connection
         start = time.time()
 
         # Extract custom arguments
@@ -78,30 +82,23 @@ class CursorWrapper:
 
         # Commit automatically if needed and we're not in a transaction
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
-            from database.utils.auto_commit import ensure_commit
             ensure_commit(self.connwrapper)
 
         return self.cursor.rowcount
 
     def _execute_sql(self, sql, args):
         """Execute SQL with parameter handling."""
-        # Store original SQL for debugging
         self._original_sql = sql
 
         # Check if SQL has placeholders - if not and we have args, ignore the args
-        from database.utils.sql import has_placeholders
         if args and not has_placeholders(sql):
-            # Use tuple() to ensure we get a length instead of a generator
             args_count = len(tuple(collapse(args)))
-            logger.info(f"SQL has no placeholders, ignoring {args_count} parameter(s)")
             self.cursor.execute(sql)
             return
 
         # Handle dictionary parameters (for named placeholders)
         for arg in collapse(args):
             if isinstance(arg, dict):
-                logger.debug('Executing with dictionary parameter')
-
                 # Check if we're dealing with multiple statements in PostgreSQL
                 is_multi_statement = ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
 
@@ -133,39 +130,29 @@ class CursorWrapper:
     def _execute_sqlserver_query(self, sql, args):
         """Execute a query specifically for SQL Server with appropriate handling."""
         # Only add explicit names for required expressions (@@identity, etc)
-        from database.utils.sqlserver_utils import ensure_identity_column_named
         sql = ensure_identity_column_named(sql)
 
         # Save the final SQL
         self._sql = sql
 
         # Convert %s to ? for SQL Server
-        from database.utils.sql import standardize_placeholders
         sql = standardize_placeholders(self.connwrapper, sql)
 
-        # Execute directly with pyodbc - preserving any column name information
-        try:
-            # Handle stored procedures with named parameters for SQL Server
-            if args and 'EXEC ' in sql.upper() and '@' in sql:
-                self._execute_stored_procedure(sql, args)
-            else:
-                # Standard execution for non-stored procedure queries
-                if args:
-                    if len(args) == 1 and isinstance(args[0], list | tuple):
-                        self.cursor.execute(sql, args[0])
-                    else:
-                        self.cursor.execute(sql, args)
+        # Handle stored procedures with named parameters for SQL Server
+        if args and 'EXEC ' in sql.upper() and '@' in sql:
+            self._execute_stored_procedure(sql, args)
+        else:
+            # Standard execution for non-stored procedure queries
+            if args:
+                if len(args) == 1 and isinstance(args[0], list | tuple):
+                    self.cursor.execute(sql, args[0])
                 else:
-                    self.cursor.execute(sql)
-        except Exception as e:
-            logger.error(f'Error executing SQL: {e}')
-            logger.error(f'SQL: {sql}')
-            logger.error(f'Args: {args}')
-            raise
+                    self.cursor.execute(sql, args)
+            else:
+                self.cursor.execute(sql)
 
     def _execute_stored_procedure(self, sql, args):
         """Handle execution of SQL Server stored procedures with parameters."""
-        from database.utils.sqlserver_utils import prepare_sqlserver_params
 
         # Convert parameters to positional placeholders (?)
         processed_sql, processed_args = prepare_sqlserver_params(sql, args)
@@ -174,26 +161,13 @@ class CursorWrapper:
         placeholder_count = processed_sql.count('?')
         param_count = len(processed_args) if processed_args else 0
 
-        # Log the processed SQL and parameters for debugging
-        logger.debug(f'Processed SQL: {processed_sql}')
-        logger.debug(f'Processed args: {processed_args}')
-        logger.debug(f'Placeholder count: {placeholder_count}')
-
         # Execute with the processed SQL and args
         if not processed_args:
             self.cursor.execute(processed_sql)
             return
 
-        try:
-            processed_args = self._adjust_parameter_count(placeholder_count, param_count, processed_args)
-            self._execute_with_parameters(processed_sql, processed_args, placeholder_count)
-        except Exception as e:
-            # Add diagnostic information to help debug parameter mismatches
-            logger.error(f'SQL parameter mismatch: SQL has {placeholder_count} placeholders, '
-                         f'args has {param_count} parameters')
-            logger.error(f'Processed SQL: {processed_sql}')
-            logger.error(f'Processed args: {processed_args}')
-            raise
+        processed_args = self._adjust_parameter_count(placeholder_count, param_count, processed_args)
+        self._execute_with_parameters(processed_sql, processed_args, placeholder_count)
 
     def _adjust_parameter_count(self, placeholder_count, param_count, processed_args):
         """Adjust parameter count to match placeholders."""
@@ -280,7 +254,6 @@ class CursorWrapper:
 
     def _handle_sqlserver_error(self, error, sql, args):
         """Handle SQL Server specific errors with automatic fixes."""
-        from database.utils.sqlserver_utils import handle_unnamed_columns_error
 
         modified_sql, should_retry = handle_unnamed_columns_error(error, sql, args)
         if should_retry:
