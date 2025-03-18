@@ -128,9 +128,48 @@ class DatabaseStrategy(ABC):
             dict: Constraint information including columns and definition
         """
 
+    @abstractmethod
+    def get_default_columns(self, cn, table, bypass_cache=False):
+        """Get columns suitable for general data display
+
+        Args:
+            cn: Database connection object
+            table: Table name to get default columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names suitable for general data representation
+        """
+
+    @abstractmethod
+    def get_ordered_columns(self, cn, table, bypass_cache=False):
+        """Get all column names for a table ordered by their position
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names ordered by position
+        """
+
+    @abstractmethod
+    def find_sequence_column(self, cn, table, bypass_cache=False):
+        """Find the best column to reset sequence for.
+
+        Args:
+            cn: Database connection object
+            table: Table name to analyze for sequence columns
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            str: Column name best suited for sequence resetting
+        """
+
     # Common implementation shared by all strategies
     @cacheable_strategy('sequence_column_finder', ttl=300, maxsize=50)
-    def _find_sequence_column(self, cn, table, bypass_cache=False):
+    def _find_sequence_column_impl(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for.
 
         Common implementation shared by all database strategies that determines the

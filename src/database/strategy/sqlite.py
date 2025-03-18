@@ -41,6 +41,10 @@ class SQLiteStrategy(DatabaseStrategy):
         """SQLite doesn't need explicit sequence resetting"""
         # SQLite automatically reuses rowids, but we can
         # implement a manual sequence update if needed
+        if identity is None:
+            identity = self.find_sequence_column(cn, table)
+
+        # SQLite handles sequence resetting automatically
 
     def get_primary_keys(self, cn, table, bypass_cache=False):
         """Get primary key columns for a table

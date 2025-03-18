@@ -73,7 +73,7 @@ class PostgresStrategy(DatabaseStrategy):
     def reset_sequence(self, cn, table, identity=None):
         """Reset the sequence for a table"""
         if identity is None:
-            identity = self._find_sequence_column(cn, table)
+            identity = self.find_sequence_column(cn, table)
 
         quoted_table = self.quote_identifier(table)
         quoted_identity = self.quote_identifier(identity)
@@ -234,7 +234,92 @@ select skeys(hstore(null::{table})) as column
 
         raise ValueError(f'Failed to extract regex from definition: {definition}')
 
-    def _find_sequence_column(self, cn, table, bypass_cache=False):
+    def get_default_columns(self, cn, table, bypass_cache=False):
+        """Get columns suitable for general data display
+
+        Args:
+            cn: Database connection object
+            table: Table name to get default columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names suitable for general data representation
+        """
+        sql = """
+select
+t.column_name
+from information_schema.columns t
+where
+t.table_name = %s
+and t.data_type in ('character', 'character varying', 'boolean',
+    'text', 'double precision', 'real', 'integer', 'date',
+    'time without time zone', 'timestamp without time zone')
+order by
+t.ordinal_position
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql, table)
+
+    def get_ordered_columns(self, cn, table, bypass_cache=False):
+        """Get all column names for a table ordered by their position
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names ordered by position
+        """
+        sql = """
+select
+t.column_name
+from information_schema.columns t
+where
+t.table_name = %s
+order by
+t.ordinal_position
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql, table)
+
+    def get_default_columns(self, cn, table, bypass_cache=False):
+        """Get columns suitable for general data display
+
+        Args:
+            cn: Database connection object
+            table: Table name to get default columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names suitable for general data representation
+        """
+        sql = f"""
+SELECT name FROM pragma_table_info('{table}')
+ORDER BY cid
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql)
+
+    def get_ordered_columns(self, cn, table, bypass_cache=False):
+        """Get all column names for a table ordered by their position
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names ordered by position
+        """
+        sql = f"""
+SELECT name FROM pragma_table_info('{table}')
+ORDER BY cid
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql)
+
+    def find_sequence_column(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for
 
         Args:
@@ -246,7 +331,7 @@ select skeys(hstore(null::{table})) as column
             str: Column name best suited for sequence resetting
         """
         # Use the common implementation from base class
-        return super()._find_sequence_column(cn, table, bypass_cache=bypass_cache)
+        return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
 
 
 def extract_index_definition(definition):

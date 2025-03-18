@@ -166,3 +166,28 @@ def filter_table_columns(cn, table, row_dicts):
         logger.debug(f'Removed column {col} not in {table}')
 
     return filtered_rows
+
+
+def table_data(cn, table, columns=None, bypass_cache=False):
+    """Get table data by columns
+
+    Args:
+        cn: Database connection
+        table: Table name to get data from
+        columns: List of columns to retrieve (if empty, auto-detects using strategy)
+        bypass_cache: If True, bypass cache when auto-detecting columns, by default False
+
+    Returns
+        list or DataFrame: Table data for the specified columns
+    """
+    from database.operations.query import select
+    from database.strategy import get_db_strategy
+
+    from libb import peel
+
+    if not columns:
+        strategy = get_db_strategy(cn)
+        columns = strategy.get_default_columns(cn, table, bypass_cache=bypass_cache)
+
+    columns = [f'{col} as {alias}' for col, alias in peel(columns)]
+    return select(cn, f"select {','.join(columns)} from {table}")

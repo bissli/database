@@ -40,7 +40,7 @@ class SQLServerStrategy(DatabaseStrategy):
     def reset_sequence(self, cn, table, identity=None):
         """Reset the identity seed for a table"""
         if identity is None:
-            identity = self._find_sequence_column(cn, table)
+            identity = self.find_sequence_column(cn, table)
 
         quoted_table = self.quote_identifier(table)
         quoted_identity = self.quote_identifier(identity)
@@ -174,7 +174,53 @@ where t.name = ?
             'columns': columns
         }
 
-    def _find_sequence_column(self, cn, table, bypass_cache=False):
+    def get_default_columns(self, cn, table, bypass_cache=False):
+        """Get columns suitable for general data display
+
+        Args:
+            cn: Database connection object
+            table: Table name to get default columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names suitable for general data representation
+        """
+        sql = """
+SELECT c.name
+FROM sys.columns c
+JOIN sys.tables t ON c.object_id = t.object_id
+JOIN sys.types ty ON c.system_type_id = ty.system_type_id
+WHERE t.name = ?
+AND ty.name IN ('char', 'varchar', 'nvarchar', 'text', 'ntext', 'bit',
+    'tinyint', 'smallint', 'int', 'bigint', 'decimal', 'numeric',
+    'float', 'real', 'date', 'time', 'datetime', 'datetime2')
+ORDER BY c.column_id
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql, table)
+
+    def get_ordered_columns(self, cn, table, bypass_cache=False):
+        """Get all column names for a table ordered by their position
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names ordered by position
+        """
+        sql = """
+SELECT c.name
+FROM sys.columns c
+JOIN sys.tables t ON c.object_id = t.object_id
+WHERE t.name = ?
+ORDER BY c.column_id
+"""
+        from database.operations.query import select_column
+        return select_column(cn, sql, table)
+
+    def find_sequence_column(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for
 
         Args:
@@ -186,4 +232,4 @@ where t.name = ?
             str: Column name best suited for sequence resetting
         """
         # Use the common implementation from base class
-        return super()._find_sequence_column(cn, table, bypass_cache=bypass_cache)
+        return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
