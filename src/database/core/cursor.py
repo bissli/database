@@ -53,34 +53,59 @@ class CursorWrapper:
         return IterChunk(self.cursor)
 
     @dumpsql
+    def executemany(self, sql, args, **kwargs):
+        """Execute the SQL statement against all parameter sequences.
+        """
+        start = time.time()
+
+        auto_commit = kwargs.pop('auto_commit', True)
+
+        if not args:
+            logger.warning('executemany called with no parameter sequences, skipping')
+            return 0
+
+        try:
+            if is_pyodbc_connection(self.connwrapper):
+                modified_sql = standardize_placeholders(self.connwrapper, sql)
+                modified_sql = ensure_identity_column_named(modified_sql)
+                self.cursor.executemany(modified_sql, args)
+            else:
+                self.cursor.executemany(sql, args)
+
+            if is_psycopg_connection(self.connwrapper):
+                logger.debug(f'Executemany result: {self.cursor.statusmessage}')
+        finally:
+            end = time.time()
+            self.connwrapper.addcall(end - start)
+            logger.debug('Executemany time: %f' % (end - start))
+
+        if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
+            ensure_commit(self.connwrapper)
+
+        return self.cursor.rowcount
+
+    @dumpsql
     def execute(self, sql, *args, **kwargs):
         """Time the call and tell the connection wrapper that created this connection."""
         start = time.time()
 
-        # Extract custom arguments
         auto_commit = kwargs.pop('auto_commit', True)
 
         try:
-            # Execute the SQL with appropriate parameter handling
             self._execute_sql(sql, args)
-
-            # Log the result for PostgreSQL
             if is_psycopg_connection(self.connwrapper):
                 logger.debug(f'Query result: {self.cursor.statusmessage}')
 
         except Exception as e:
-            # Handle SQL Server specific errors
             if is_pyodbc_connection(self.connwrapper):
                 self._handle_sqlserver_error(e, sql, args)
             else:
                 raise
         finally:
-            # Record timing information
             end = time.time()
             self.connwrapper.addcall(end - start)
             logger.debug('Query time: %f' % (end - start))
 
-        # Commit automatically if needed and we're not in a transaction
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 

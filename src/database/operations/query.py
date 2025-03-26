@@ -280,11 +280,6 @@ def execute_many(cn, sql, args):
     if not args:
         return 0
 
-    # Determine database type
-    from database.utils.connection_utils import is_psycopg_connection
-    from database.utils.connection_utils import is_pyodbc_connection
-    from database.utils.connection_utils import is_sqlite3_connection
-
     if is_psycopg_connection(cn):
         db_type = 'postgresql'
     elif is_pyodbc_connection(cn):
@@ -310,7 +305,7 @@ def execute_many(cn, sql, args):
         for i in range(0, len(args), max_batch_size):
             chunk = args[i:i+max_batch_size]
             cursor = tx.cursor
-            cursor.executemany(sql, chunk)
+            cursor.executemany(sql, chunk, auto_commit=False)
             total_rows += cursor.rowcount
 
     return total_rows
