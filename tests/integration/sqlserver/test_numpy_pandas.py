@@ -7,15 +7,16 @@ import math
 import numpy as np
 import pandas as pd
 import pytest
-import database as db
+from database.core.transaction import Transaction
 from database.options import iterdict_data_loader
+from database.utils.connection_utils import get_dialect_name
 
 
 @pytest.mark.sqlserver
 def test_numpy_pandas_types_pandas_loader(sconn):
     """Test numpy and pandas type handling with SQL Server using pandas data loader"""
     # Skip if not connected to SQL Server
-    if not db.is_pyodbc_connection(sconn):
+    if get_dialect_name(sconn) != 'mssql':
         pytest.skip('Not connected to SQL Server')
 
     # Create numpy and pandas test values
@@ -44,7 +45,7 @@ def test_numpy_pandas_types_pandas_loader(sconn):
     insert_params = [np_int, np_float, json.dumps(np_array.tolist()), pd_series[0], pd_na]
 
     # Execute the test
-    with db.transaction(sconn) as tx:
+    with Transaction(sconn) as tx:
         tx.execute(create_sql)
         tx.execute(insert_sql, *insert_params)
 
@@ -67,7 +68,7 @@ def test_numpy_pandas_types_pandas_loader(sconn):
 def test_numpy_pandas_types_iterdict_loader(sconn):
     """Test numpy and pandas type handling with SQL Server using iterdict data loader"""
     # Skip if not connected to SQL Server
-    if not db.is_pyodbc_connection(sconn):
+    if get_dialect_name(sconn) != 'mssql':
         pytest.skip('Not connected to SQL Server')
 
     # Save original data loader
@@ -102,7 +103,7 @@ def test_numpy_pandas_types_iterdict_loader(sconn):
         insert_params = [np_int, np_float, json.dumps(np_array.tolist()), pd_series[0], pd_na]
 
         # Execute the test
-        with db.transaction(sconn) as tx:
+        with Transaction(sconn) as tx:
             tx.execute(create_sql)
             tx.execute(insert_sql, *insert_params)
 
@@ -123,3 +124,7 @@ def test_numpy_pandas_types_iterdict_loader(sconn):
     finally:
         # Restore original data loader
         sconn.options.data_loader = original_loader
+
+
+if __name__ == '__main__':
+    __import__('pytest').main([__file__])

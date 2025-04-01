@@ -34,7 +34,6 @@ def execute(cn: object, sql: str, *args: object) -> int:
     <sqlite3.Cursor object at ...>
     >>> execute(conn, 'INSERT INTO test VALUES (?, ?)', 1, 'test')
     1
-    >>> conn.close()
     """
     cursor = cn.cursor()
     try:
@@ -53,7 +52,7 @@ def execute(cn: object, sql: str, *args: object) -> int:
             logger.debug(f'Executed query with {len(processed_args) if processed_args else 0} parameters: {processed_sql[:60]}...')
 
         rowcount = cursor.rowcount
-        cn.commit()
+        cn.commit()  # cursor closed
         return rowcount
     except Exception as e:
         try:
