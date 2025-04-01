@@ -5,7 +5,7 @@ import database as db
 
 def test_select(psql_docker, conn):
     """Verify basic SELECT query returns proper results and structure.
-    
+
     Tests that db.select correctly retrieves data and returns it as a list
     of dictionaries with expected values.
     """
@@ -29,7 +29,7 @@ def test_select(psql_docker, conn):
 
 def test_select_numeric(psql_docker, conn):
     """Verify custom numeric adapter properly converts PostgreSQL numeric types to float.
-    
+
     Ensures numeric database values are returned as Python float values
     rather than Decimal objects.
     """
@@ -51,7 +51,7 @@ def test_select_numeric(psql_docker, conn):
 
 def test_insert(psql_docker, conn):
     """Verify INSERT operation correctly adds data and returns proper row count.
-    
+
     Tests db.insert by adding a record and confirming both the return value
     and that the data appears in a subsequent query.
     """
@@ -68,7 +68,7 @@ def test_insert(psql_docker, conn):
 
 def test_update(psql_docker, conn):
     """Verify UPDATE operation correctly modifies data and returns proper row count.
-    
+
     Tests db.update by modifying a record and confirming both the return value
     and that the data is correctly updated in a subsequent query.
     """
@@ -85,7 +85,7 @@ def test_update(psql_docker, conn):
 
 def test_delete(psql_docker, conn):
     """Verify DELETE operation correctly removes data and returns proper row count.
-    
+
     Tests db.delete by removing a record and confirming both the return value
     and that the data is no longer present in a subsequent query.
     """
@@ -101,7 +101,7 @@ def test_delete(psql_docker, conn):
 
 def test_select_row(psql_docker, conn):
     """Verify select_row correctly retrieves a single row as an object.
-    
+
     Tests that db.select_row returns a row with attribute access to columns.
     """
     row = db.select_row(conn, 'select name, value from test_table where name = %s', 'Alice')
@@ -111,7 +111,7 @@ def test_select_row(psql_docker, conn):
 
 def test_select_row_or_none(psql_docker, conn):
     """Verify select_row_or_none returns object for existing rows and None for missing rows.
-    
+
     Tests both the successful case with a row object return and the case
     where no matching row exists, which should return None.
     """
@@ -124,7 +124,7 @@ def test_select_row_or_none(psql_docker, conn):
 
 def test_select_scalar(psql_docker, conn):
     """Verify select_scalar correctly retrieves a single value.
-    
+
     Tests that db.select_scalar returns just the first column of the first row.
     """
     value = db.select_scalar(conn, 'select value from test_table where name = %s', 'Alice')
@@ -133,7 +133,7 @@ def test_select_scalar(psql_docker, conn):
 
 def test_select_scalar_or_none(psql_docker, conn):
     """Verify select_scalar_or_none returns value for existing rows and None for missing rows.
-    
+
     Tests both the successful case with a single value returned and the case
     where no matching row exists, which should return None.
     """
@@ -146,7 +146,7 @@ def test_select_scalar_or_none(psql_docker, conn):
 
 def test_select_column(psql_docker, conn):
     """Verify select_column correctly retrieves a list of values from a single column.
-    
+
     Tests that db.select_column returns values from the specified column across
     all matching rows.
     """
@@ -156,24 +156,9 @@ def test_select_column(psql_docker, conn):
     assert names == expected_names
 
 
-def test_select_column_unique(psql_docker, conn):
-    """Verify select_column_unique correctly retrieves unique values as a set.
-    
-    Tests that db.select_column_unique returns only unique values from the 
-    specified column as a Python set.
-    """
-    db.insert(conn, 'insert into test_table (name, value) values (%s, %s)', 'DupeA', 100)
-    db.insert(conn, 'insert into test_table (name, value) values (%s, %s)', 'DupeB', 100)
-
-    values = db.select_column_unique(conn, 'select value from test_table')
-    assert isinstance(values, set)
-    assert 100 in values
-    assert len(values) == 7  # 6 original + 1 duplicate value (100)
-
-
 def test_insert_rows_bulk(psql_docker, conn):
     """Verify insert_rows correctly handles bulk insertion of many records.
-    
+
     Tests that db.insert_rows can insert a large batch of records at once
     and return the correct count of inserted rows.
     """
@@ -187,16 +172,14 @@ def test_insert_rows_bulk(psql_docker, conn):
     """)
 
     num_rows = 1000
-    test_rows = []
 
     base_date = datetime.date(2025, 1, 1)
 
-    for i in range(num_rows):
-        test_rows.append({
+    test_rows = [{
             'name': f'Bulk-{i}',
             'value': float(i * 1.5),
             'date': base_date + datetime.timedelta(days=i % 365)
-        })
+        } for i in range(num_rows)]
 
     rows_inserted = db.insert_rows(conn, 'bulk_test', test_rows)
 
@@ -210,7 +193,7 @@ def test_insert_rows_bulk(psql_docker, conn):
 
 def test_cte_query(psql_docker, conn):
     """Verify database functions correctly handle Common Table Expression (CTE) queries.
-    
+
     Tests that complex CTE queries are properly executed and return expected results.
     """
     cte_query = """
@@ -234,7 +217,7 @@ def test_cte_query(psql_docker, conn):
 
 def test_multiple_statements_with_semicolon(psql_docker, conn):
     """Verify execute handles multiple SQL statements separated by semicolons.
-    
+
     Tests that db.execute properly runs multiple statements in a single call,
     including INSERT and UPDATE operations.
     """
@@ -273,8 +256,8 @@ def test_multiple_statements_with_semicolon(psql_docker, conn):
 
 def test_multiple_statements_with_delete(psql_docker, conn):
     """Verify execute handles multiple statements including DELETE operations.
-    
-    Tests that db.execute properly processes a mix of INSERT, UPDATE, and DELETE 
+
+    Tests that db.execute properly processes a mix of INSERT, UPDATE, and DELETE
     statements in a single execution.
     """
     db.execute(conn, """
@@ -318,7 +301,7 @@ def test_multiple_statements_with_delete(psql_docker, conn):
 
 def test_multiple_statements_with_complex_updates(psql_docker, conn):
     """Verify execute handles complex multi-statement SQL with subqueries.
-    
+
     Tests that db.execute can process complex SQL statements with subqueries,
     joins, and self-references across multiple operations.
     """
@@ -404,7 +387,7 @@ def test_multiple_statements_with_complex_updates(psql_docker, conn):
 
 def test_multiple_statements_with_parameters_and_combinations(psql_docker, conn):
     """Verify execute properly handles complex combinations of parameterized statements.
-    
+
     Tests db.execute with multiple combinations of:
     - Positional and named parameters
     - Statements with and without parameters mixed in the same execute call

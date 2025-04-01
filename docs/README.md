@@ -1451,7 +1451,6 @@ The following is a complete reference of the public API functions and types.
 | `select_scalar(cn, sql, *args)` | Execute query, return single value | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Single value |
 | `select_scalar_or_none(cn, sql, *args)` | Like select_scalar but returns None if no rows | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Single value or None |
 | `select_column(cn, sql, *args)` | Execute query, return single column | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | List of values |
-| `select_column_unique(cn, sql, *args)` | Execute query, return unique column values | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Set of unique values |
 
 ### Data Operations
 

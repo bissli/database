@@ -99,22 +99,6 @@ def select_column(cn: ConnectionWrapper, sql: str, *args: Any) -> list[Any]:
     return [RowStructureAdapter.create(cn, row).get_value() for row in data]
 
 
-def select_column_unique(cn: ConnectionWrapper, sql: str, *args: Any) -> set[Any]:
-    """Execute a query and return a set of unique values from the first column.
-
-    This is a convenience wrapper around select_column that eliminates duplicates.
-
-    Args:
-        cn: Database connection
-        sql: SQL query that returns at least one column
-        *args: Query parameters
-
-    Returns
-        Set containing unique values from the first column
-    """
-    return set(select_column(cn, sql, *args))
-
-
 @use_iterdict_data_loader
 def select_row(cn: ConnectionWrapper, sql: str, *args: Any) -> attrdict:
     """Execute a query and return a single row as an attribute dictionary.

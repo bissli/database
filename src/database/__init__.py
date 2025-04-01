@@ -31,8 +31,7 @@ from database.core.transaction import Transaction as transaction
 from database.operations.data import delete, insert, insert_row, insert_rows
 from database.operations.data import update, update_or_insert, update_row
 # Query operations
-from database.operations.query import select, select_column
-from database.operations.query import select_column_unique, select_row
+from database.operations.query import select, select_column, select_row
 from database.operations.query import select_row_or_none, select_scalar
 from database.operations.query import select_scalar_or_none
 # Schema operations
@@ -63,7 +62,6 @@ __all__ = [
     # Query operations
     'select',
     'select_column',
-    'select_column_unique',
     'select_row',
     'select_row_or_none',
     'select_scalar',
