@@ -17,8 +17,9 @@ import re
 from dataclasses import fields
 
 import sqlalchemy as sa
-from database.core.cursor import CursorWrapper
+from database.core.cursor import AbstractCursor, get_dict_cursor
 from database.options import DatabaseOptions
+from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import close_sqlalchemy_connection
 from database.utils.connection_utils import get_connection_from_engine
 from database.utils.connection_utils import get_dialect_name
@@ -55,9 +56,9 @@ class ConnectionWrapper:
         self.engine = engine
         self.options = options
         self.connection = sa_connection.connection  # Raw DBAPI connection
-        self.calls = 0  # Count of queries executed
-        self.time = 0   # Total execution time in seconds
-        self.in_transaction = False  # Track if in an explicit transaction
+        self.calls = 0
+        self.time = 0
+        self.in_transaction = False
 
     def __enter__(self):
         """Support for context manager protocol"""
@@ -77,34 +78,30 @@ class ConnectionWrapper:
         This allows the wrapper to be used like the original connection
         for any attributes or methods not explicitly overridden.
         """
-        # First try the SQLAlchemy connection
         if hasattr(self.sa_connection, name):
             return getattr(self.sa_connection, name)
 
-        # Then try the raw DBAPI connection
         return getattr(self.connection, name)
 
-    def cursor(self, *args, **kwargs):
+    def cursor(self, *args, **kwargs) -> AbstractCursor:
         """Get a wrapped cursor for this connection
 
-        Returns a CursorWrapper that tracks execution statistics
-        for the parent connection. Uses the raw DBAPI connection's cursor.
+        Returns a database-specific cursor implementation (PgCursor, MsCursor,
+        or SlCursor) based on the connection type. The cursor tracks execution
+        statistics for the parent connection.
 
         Args:
             *args: Arguments to pass to the connection's cursor method
             **kwargs: Keyword arguments to pass to the connection's cursor method
 
         Returns
-            CursorWrapper: A wrapped cursor object
+            AbstractCursor: A database-specific cursor implementation
         """
-        # Ensure the connection is still valid
         if getattr(self.sa_connection, 'closed', False):
-            # Get a new connection if this one is closed
             self.sa_connection = self.engine.connect()
-            self.connection = self.sa_connection.driver_connection
+            self.connection = self.sa_connection.connection
 
-        # Get a cursor from the raw DBAPI connection
-        return CursorWrapper(self.connection.cursor(*args, **kwargs), self)
+        return get_dict_cursor(self)
 
     def addcall(self, elapsed):
         """Track execution statistics
@@ -128,20 +125,15 @@ class ConnectionWrapper:
 
     def commit(self):
         """Explicit commit that works regardless of auto-commit setting"""
-        # Try to commit on SQLAlchemy connection
         self.sa_connection.commit()
 
-        # Also try to commit on raw connection if needed
-        # This ensures both transaction layers are committed
         if not getattr(self.connection, 'autocommit', None):
             self.connection.commit()
 
     def close(self):
         """Close the SQLAlchemy connection, committing first if needed"""
-        from database.utils.auto_commit import ensure_commit
 
         if not getattr(self.sa_connection, 'closed', False):
-            # Ensure any pending changes are committed before closing
             if not self.in_transaction:
                 ensure_commit(self.sa_connection)
 

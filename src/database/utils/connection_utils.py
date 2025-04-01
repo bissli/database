@@ -25,9 +25,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 
 __all__ = [
-    'is_psycopg_connection',
-    'is_pyodbc_connection',
-    'is_sqlite3_connection',
     'isconnection',
     'check_connection',
     'create_url_from_options',
@@ -45,118 +42,13 @@ _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
 
 
-def _check_connection_features(obj, dialect_name=None, type_str=None, _seen=None):
-    """Check connection object for specific features or type signature.
-
-    This internal helper reduces duplication in connection type detection.
-
-    Args:
-        obj: Object to check
-        dialect_name: SQLAlchemy dialect name to match (e.g., 'postgresql')
-        type_str: Type string to look for (e.g., 'psycopg.Connection')
-        _seen: Set of already seen object IDs (for cycle detection)
-
-    Returns
-        bool: True if connection matches criteria
-    """
-    if _seen is None:
-        _seen = set()
-
-    if id(obj) in _seen:
-        return False
-
-    _seen.add(id(obj))
-
-    # Check dialect for SQLAlchemy objects
-    if dialect_name and hasattr(obj, 'dialect'):
-        if str(obj.dialect.name).lower() == dialect_name:
-            return True
-
-    # Check engine dialect for SQLAlchemy connections
-    if dialect_name and hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
-        if str(obj.engine.dialect.name).lower() == dialect_name:
-            return True
-
-    # Check string type for direct connections
-    if type_str and type_str in str(type(obj)):
-        return True
-
-    # Check for SQLAlchemy 2.0 driver_connection attribute
-    if hasattr(obj, 'driver_connection'):
-        driver_conn = obj.driver_connection
-        if driver_conn is not obj:  # Prevent infinite recursion
-            return _check_connection_features(
-                driver_conn, dialect_name, type_str, _seen
-            )
-
-    # Check ConnectionWrapper objects
-    if hasattr(obj, 'connection'):
-        conn = obj.connection
-        if conn is not obj:  # Prevent infinite recursion
-            return _check_connection_features(
-                conn, dialect_name, type_str, _seen
-            )
-
-    return False
-
-
-def is_psycopg_connection(obj):
-    """Check if object is a psycopg connection or wrapper containing one.
-
-    Args:
-        obj: Object to check
-
-    Returns
-        bool: True if the object is or contains a psycopg connection
-    """
-    return _check_connection_features(
-        obj,
-        dialect_name='postgresql',
-        type_str='psycopg.Connection'
-    )
-
-
-def is_pyodbc_connection(obj):
-    """Check if object is a pyodbc connection or wrapper containing one.
-
-    Args:
-        obj: Object to check
-
-    Returns
-        bool: True if the object is or contains a pyodbc connection
-    """
-    return _check_connection_features(
-        obj,
-        dialect_name='mssql',
-        type_str='pyodbc.Connection'
-    )
-
-
-def is_sqlite3_connection(obj):
-    """Check if object is a sqlite3 connection or wrapper containing one.
-
-    Args:
-        obj: Object to check
-
-    Returns
-        bool: True if the object is or contains a sqlite3 connection
-    """
-    return _check_connection_features(
-        obj,
-        dialect_name='sqlite',
-        type_str='sqlite3.Connection'
-    )
-
-
 def isconnection(obj):
     """Check if object is any supported database connection"""
+    # Driver connection is a direct indicator of a connection
     if hasattr(obj, 'driver_connection'):
         return True
-    if is_psycopg_connection(obj):
-        return True
-    if is_pyodbc_connection(obj):
-        return True
-    return is_sqlite3_connection(obj)
+    # Otherwise check if it has a recognized dialect
+    return get_dialect_name(obj) is not None
 
 
 def create_url_from_options(options, url_creator=sa.URL.create):
@@ -378,24 +270,63 @@ def close_sqlalchemy_connection(connection):
         connection.close()
 
 
-def get_dialect_name(engine_or_conn):
-    """Get the dialect name for an engine or connection.
+def get_dialect_name(obj):
+    """Get the dialect name for a database connection or engine.
+
+    Works with:
+    - SQLAlchemy engines
+    - SQLAlchemy connections
+    - DBAPI connections (psycopg, pyodbc, sqlite3)
+    - Connection wrappers
 
     Args:
-        engine_or_conn: SQLAlchemy engine or connection
+        obj: Connection object or engine
 
     Returns
-        str: Dialect name ('postgresql', 'mssql', or 'sqlite')
+        str: Dialect name ('postgresql', 'mssql', 'sqlite') or None if not recognized
     """
-    dialect = None
+    # Track seen objects to prevent cycles
+    seen = set()
 
-    if hasattr(engine_or_conn, 'dialect'):
-        dialect = engine_or_conn.dialect
-    elif hasattr(engine_or_conn, 'engine') and hasattr(engine_or_conn.engine, 'dialect'):
-        dialect = engine_or_conn.engine.dialect
+    def _get_dialect_name_internal(obj):
+        if id(obj) in seen:
+            return None
 
-    if dialect:
-        name = str(dialect.name).lower()
-        return name
+        seen.add(id(obj))
 
-    return None
+        # Direct check for SQLAlchemy dialect
+        if hasattr(obj, 'dialect'):
+            return str(obj.dialect.name).lower()
+
+        # SQLAlchemy connections have engine attribute
+        if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
+            return str(obj.engine.dialect.name).lower()
+
+        # Check for SQLAlchemy 2.0 driver_connection attribute
+        if hasattr(obj, 'driver_connection'):
+            driver_conn = obj.driver_connection
+            if driver_conn is not obj:  # Prevent infinite recursion
+                result = _get_dialect_name_internal(driver_conn)
+                if result:
+                    return result
+
+        # Check ConnectionWrapper objects
+        if hasattr(obj, 'connection'):
+            conn = obj.connection
+            if conn is not obj:  # Prevent infinite recursion
+                result = _get_dialect_name_internal(conn)
+                if result:
+                    return result
+
+        # Direct connection type checks
+        obj_type = str(type(obj))
+        if 'psycopg.Connection' in obj_type:
+            return 'postgresql'
+        if 'pyodbc.Connection' in obj_type:
+            return 'mssql'
+        if 'sqlite3.Connection' in obj_type:
+            return 'sqlite'
+
+        return None
+
+    return _get_dialect_name_internal(obj)
