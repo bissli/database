@@ -3,18 +3,24 @@ Transaction handling for database operations.
 """
 import logging
 import threading
+from typing import Any
 
 import pandas as pd
+from database.adapters.structure import RowStructureAdapter
+from database.core.cursor import get_dict_cursor
 from database.options import use_iterdict_data_loader
-from database.utils.connection_utils import check_connection
+from database.utils.auto_commit import disable_auto_commit, enable_auto_commit
+from database.utils.connection_utils import check_connection, get_dialect_name
+from database.utils.query_utils import extract_column_info, load_data
+from database.utils.query_utils import process_multiple_result_sets
 from database.utils.sql import handle_query_params
+from database.utils.sql import prepare_sql_params_for_execution
 
 from libb import attrdict, isiterable
 
 logger = logging.getLogger(__name__)
 
 
-# Thread-local storage for tracking active transactions
 _local = threading.local()
 
 
@@ -32,7 +38,7 @@ class Transaction:
             tx.execute('update from ...', args)
     """
 
-    def __init__(self, cn):
+    def __init__(self, cn: Any) -> None:
         self.connection = cn
         self.sa_connection = getattr(cn, 'sa_connection', None)
 
@@ -50,24 +56,19 @@ class Transaction:
             cn.in_transaction = True
 
     @property
-    def cursor(self):
+    def cursor(self) -> Any:
         """Lazy cursor wrapped with timing and error handling"""
-        from database.core.cursor import get_dict_cursor
         return get_dict_cursor(self.connection)
 
     def __enter__(self):
-        # Mark this connection as having an active transaction in this thread
         _local.active_transactions[id(self.connection)] = True
 
-        # Disable auto-commit for the transaction
-        from database.utils.auto_commit import disable_auto_commit
         disable_auto_commit(self.connection)
+        logger.debug(f'Started transaction for connection {id(self.connection)}')
 
         return self
 
-    def __exit__(self, exc_type, value, traceback):
-        from database.utils.auto_commit import enable_auto_commit
-
+    def __exit__(self, exc_type: type | None, value: Exception | None, traceback: Any | None) -> None:
         try:
             cn = getattr(self.connection, 'connection', self.connection)
 
@@ -76,26 +77,22 @@ class Transaction:
                 logger.warning('Rolling back the current transaction')
             else:
                 cn.commit()
-                logger.debug('Committed transaction.')
+                logger.debug(f'Committed transaction for connection {id(self.connection)}')
         finally:
-            # Always remove from active transactions, even if an exception occurred
             _local.active_transactions.pop(id(self.connection), None)
-
-            # Reset auto-commit mode
             enable_auto_commit(self.connection)
 
-            # Unmark the connection as being in a transaction
             if hasattr(self.connection, 'in_transaction'):
                 self.connection.in_transaction = False
 
+            logger.debug(f'Transaction cleanup complete for connection {id(self.connection)}')
+
     @check_connection
     @handle_query_params
-    def execute(self, sql, *args, returnid=None):
+    def execute(self, sql: str, *args, returnid: str | list[str] | None = None) -> Any:
         """Execute SQL within transaction context with connection retry"""
         cursor = self.cursor
 
-        # Use existing parameter handling function from utils.sql
-        from database.utils.sql import prepare_sql_params_for_execution
         processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, self.connection)
 
         cursor.execute(processed_sql, processed_args)
@@ -104,114 +101,88 @@ class Transaction:
         if not returnid:
             return rc
 
-        # Try to get results if returnid specified
         results = None
         try:
-            results = cursor.fetchall()  # Get all returned rows
+            results = cursor.fetchall()
         except Exception as e:
             logger.debug(f'No results to return: {e}')
         finally:
             if not results:
                 return
 
-        # If there's only one result, return it in the original format
         if len(results) == 1:
             result = results[0]
             if isiterable(returnid):
                 return [result[r] for r in returnid]
             else:
                 return result[returnid]
-        # For multiple results, return a list of extracted values
         else:
             if isiterable(returnid):
-                # Return a list of lists when returnid specifies multiple fields
                 return [[row[r] for r in returnid] for row in results]
             else:
-                # Return a list of values when returnid is a single field
                 return [row[returnid] for row in results]
 
     @handle_query_params
-    def select(self, sql, *args, **kwargs) -> pd.DataFrame:
+    def select(self, sql: str, *args, **kwargs) -> pd.DataFrame:
         """Execute SELECT query or procedure within transaction context"""
         cursor = self.cursor
 
-        # Process parameters one final time right before execution
-        from database.utils.sql import prepare_sql_params_for_execution
         processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, self.connection)
 
-        # Execute with the processed SQL and args
         cursor.execute(processed_sql, processed_args)
+        logger.debug(f'Executed query with {cursor.rowcount} rows affected')
 
-        from database.operations.query import extract_column_info, load_data
-
-        # Check for procedure execution (EXEC/CALL) or multiple result sets
         is_procedure = any(kw in processed_sql.upper() for kw in ['EXEC ', 'CALL ', 'EXECUTE '])
-
-        # Extract options for result set handling from kwargs
         return_all = kwargs.pop('return_all', False)
         prefer_first = kwargs.pop('prefer_first', False)
 
-        # If it's a simple query (not a procedure) and we're not expecting multiple result sets
         if not is_procedure and not return_all and not cursor.nextset():
             columns = extract_column_info(cursor)
-            return load_data(cursor, columns=columns, **kwargs)
-
-        # Handle procedure or multiple result sets
-        # Process all result sets
-        from database.operations.query import process_multiple_result_sets
+            result = load_data(cursor, columns=columns, **kwargs)
+            logger.debug(f'Query returned {len(result)} rows in single result set')
+            return result
         return process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
 
-    def select_column(self, sql, *args) -> list:
+    def select_column(self, sql: str, *args) -> list[Any]:
         """Execute a query and return a single column as a list
 
         Extracts the first column from each row.
         """
-        from database.adapters.structure import RowStructureAdapter
         data = self.select(sql, *args)
         return [RowStructureAdapter.create(self.connection, row).get_value() for row in data]
 
     @use_iterdict_data_loader
-    def select_row(self, sql, *args) -> attrdict:
+    def select_row(self, sql: str, *args) -> attrdict:
         """Execute a query and return a single row
 
         Raises an assertion error if more than one row is returned.
         """
         data = self.select(sql, *args)
         assert len(data) == 1, f'Expected one row, got {len(data)}'
-        from database.adapters.structure import RowStructureAdapter
         return RowStructureAdapter.create(self.connection, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
-    def select_row_or_none(self, sql, *args) -> attrdict | None:
+    def select_row_or_none(self, sql: str, *args) -> attrdict | None:
         """Execute a query and return a single row or None if no rows found"""
         data = self.select(sql, *args)
         if not data or len(data) == 0:
             return None
 
-        from database.adapters.structure import RowStructureAdapter
         return RowStructureAdapter.create(self.connection, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
-    def select_scalar(self, sql, *args):
+    def select_scalar(self, sql: str, *args) -> Any:
         """Execute a query and return a single scalar value
 
         Raises an assertion error if more than one row is returned.
         """
-        # Special case for SQL Server to handle unnamed columns in scalar queries
-        from database.utils.connection_utils import get_dialect_name
-
         if get_dialect_name(self.connection) == 'mssql' and ('COUNT(' in sql.upper() or 'SELECT 1 ' in sql):
-            # For SQL Server COUNT queries, execute directly with the cursor
             cursor = self.cursor
             cursor.execute(sql, *args)
             result = cursor.fetchone()
             if result:
                 return result[0]
             return None
-
-        # Normal flow for other cases
         data = self.select(sql, *args)
         assert len(data) == 1, f'Expected one row, got {len(data)}'
-        from database.adapters.structure import RowStructureAdapter
-
         return RowStructureAdapter.create(self.connection, data[0]).get_value()

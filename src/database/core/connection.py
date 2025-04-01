@@ -105,16 +105,12 @@ class ConnectionWrapper:
 
         return getattr(self.dbapi_connection, name)
 
-    def cursor(self, *args: Any, **kwargs: Any) -> AbstractCursor:
+    def cursor(self) -> AbstractCursor:
         """Get a wrapped cursor for this connection
 
         Returns a database-specific cursor implementation (PgCursor, MsCursor,
         or SlCursor) based on the connection type. The cursor tracks execution
         statistics for the parent connection.
-
-        Args:
-            *args: Arguments to pass to the connection's cursor method
-            **kwargs: Keyword arguments to pass to the connection's cursor method
 
         Returns
             AbstractCursor: A database-specific cursor implementation

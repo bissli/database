@@ -14,11 +14,18 @@ def test_circular_dependencies():
     # List of all modules to test in dependency order
     modules = [
         # Utils (most independent)
-        'database.utils.connection_utils',
-        'database.utils.sql',
+        'database.utils',
+        'database.utils.auto_commit',
         'database.utils.cache',
+        'database.utils.connection_utils',
+        'database.utils.query_utils',
+        'database.utils.schema_cache',
+        'database.utils.sql',
+        'database.utils.sql_generation',
+        'database.utils.sqlserver_utils',
 
         # Core modules
+        'database.core',
         'database.core.exceptions',
         'database.core.connection',
         'database.core.cursor',
@@ -26,18 +33,26 @@ def test_circular_dependencies():
         'database.core.query',
 
         # Adapters
-        'database.adapters.type_converter',
-        'database.adapters.type_adapters',
-        'database.adapters.row_adapter',
-        'database.adapters.result_adapter',
+        'database.adapters',
+        'database.adapters.column_info',
+        'database.adapters.structure',
+        'database.adapters.type_conversion',
+        'database.adapters.type_mapping',
+
+        # Config
+        'database.config',
+        'database.config.type_mapping',
 
         # Strategy
+        'database.strategy',
         'database.strategy.base',
+        'database.strategy.decorators',
         'database.strategy.postgres',
         'database.strategy.sqlite',
         'database.strategy.sqlserver',
 
         # Operations (most dependent)
+        'database.operations',
         'database.operations.query',
         'database.operations.data',
         'database.operations.schema',
