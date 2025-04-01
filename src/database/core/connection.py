@@ -194,12 +194,8 @@ def configure_connection(sa_connection: sa.engine.Connection) -> None:
     # Register appropriate adapters for the database type
     from database import adapter_registry
     dialect_name = get_dialect_name(sa_connection)
-    if dialect_name == 'postgresql':
-        sa_connection.connection.adapters = adapter_registry.postgres()
-    elif dialect_name == 'sqlite':
+    if dialect_name == 'sqlite':
         adapter_registry.sqlite(sa_connection.connection)
-    elif dialect_name == 'mssql':
-        adapter_registry.sqlserver(sa_connection.connection)
 
 
 @load_options(cls=DatabaseOptions)

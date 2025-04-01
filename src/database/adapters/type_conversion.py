@@ -13,23 +13,6 @@ It provides:
 This module is designed to be used both directly with TypeConverter for parameter
 conversion and through database-specific adapter registration functions.
 
-Usage:
-    # Direct parameter conversion (recommended approach)
-    params = TypeConverter.convert_params(my_params)
-    cursor.execute(sql, params)
-
-    # For direct database connections:
-
-    # Get adapter registry
-    adapter_registry = get_adapter_registry()
-
-    # Apply PostgreSQL adapters to a connection
-    conn = psycopg.connect(...)
-    conn.adapters.update(adapter_registry.postgres())
-
-    # Register SQLite adapters
-    sqlite_conn = sqlite3.connect(...)
-    adapter_registry.sqlite(sqlite_conn)
 """
 import datetime
 import logging
@@ -40,8 +23,6 @@ from typing import Any, TypeVar
 import dateutil.parser
 import numpy as np
 import pandas as pd
-import psycopg
-from psycopg.adapt import AdaptersMap
 
 # Optional PyArrow import
 try:
@@ -60,6 +41,25 @@ SQLServerConnection = TypeVar('SQLServerConnection')
 
 # Constants
 SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
+
+# NumPy type constants
+NUMPY_FLOAT_TYPES = (np.floating,)
+NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
+
+# Pandas nullable type constants
+PANDAS_NULLABLE_TYPES = (
+    pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
+    pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
+    pd.Float64Dtype
+)
+
+# PyArrow scalar type constants
+PYARROW_FLOAT_TYPES = (
+    (pa.FloatScalar, pa.DoubleScalar, pa.Int8Scalar, pa.Int16Scalar,
+     pa.Int32Scalar, pa.Int64Scalar, pa.UInt8Scalar, pa.UInt16Scalar,
+     pa.UInt32Scalar, pa.UInt64Scalar, pa.StringScalar)
+    if PYARROW_AVAILABLE else ()
+)
 
 
 def _check_special_string(value: str) -> None:
@@ -216,54 +216,55 @@ class TypeConverter:
 
         Returns
             Converted value suitable for database parameters
+
+        >>> TypeConverter.convert_value(None) is None
+        True
+        >>> TypeConverter.convert_value(float('nan')) is None
+        True
+        >>> TypeConverter.convert_value('null') is None
+        True
+        >>> TypeConverter.convert_value(5)
+        5
         """
         if value is None:
             return None
 
-        # Add specific handling for pandas.NaT
+        # Handle NaN and special values
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+
+        # Handle pandas.NaT
         if pd and hasattr(pd, 'NaT') and isinstance(value, type(pd.NaT)):
             return None
 
-        # Handle Python built-in float NaN
-        if isinstance(value, float) and math.isnan(value):
+        # Handle string special values
+        if isinstance(value, str) and _check_special_string(value) is None:
             return None
 
-        # Infinity handling
-        if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
-            return None
-
-        if isinstance(value, str):
-            # Convert empty strings and special string values to NULL
-            if _check_special_string(value) is None:
-                return None
-
-        # Handle date and datetime objects
-        # if isinstance(value, datetime.date): CHECK SQLITE (but will
-        # cause issues in POSTGRES)
-            # return value.isoformat()
-
-        # NumPy numeric types (float, int, datetime64)
-        if isinstance(value, np.floating | np.integer | np.unsignedinteger | np.datetime64):
+        # NumPy numeric types
+        if isinstance(value, (*NUMPY_FLOAT_TYPES, *NUMPY_INT_TYPES, np.datetime64)):
             return _convert_numpy_value(value)
 
-        # Pandas types
+        # Pandas basic NA handling
         if pd.api.types.is_scalar(value) and pd.isna(value):
             return None
 
-        if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object'):
-            if pd.isna(value):
-                return None
+        # Handle object dtype
+        if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object') and pd.isna(value):
+            return None
 
         # Pandas nullable types
-        if isinstance(value, AdapterRegistry.PANDAS_NULLABLE_TYPES):
+        if isinstance(value, PANDAS_NULLABLE_TYPES):
             return _convert_pandas_nullable(value)
 
-        # PyArrow value handling (scalar, array, table) if available
-        if PYARROW_AVAILABLE and (
-            isinstance(value, pa.Scalar) or hasattr(value, '_is_arrow_scalar') or
-            isinstance(value, pa.Array | pa.ChunkedArray | pa.Table)
-        ):
-            return _convert_pyarrow_value(value)
+        # PyArrow values
+        if PYARROW_AVAILABLE:
+            if isinstance(value, PYARROW_FLOAT_TYPES):
+                return _convert_pyarrow_value(value)
+
+            if isinstance(value, pa.Scalar) or hasattr(value, '_is_arrow_scalar') or \
+               isinstance(value, pa.Array | pa.ChunkedArray | pa.Table):
+                return _convert_pyarrow_value(value)
 
         return value
 
@@ -291,28 +292,6 @@ class TypeConverter:
         return TypeConverter.convert_value(params)
 
 
-class NumericMixin:
-    """Mixin for numeric type handling"""
-
-    def load(self, data) -> float | None:
-        """Load numeric data into Python float"""
-        if data is None:
-            return None
-        if isinstance(data, memoryview):
-            data = bytes(data)
-        return float(data.decode())
-
-
-class CustomNumericLoader(NumericMixin):
-    """Numeric loader that properly handles NULL values"""
-
-    # Required by psycopg loader registration
-    format = 0  # Text format
-
-    def __init__(self, oid=None, name=None):
-        """Initialize loader (signature required by psycopg)"""
-
-
 # SQLite converter functions
 
 def convert_date(val: bytes) -> datetime.date:
@@ -327,47 +306,6 @@ def convert_datetime(val: bytes) -> datetime.datetime:
 
 class AdapterRegistry:
     """Registry for database-specific type adapters with SQLAlchemy integration"""
-
-    # NumPy float types
-    NUMPY_FLOAT_TYPES = (np.floating,)
-
-    # NumPy integer types
-    NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
-
-    # Pandas nullable types
-    PANDAS_NULLABLE_TYPES = (
-        pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
-        pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
-        pd.Float64Dtype
-    )
-
-    # PyArrow scalar types
-    PYARROW_FLOAT_TYPES = (
-        (pa.FloatScalar, pa.DoubleScalar, pa.Int8Scalar, pa.Int16Scalar,
-         pa.Int32Scalar, pa.Int64Scalar, pa.UInt8Scalar, pa.UInt16Scalar,
-         pa.UInt32Scalar, pa.UInt64Scalar, pa.StringScalar)
-        if PYARROW_AVAILABLE else ()
-    )
-
-    def postgres(self) -> AdaptersMap:
-        """Create PostgreSQL adapter map
-
-        Returns
-            AdaptersMap with all necessary adapters registered
-        """
-        # Create a fresh adapters map
-        postgres_adapters = psycopg.adapt.AdaptersMap(psycopg.adapters)
-
-        # Try to register the numeric loader if possible
-        try:
-            numeric_oid = psycopg.postgres.types.get('numeric').oid
-            postgres_adapters.register_loader(numeric_oid, CustomNumericLoader)
-        except Exception as e:
-            logger.debug(f'Numeric loader registration skipped: {e}')
-
-        # When using SQLAlchemy, we'll rely on SQLAlchemy's psycopg dialect
-        # to register the adapters with each connection
-        return postgres_adapters
 
     def sqlite(self, connection: SQLiteConnection) -> None:
         """Register SQLite converters for a connection
@@ -385,17 +323,6 @@ class AdapterRegistry:
         # Register date/time converters - these convert database values TO Python objects
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
-
-    def sqlserver(self, connection: SQLServerConnection) -> None:
-        """Register SQL Server adapters
-
-        SQL Server doesn't require adapter registration as pyodbc handles
-        the conversions internally.
-
-        Args:
-            connection: Optional connection object (not used)
-        """
-        # Not needed for SQL Server
 
 
 def get_adapter_registry() -> AdapterRegistry:
