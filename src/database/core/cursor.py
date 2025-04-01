@@ -13,7 +13,7 @@ from typing import Any, Generic, TypeVar
 from database.adapters.type_conversion import TypeConverter
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name, isconnection
-from database.utils.sql import has_placeholders, sanitize_sql_for_logging
+from database.utils.sql import has_placeholders
 from database.utils.sql import standardize_placeholders
 from database.utils.sqlserver_utils import ensure_identity_column_named
 from database.utils.sqlserver_utils import handle_unnamed_columns_error
@@ -67,12 +67,11 @@ def dumpsql(func: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(func)
     def wrapper(cn: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
         this_cn = isconnection(cn) and cn or cn.connnection
-        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
         try:
-            logger.debug(f'SQL:\n{sanitized_sql}\nargs: {sanitized_args}')
+            logger.debug(f'SQL:\n{sql}\nargs: {args}')
             return func(cn, sql, *args, **kwargs)
         except Exception:
-            logger.error(f'Error with query:\nSQL:\n{sanitized_sql}\nargs: {sanitized_args}')
+            logger.error(f'Error with query:\nSQL:\n{sql}\nargs: {args}')
             raise
     return wrapper
 

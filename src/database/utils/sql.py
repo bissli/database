@@ -5,7 +5,6 @@ This module provides utility functions for SQL query formatting and parameter ha
 - SQL placeholder standardization (? vs %s) based on database type
 - SQL IN clause parameter expansion for lists/tuples
 - SQL LIKE clause escaping
-- SQL logging sanitization for sensitive data
 """
 import re
 from functools import wraps
@@ -275,94 +274,6 @@ def prepare_stored_procedure_parameters(sql: str, args: tuple) -> tuple:
         return processed_sql, [[processed_args[0]]]
 
     return processed_sql, [processed_args]
-
-
-def sanitize_sql_for_logging(sql, args=None):
-    """
-    Remove sensitive information from SQL for logging.
-
-    Masks parameters likely to contain sensitive info like passwords.
-
-    Args:
-        sql: SQL query string
-        args: Query parameters
-
-    Returns
-        Tuple of (sanitized_sql, sanitized_args)
-    """
-    # List of terms considered sensitive
-    sensitive_terms = [
-        'password', 'passwd', 'secret', 'token', 'credential',
-        'credit_card', 'creditcard', 'card_number', 'cardnumber', 'auth',
-    ]
-
-    # Special handling for 'key' to not mask 'key_id'
-    sensitive_exact_terms = ['key']
-
-    # Create copies of the inputs
-    sanitized_sql = sql
-
-    # Sanitize the arguments
-    if args is not None:
-        if isinstance(args, dict):
-            # For dictionary args, mask sensitive keys
-            sanitized_args = args.copy()
-            for key in sanitized_args:
-                key_lower = key.lower()
-
-                # Check for exact sensitive terms, but exclude special exceptions
-                if any(term == key_lower for term in sensitive_exact_terms) and not key_lower.endswith('_id'):
-                    sanitized_args[key] = '***'
-                # Check for contained sensitive terms
-                elif any(term in key_lower for term in sensitive_terms):
-                    sanitized_args[key] = '***'
-        elif isinstance(args, list | tuple):
-            # For list/tuple args, try to infer positions from SQL
-            sanitized_args = list(args)
-
-            # Look for sensitive column names in INSERT statements
-            if 'insert into' in sanitized_sql.lower():
-                columns_match = re.search(r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)', sql, re.IGNORECASE)
-                if columns_match:
-                    columns = [col.strip().lower() for col in columns_match.group(1).split(',')]
-                    # Mask values for sensitive columns
-                    for i, col in enumerate(columns):
-                        # Handle exact 'key' term separately to ignore 'key_id'
-                        if i < len(sanitized_args) and col == 'key':
-                            sanitized_args[i] = '***'
-                        # Handle other sensitive terms normally
-                        elif i < len(sanitized_args) and any(term in col for term in sensitive_terms):
-                            sanitized_args[i] = '***'
-
-            # Check for patterns like "password = %s", "auth_token = %s" and mask corresponding args
-            # Handle exact 'key' term separately
-            for term in sensitive_exact_terms:
-                pattern = rf'\b{term}\b\s*=\s*(%s|\?)'
-                for match in re.finditer(pattern, sql, re.IGNORECASE):
-                    text_before = sql[:match.start(1)]
-                    placeholder_count = text_before.count('%s') + text_before.count('?')
-                    param_index = placeholder_count
-                    if 0 <= param_index < len(sanitized_args):
-                        sanitized_args[param_index] = '***'
-
-            # Handle other sensitive terms
-            for term in sensitive_terms:
-                # Match sensitive terms in column references
-                pattern = rf'\b\w*{term}\w*\b\s*=\s*(%s|\?)'
-                for match in re.finditer(pattern, sql, re.IGNORECASE):
-                    # Count placeholders up to this point to determine position
-                    text_before = sql[:match.start(1)]  # Position of the %s or ? placeholder
-                    placeholder_count = text_before.count('%s') + text_before.count('?')
-                    param_index = placeholder_count
-                    if 0 <= param_index < len(sanitized_args):
-                        sanitized_args[param_index] = '***'
-        else:
-            # For other arg types, just pass through
-            sanitized_args = args
-    else:
-        sanitized_args = None
-
-    return sanitized_sql, sanitized_args
 
 
 def handle_query_params(func):

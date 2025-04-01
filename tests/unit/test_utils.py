@@ -7,12 +7,8 @@ import logging
 import pytest
 from database.operations.upsert import _build_insert_sql, _build_upsert_sql
 from database.utils.connection_utils import get_dialect_name
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
 from database.utils.connection_utils import isconnection
-from database.utils.sql import quote_identifier, sanitize_sql_for_logging
-from database.utils.sql import standardize_placeholders
+from database.utils.sql import quote_identifier, standardize_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -291,54 +287,6 @@ class TestSQLOperations:
         # The regexp pattern should be preserved, but the parameter placeholder changed
         assert "regexp_replace(column, '\\?+', 'X')" in result
         assert 'id = %s' in result
-
-    @pytest.mark.parametrize(('sql', 'args', 'expected'), [
-        # Test basic SQL with positional parameters
-        ('INSERT INTO users (username, password) VALUES (%s, %s)',
-         ['admin', 'supersecret'],
-         {'sql': 'INSERT INTO users (username, password) VALUES (%s, %s)',
-          'args': ['admin', '***']}),
-
-        # Test dictionary parameters with sensitive info
-        ('INSERT INTO users (username, password, api_key) VALUES (%(username)s, %(password)s, %(api_key)s)',
-         {'username': 'admin', 'password': 'secret', 'api_key': 'key123'},
-         {'sql': 'INSERT INTO users (username, password, api_key) VALUES (%(username)s, %(password)s, %(api_key)s)',
-          'args': {'username': 'admin', 'password': '***', 'api_key': '***'}}),
-
-        # Test with other sensitive parameter names
-        ('UPDATE users SET auth_token = %s WHERE id = %s',
-         ['abc123token', 42],
-         {'sql': 'UPDATE users SET auth_token = %s WHERE id = %s',
-          'args': ['***', 42]}),
-
-        # Test with no args
-        ('SELECT * FROM users', None,
-         {'sql': 'SELECT * FROM users', 'args': None}),
-
-        # Test SQL Server parameters
-        ('INSERT INTO users (username, password) VALUES (?, ?)',
-         ['admin', 'supersecret'],
-         {'sql': 'INSERT INTO users (username, password) VALUES (?, ?)',
-          'args': ['admin', '***']}),
-    ])
-    def test_sanitize_sql(self, sql, args, expected):
-        """Test SQL sanitization with various input patterns"""
-        sanitized_sql, sanitized_args = sanitize_sql_for_logging(sql, args)
-
-        # Verify SQL remains unchanged
-        assert sanitized_sql == expected['sql']
-
-        # Verify args are properly sanitized
-        if expected['args'] is None:
-            assert sanitized_args is None
-            return
-
-        if isinstance(args, dict):
-            for key, expected_value in expected['args'].items():
-                assert sanitized_args[key] == expected_value, f"Sanitization failed for key '{key}'"
-        elif isinstance(args, list):
-            for i, (actual, expected_value) in enumerate(zip(sanitized_args, expected['args'])):
-                assert actual == expected_value, f'Sanitization failed at position {i}'
 
     def test_build_insert_sql(self, mocker):
         """Test INSERT SQL generation"""
