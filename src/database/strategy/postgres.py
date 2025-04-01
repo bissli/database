@@ -12,9 +12,11 @@ It handles PostgreSQL's unique features such as:
 import logging
 import re
 
+from database.core.query import execute
 from database.core.transaction import Transaction
-from database.operations.query import select
+from database.operations.query import select, select_column
 from database.strategy.base import DatabaseStrategy
+from database.utils.auto_commit import enable_auto_commit
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +32,7 @@ class PostgresStrategy(DatabaseStrategy):
             # Set autocommit to True for VACUUM
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
-            from database.operations.query import execute_with_context
-            execute_with_context(cn, f'vacuum (full, analyze) {quoted_table}')
+            execute(cn, f'vacuum (full, analyze) {quoted_table}')
         finally:
             # Restore original autocommit state
             cn.connection.autocommit = original_autocommit
@@ -44,15 +45,13 @@ class PostgresStrategy(DatabaseStrategy):
             # Set autocommit to True for REINDEX
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
-            from database.operations.query import execute_with_context
-            execute_with_context(cn, f'reindex table {quoted_table}')
+            execute(cn, f'reindex table {quoted_table}')
         finally:
             # Restore original autocommit state
             cn.connection.autocommit = original_autocommit
 
     def cluster_table(self, cn, table, index=None):
         """Order table data according to an index"""
-        # Save current autocommit state
         original_autocommit = cn.connection.autocommit
         try:
             # Set autocommit to True for CLUSTER
@@ -60,14 +59,11 @@ class PostgresStrategy(DatabaseStrategy):
             quoted_table = self.quote_identifier(table)
 
             if index is None:
-                from database.operations.query import execute_with_context
-                execute_with_context(cn, f'cluster {quoted_table}')
+                execute(cn, f'cluster {quoted_table}')
             else:
                 quoted_index = self.quote_identifier(index)
-                from database.operations.query import execute_with_context
-                execute_with_context(cn, f'cluster {quoted_table} using {quoted_index}')
+                execute(cn, f'cluster {quoted_table} using {quoted_index}')
         finally:
-            # Restore original autocommit state
             cn.connection.autocommit = original_autocommit
 
     def reset_sequence(self, cn, table, identity=None):
@@ -87,8 +83,7 @@ from
         if isinstance(cn, Transaction):
             cn.execute(sql)
         else:
-            from database.operations.query import execute_with_context
-            execute_with_context(cn, sql)
+            execute(cn, sql)
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
 
@@ -109,7 +104,6 @@ from pg_index i
 join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
 where i.indrelid = %s::regclass and i.indisprimary
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_columns(self, cn, table, bypass_cache=False):
@@ -127,7 +121,6 @@ where i.indrelid = %s::regclass and i.indisprimary
         sql = f"""
 select skeys(hstore(null::{table})) as column
     """
-        from database.operations.query import select_column
         return select_column(cn, sql)
 
     def get_sequence_columns(self, cn, table, bypass_cache=False):
@@ -147,12 +140,10 @@ select skeys(hstore(null::{table})) as column
         WHERE table_name = %s
         AND column_default LIKE 'nextval%%'
         """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def configure_connection(self, conn):
         """Configure connection settings for PostgreSQL"""
-        from database.utils.auto_commit import enable_auto_commit
 
         # Set auto-commit for PostgreSQL connections
         enable_auto_commit(conn)
@@ -257,7 +248,6 @@ and t.data_type in ('character', 'character varying', 'boolean',
 order by
 t.ordinal_position
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_ordered_columns(self, cn, table, bypass_cache=False):
@@ -280,7 +270,6 @@ t.table_name = %s
 order by
 t.ordinal_position
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_default_columns(self, cn, table, bypass_cache=False):
@@ -298,7 +287,6 @@ t.ordinal_position
 SELECT name FROM pragma_table_info('{table}')
 ORDER BY cid
 """
-        from database.operations.query import select_column
         return select_column(cn, sql)
 
     def get_ordered_columns(self, cn, table, bypass_cache=False):
@@ -316,7 +304,6 @@ ORDER BY cid
 SELECT name FROM pragma_table_info('{table}')
 ORDER BY cid
 """
-        from database.operations.query import select_column
         return select_column(cn, sql)
 
     def find_sequence_column(self, cn, table, bypass_cache=False):

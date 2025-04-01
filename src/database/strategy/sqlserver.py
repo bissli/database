@@ -10,8 +10,11 @@ It handles SQL Server's unique features such as:
 """
 import logging
 
+from database.core.query import execute
 from database.core.transaction import Transaction
+from database.operations.query import select, select_column
 from database.strategy.base import DatabaseStrategy
+from database.utils.auto_commit import enable_auto_commit
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +26,13 @@ class SQLServerStrategy(DatabaseStrategy):
         """Optimize a table with compression and rebuild"""
         quoted_table = self.quote_identifier(table)
         # Closest equivalent is rebuilding the clustered index or table
-        from database.operations.query import execute_with_context
-        execute_with_context(cn, f'ALTER INDEX ALL ON {quoted_table} REBUILD')
+        execute(cn, f'ALTER INDEX ALL ON {quoted_table} REBUILD')
         logger.info(f'Rebuilt all indexes on {table} (SQL Server equivalent of VACUUM)')
 
     def reindex_table(self, cn, table):
         """Rebuild indexes for a table"""
         quoted_table = self.quote_identifier(table)
-        from database.operations.query import execute_with_context
-        execute_with_context(cn, f'ALTER INDEX ALL ON {quoted_table} REBUILD')
+        execute(cn, f'ALTER INDEX ALL ON {quoted_table} REBUILD')
 
     def cluster_table(self, cn, table, index=None):
         """SQL Server doesn't support CLUSTER directly"""
@@ -53,8 +54,7 @@ DBCC CHECKIDENT ('{table}', RESEED, @max);
         if isinstance(cn, Transaction):
             cn.execute(sql)
         else:
-            from database.operations.query import execute_with_context
-            execute_with_context(cn, sql)
+            execute(cn, sql)
 
         logger.debug(f'Reset identity seed for {table=} using {identity=}')
 
@@ -77,7 +77,6 @@ JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
 WHERE i.is_primary_key = 1
 AND OBJECT_NAME(i.object_id) = ?
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_columns(self, cn, table, bypass_cache=False):
@@ -97,7 +96,6 @@ from sys.columns c
 join sys.tables t on c.object_id = t.object_id
 where t.name = ?
     """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_sequence_columns(self, cn, table, bypass_cache=False):
@@ -117,12 +115,10 @@ where t.name = ?
         JOIN sys.tables t ON c.object_id = t.object_id
         WHERE t.name = ? AND c.is_identity = 1
         """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def configure_connection(self, conn):
         """Configure connection settings for SQL Server"""
-        from database.utils.auto_commit import enable_auto_commit
 
         # Set auto-commit for SQL Server connections
         enable_auto_commit(conn)
@@ -157,7 +153,6 @@ where t.name = ?
         ORDER BY
             idxcol.index_column_id
         """
-        from database.operations.query import select
 
         # Get just the table name, removing any schema prefix
         table_name = table.split('.')[-1].strip('"[]')
@@ -196,7 +191,6 @@ AND ty.name IN ('char', 'varchar', 'nvarchar', 'text', 'ntext', 'bit',
     'float', 'real', 'date', 'time', 'datetime', 'datetime2')
 ORDER BY c.column_id
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def get_ordered_columns(self, cn, table, bypass_cache=False):
@@ -217,7 +211,6 @@ JOIN sys.tables t ON c.object_id = t.object_id
 WHERE t.name = ?
 ORDER BY c.column_id
 """
-        from database.operations.query import select_column
         return select_column(cn, sql, table)
 
     def find_sequence_column(self, cn, table, bypass_cache=False):

@@ -11,14 +11,11 @@ import pandas as pd
 from database.adapters.column_info import Column
 from database.adapters.structure import RowStructureAdapter
 from database.core.connection import ConnectionWrapper
-from database.core.exceptions import QueryError
-from database.core.query import execute
-from database.core.transaction import Transaction
 from database.options import use_iterdict_data_loader
-from database.utils.connection_utils import check_connection, get_dialect_name
+from database.utils.connection_utils import check_connection
 from database.utils.query_utils import extract_column_info, load_data
 from database.utils.query_utils import process_multiple_result_sets
-from database.utils.sql import get_param_limit_for_db, handle_query_params
+from database.utils.sql import handle_query_params
 from database.utils.sql import prepare_sql_params_for_execution
 
 from libb import attrdict, is_null
@@ -75,33 +72,6 @@ def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs) -> ResultSet |
     result = process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
     logger.debug(f"Procedure returned {len(result) if isinstance(result, list) else 'single'} result set(s)")
     return result
-
-
-def execute_with_context(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs: Any) -> int:
-    """Execute SQL with enhanced error context.
-
-    This wrapper adds detailed error information when a query fails,
-    including the original SQL that caused the error.
-
-    Args:
-        cn: Database connection
-        sql: SQL statement to execute
-        *args: Query parameters
-        **kwargs: Additional execution options
-
-    Returns
-        Number of affected rows
-
-    Raises
-        QueryError: If execution fails, with enhanced context information
-    """
-    try:
-        result = execute(cn, sql, *args, **kwargs)
-        logger.debug(f'Executed query affecting {result} rows')
-        return result
-    except Exception as e:
-        logger.debug(f'Query execution failed: {e}')
-        raise QueryError(f'Query execution failed: {e}\nSQL: {sql}') from e
 
 
 def _extract_columns(cursor: Any) -> list[str]:
@@ -210,41 +180,6 @@ def select_scalar(cn: ConnectionWrapper, sql: str, *args: Any) -> Any:
     result = RowStructureAdapter.create(cn, data[0]).get_value()
     logger.debug(f'Scalar query returned value of type {type(result).__name__}')
     return result
-
-
-def execute_many(cn: ConnectionWrapper, sql: str, args: list[SqlParams]) -> int:
-    """Execute a query with multiple parameter sets using database-specific batching.
-
-    This method automatically determines the optimal batch size based on the
-    database engine's parameter limits and executes in batches for optimal performance.
-
-    Args:
-        cn: Database connection
-        sql: SQL query with placeholders
-        args: List of parameter sets to execute
-
-    Returns
-        int: Total number of affected rows across all executions
-    """
-    if not args:
-        return 0
-
-    db_type = get_dialect_name(cn) or 'unknown'
-    param_limit = get_param_limit_for_db(db_type)
-    params_per_row = len(args[0]) if isinstance(args[0], list | tuple) else 1
-    max_batch_size = max(1, param_limit // params_per_row)
-
-    logger.debug(f'Executing batch with {len(args)} parameter sets using {db_type} dialect')
-
-    with Transaction(cn) as tx:
-        total_rows = 0
-        for i in range(0, len(args), max_batch_size):
-            chunk = args[i:i+max_batch_size]
-            cursor = tx.cursor
-            cursor.executemany(sql, chunk, auto_commit=False)
-            total_rows += cursor.rowcount
-
-    return total_rows
 
 
 def select_scalar_or_none(cn: ConnectionWrapper, sql: str, *args: Any) -> Any | None:

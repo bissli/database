@@ -5,7 +5,7 @@ import logging
 
 from database.adapters.structure import RowStructureAdapter
 from database.operations.data import insert_rows
-from database.operations.query import execute_many, select
+from database.operations.query import select
 from database.operations.schema import get_table_columns
 from database.operations.schema import get_table_primary_keys
 from database.operations.schema import reset_table_sequence
@@ -242,7 +242,7 @@ def _execute_standard_upsert(
     update_ifnull,
     db_type,
 ):
-    """Execute standard upsert operation for supported databases using execute_many"""
+    """Execute standard upsert operation for supported databases using executemany"""
 
     sql = _build_upsert_sql(
         cn=cn,
@@ -256,7 +256,9 @@ def _execute_standard_upsert(
     )
 
     params = [[row[col] for col in columns] for row in rows]
-    rc = execute_many(cn, sql, params)
+
+    cursor = cn.cursor()
+    rc = cursor.executemany(sql, params)
 
     if isinstance(rc, int) and rc != len(rows):
         logger.debug(f'{len(rows) - rc} rows were skipped due to existing constraints or errors')
@@ -389,7 +391,9 @@ def _upsert_sqlserver_with_nulls(
     )
 
     params = [[row[col] for col in columns] for row in rows]
-    rc = execute_many(cn, sql, params)
+
+    cursor = cn.cursor()
+    rc = cursor.executemany(sql, params)
 
 
 def upsert_rows(

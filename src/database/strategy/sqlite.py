@@ -11,7 +11,10 @@ It handles SQLite's unique features and limitations such as:
 """
 import logging
 
+from database.core.query import execute
+from database.operations.query import select, select_column
 from database.strategy.base import DatabaseStrategy
+from database.utils.auto_commit import enable_auto_commit
 
 logger = logging.getLogger(__name__)
 
@@ -21,17 +24,15 @@ class SQLiteStrategy(DatabaseStrategy):
 
     def vacuum_table(self, cn, table):
         """Optimize a table with VACUUM"""
-        from database.operations.query import execute_with_context
 
         # SQLite only supports database-wide VACUUM
-        execute_with_context(cn, 'VACUUM')
+        execute(cn, 'VACUUM')
         logger.info('Executed VACUUM on entire SQLite database (table-specific vacuum not supported)')
 
     def reindex_table(self, cn, table):
         """Rebuild indexes for a table"""
         quoted_table = self.quote_identifier(table)
-        from database.operations.query import execute_with_context
-        execute_with_context(cn, f'REINDEX {quoted_table}')
+        execute(cn, f'REINDEX {quoted_table}')
 
     def cluster_table(self, cn, table, index=None):
         """SQLite doesn't support CLUSTER"""
@@ -61,7 +62,6 @@ class SQLiteStrategy(DatabaseStrategy):
         sql = f"""
 select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
 """
-        from database.operations.query import select_column
         return select_column(cn, sql)
 
     def get_columns(self, cn, table, bypass_cache=False):
@@ -78,7 +78,6 @@ select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
         sql = f"""
 select name as column from pragma_table_info('{table}')
     """
-        from database.operations.query import select_column
         return select_column(cn, sql)
 
     def get_sequence_columns(self, cn, table, bypass_cache=False):
@@ -100,7 +99,6 @@ select name as column from pragma_table_info('{table}')
         conn.execute('PRAGMA foreign_keys = ON')
 
         # Set auto-commit for SQLite connections
-        from database.utils.auto_commit import enable_auto_commit
         enable_auto_commit(conn)
 
     def quote_identifier(self, identifier):
@@ -122,7 +120,6 @@ select name as column from pragma_table_info('{table}')
         # SQLite doesn't offer the same rich constraint info as PostgreSQL
         # but we can get basic indices info
         sql = f"PRAGMA index_info('{constraint_name}')"
-        from database.operations.query import select
         result = select(cn, sql)
 
         if not result:

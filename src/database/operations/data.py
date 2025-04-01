@@ -5,7 +5,6 @@ import logging
 
 from database.core.query import execute
 from database.core.transaction import Transaction
-from database.operations.query import execute_many
 from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import handle_query_params, quote_identifier
 
@@ -97,8 +96,9 @@ def insert_rows(cn, table, rows):
     # Extract the values from the row dictionaries
     all_params = [tuple(row.values()) for row in rows]
 
-    # Use execute_many with database-specific parameter limits - handles batching internally
-    return execute_many(cn, sql, all_params)
+    # Use executemany with database-specific parameter limits - handles batching internally
+    cursor = cn.cursor()
+    return cursor.executemany(sql, all_params)
 
 
 def update_row(cn, table, keyfields, keyvalues, datafields, datavalues):
