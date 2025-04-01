@@ -90,7 +90,7 @@ def test_columns_from_cursor_description():
 def test_connection_type_mapping():
     """Test mapping from connection detection to database type string"""
     from unittest.mock import MagicMock
-    from database.utils.connection_utils import is_psycopg_connection, is_pyodbc_connection, is_sqlite3_connection
+    from database.utils.connection_utils import get_dialect_name
     from tests.fixtures.mocks import _create_simple_mock_connection
     
     # Create mock connections
@@ -98,38 +98,10 @@ def test_connection_type_mapping():
     odbc_conn = _create_simple_mock_connection('mssql')
     sqlite_conn = _create_simple_mock_connection('sqlite')
     
-    # Use these to determine the correct db_type string
-    db_type = None
-    if is_psycopg_connection(pg_conn):
-        db_type = 'postgresql'
-    elif is_pyodbc_connection(pg_conn):
-        db_type = 'mssql'
-    elif is_sqlite3_connection(pg_conn):
-        db_type = 'sqlite'
-    
-    assert db_type == 'postgresql'
-    
-    # Test with SQL Server connection
-    db_type = None
-    if is_psycopg_connection(odbc_conn):
-        db_type = 'postgresql'
-    elif is_pyodbc_connection(odbc_conn):
-        db_type = 'mssql'
-    elif is_sqlite3_connection(odbc_conn):
-        db_type = 'sqlite'
-    
-    assert db_type == 'mssql'
-    
-    # Test with SQLite connection
-    db_type = None
-    if is_psycopg_connection(sqlite_conn):
-        db_type = 'postgresql'
-    elif is_pyodbc_connection(sqlite_conn):
-        db_type = 'mssql'
-    elif is_sqlite3_connection(sqlite_conn):
-        db_type = 'sqlite'
-    
-    assert db_type == 'sqlite'
+    # Use get_dialect_name to determine the database type
+    assert get_dialect_name(pg_conn) == 'postgresql'
+    assert get_dialect_name(odbc_conn) == 'mssql'
+    assert get_dialect_name(sqlite_conn) == 'sqlite'
 
 
 if __name__ == '__main__':

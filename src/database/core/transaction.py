@@ -198,9 +198,9 @@ class Transaction:
         Raises an assertion error if more than one row is returned.
         """
         # Special case for SQL Server to handle unnamed columns in scalar queries
-        from database.utils.connection_utils import is_pyodbc_connection
+        from database.utils.connection_utils import get_dialect_name
 
-        if is_pyodbc_connection(self.connection) and ('COUNT(' in sql.upper() or 'SELECT 1 ' in sql):
+        if get_dialect_name(self.connection) == 'mssql' and ('COUNT(' in sql.upper() or 'SELECT 1 ' in sql):
             # For SQL Server COUNT queries, execute directly with the cursor
             cursor = self.cursor
             cursor.execute(sql, *args)

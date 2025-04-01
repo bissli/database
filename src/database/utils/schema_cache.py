@@ -20,9 +20,7 @@ from typing import Any
 
 from database.options import use_iterdict_data_loader
 from database.utils.cache import CacheManager
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +89,12 @@ class SchemaCache:
         Returns
             dict: Dictionary of column metadata indexed by column name
         """
-        if is_pyodbc_connection(connection):
+        dialect = get_dialect_name(connection)
+        if dialect == 'mssql':
             return self._query_sqlserver_metadata(connection, table_name)
-        elif is_psycopg_connection(connection):
+        elif dialect == 'postgresql':
             return self._query_postgresql_metadata(connection, table_name)
-        elif is_sqlite3_connection(connection):
+        elif dialect == 'sqlite':
             return self._query_sqlite_metadata(connection, table_name)
         else:
             return {}

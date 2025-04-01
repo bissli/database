@@ -884,7 +884,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
         'value': 100,
         'last_updated': datetime.datetime(2023, 3, 17, 17, 47, 15, 906191)
     }
-    
+
     # Insert the row
     db.insert(conn, """
         INSERT INTO test_complex_index (id, name, value, last_updated)
@@ -923,7 +923,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     # Second test: Now change one of the constraint columns (value)
     # This should insert a new row since the constraint won't match
     different_value_row = {
-        'id': 1,                    # Same as original (part of constraint) 
+        'id': 1,                    # Same as original (part of constraint)
         'name': 'ComplexTest',      # Same as original (part of constraint)
         'value': 200,               # Different from original (part of constraint)
         'last_updated': datetime.datetime(2023, 3, 19, 10, 0, 0)  # Different (not in constraint)
@@ -943,7 +943,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
 
     # Verify both rows exist with different values
     rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
-    
+
     assert len(rows) == 2, 'Should have 2 distinct rows'
     assert rows[0]['value'] == 100, 'First row should have original value=100'
     assert rows[0]['last_updated'].date() == datetime.date(2023, 3, 18), 'First row should have timestamp from first update'
@@ -966,13 +966,13 @@ def test_upsert_with_complex_index(psql_docker, conn):
         update_cols_always=['last_updated']  # Only update timestamp
     )
 
-    # Verify we still have 2 rows (one updated, not inserted) 
+    # Verify we still have 2 rows (one updated, not inserted)
     count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
     assert count == 2, 'Should still have 2 rows after selective update'
 
     # Verify only the second row's timestamp was updated
     rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
-    
+
     assert len(rows) == 2, 'Should still have 2 distinct rows'
     assert rows[0]['value'] == 100, 'First row should have original value'
     assert rows[0]['last_updated'].date() == datetime.date(2023, 3, 18), 'First row should have unchanged timestamp'

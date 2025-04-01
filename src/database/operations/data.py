@@ -6,9 +6,7 @@ import logging
 from database.core.query import execute
 from database.core.transaction import Transaction
 from database.operations.query import execute_many
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import handle_query_params, quote_identifier
 
 logger = logging.getLogger(__name__)
@@ -78,14 +76,7 @@ def insert_rows(cn, table, rows):
     rows = tuple(filtered_rows)
 
     # Determine database type for quoting
-    if is_psycopg_connection(cn):
-        db_type = 'postgresql'
-    elif is_pyodbc_connection(cn):
-        db_type = 'mssql'
-    elif is_sqlite3_connection(cn):
-        db_type = 'sqlite'
-    else:
-        db_type = 'unknown'
+    db_type = get_dialect_name(cn) or 'unknown'
 
     # Prepare the SQL INSERT statement
     cols = tuple(rows[0].keys())

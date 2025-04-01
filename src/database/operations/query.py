@@ -7,10 +7,7 @@ import pandas as pd
 from database.adapters.structure import RowStructureAdapter
 from database.core.exceptions import QueryError
 from database.options import use_iterdict_data_loader
-from database.utils.connection_utils import check_connection
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import check_connection, get_dialect_name
 from database.utils.sql import handle_query_params
 
 from libb import attrdict, is_null
@@ -144,14 +141,7 @@ def extract_column_info(cursor, table_name=None):
         return []
 
     # Determine connection type
-    connection_type = 'unknown'
-    if is_psycopg_connection(cursor.connwrapper):
-        connection_type = 'postgresql'
-    elif is_pyodbc_connection(cursor.connwrapper):
-        connection_type = 'mssql'
-    elif is_sqlite3_connection(cursor.connwrapper):
-        connection_type = 'sqlite'
-
+    connection_type = get_dialect_name(cursor.connwrapper) or 'unknown'
     connection = cursor.connwrapper
 
     # Create column info objects - With ODBC Driver 18+, column names are preserved
@@ -178,13 +168,11 @@ def _extract_columns(cursor):
 def load_data(cursor, columns=None, **kwargs):
     """Data loader callable (IE into DataFrame)
     """
-    from database.utils.connection_utils import is_pyodbc_connection
-
     if columns is None:
         columns = extract_column_info(cursor)
 
     # For SQL Server, use specialized result processing
-    if is_pyodbc_connection(cursor.connwrapper):
+    if get_dialect_name(cursor.connwrapper) == 'mssql':
         from database.utils.sqlserver_utils import process_sqlserver_result
         adapted_data = process_sqlserver_result(cursor, columns)
         data_loader = cursor.connwrapper.options.data_loader
@@ -280,14 +268,7 @@ def execute_many(cn, sql, args):
     if not args:
         return 0
 
-    if is_psycopg_connection(cn):
-        db_type = 'postgresql'
-    elif is_pyodbc_connection(cn):
-        db_type = 'mssql'
-    elif is_sqlite3_connection(cn):
-        db_type = 'sqlite'
-    else:
-        db_type = 'unknown'
+    db_type = get_dialect_name(cn) or 'unknown'
 
     # Get parameter limit and calculate optimal batch size
     from database.utils.sql import get_param_limit_for_db

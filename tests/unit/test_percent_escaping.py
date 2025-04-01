@@ -55,7 +55,7 @@ def test_escape_percent_signs_in_literals_dynamic_patterns():
     """Test real-world scenario with parameter and dynamic LIKE pattern"""
     # Create mock connections for each database type
 
-    from database.utils.connection_utils import is_psycopg_connection
+    from database.utils.connection_utils import get_dialect_name
     from tests.fixtures.mocks import _create_simple_mock_connection
 
     # Create a proper mock connection
@@ -76,7 +76,7 @@ def test_escape_percent_signs_in_literals_dynamic_patterns():
     assert '%%%' not in escaped_sql  # Ensure we don't over-escape
 
     # Verify we can correctly identify the connection type
-    assert is_psycopg_connection(pg_conn)
+    assert get_dialect_name(pg_conn) == 'postgresql'
 
 
 def test_regex_pattern_not_affected_by_escaping():

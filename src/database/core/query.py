@@ -3,8 +3,7 @@ Basic database query execution functions.
 """
 import logging
 
-from database.utils.connection_utils import check_connection
-from database.utils.connection_utils import is_pyodbc_connection
+from database.utils.connection_utils import check_connection, get_dialect_name
 from database.utils.sql import handle_query_params
 from database.utils.sql import prepare_sql_params_for_execution
 from database.utils.sqlserver_utils import prepare_sqlserver_params
@@ -38,7 +37,7 @@ def execute(cn, sql, *args):
             processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, cn)
 
             # Apply SQL Server-specific parameter handling if needed
-            if is_pyodbc_connection(cn):
+            if get_dialect_name(cn) == 'mssql':
                 processed_sql, processed_args = prepare_sqlserver_params(processed_sql, processed_args)
 
             # Execute with the processed SQL and args

@@ -88,11 +88,24 @@ Each mock provides:
 import datetime
 import json
 import logging
+from collections import UserDict
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 logger = logging.getLogger(__name__)
+
+""" TODO: each mock should have one of these with the proper values set for the driver.
+
+    # Mock dialect name detection to prevent recursion
+    def mock_get_dialect_name(obj):
+        if obj is my_mock_conn:
+            return 'postgresql'  # or 'mssql' or 'sqlite'
+        return None
+
+    mocker.patch('database.utils.connection_utils.get_dialect_name',
+                side_effect=mock_get_dialect_name)
+"""
 
 
 def _create_simple_mock_connection(connection_type='postgresql'):
@@ -1136,18 +1149,18 @@ def mock_postgres_conn():
     patchers = [transaction_patcher] + schema_patchers
 
     # Connection type detection patches
-    # These ensure that is_psycopg_connection() returns True for our mock
+    # These ensure that get_dialect_name() returns 'postgresql' for our mock
     patchers.append(patch(
-        'database.utils.connection_utils.is_psycopg_connection',
-        side_effect=lambda obj, _seen=None: (
-            obj is mock_conn or 
-            obj is mock_conn.connection or 
+        'database.utils.connection_utils.get_dialect_name',
+        side_effect=lambda obj: 'postgresql' if (
+            obj is mock_conn or
+            obj is mock_conn.connection or
             (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
             (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn or
                 obj.driver_connection is mock_conn.connection
             ))
-        )
+        ) else None
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',
@@ -1298,11 +1311,11 @@ def mock_postgres_conn_with_types():
     patchers.append(patch(
         'database.utils.connection_utils.is_psycopg_connection',
         side_effect=lambda obj, _seen=None: (
-            obj is mock_conn or 
-            obj is mock_conn.connection or 
+            obj is mock_conn or
+            obj is mock_conn.connection or
             (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
             (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn or
                 obj.driver_connection is mock_conn.connection
             ))
         )
@@ -1415,18 +1428,18 @@ def mock_sqlserver_conn():
     patchers = [transaction_patcher] + schema_patchers
 
     # Connection type detection patches
-    # These ensure that is_pyodbc_connection() returns True for our mock
+    # These ensure that get_dialect_name() returns 'mssql' for our mock
     patchers.append(patch(
-        'database.utils.connection_utils.is_pyodbc_connection',
-        side_effect=lambda obj, _seen=None: (
-            obj is mock_conn or 
-            obj is mock_conn.connection or 
+        'database.utils.connection_utils.get_dialect_name',
+        side_effect=lambda obj: 'mssql' if (
+            obj is mock_conn or
+            obj is mock_conn.connection or
             (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
             (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn or
                 obj.driver_connection is mock_conn.connection
             ))
-        )
+        ) else None
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',
@@ -1579,16 +1592,16 @@ def mock_sqlserver_proc_conn():
 
     # Connection type detection
     patchers.append(patch(
-        'database.utils.connection_utils.is_pyodbc_connection',
-        side_effect=lambda obj, _seen=None: (
-            obj is mock_conn or 
-            obj is mock_conn.connection or 
+        'database.utils.connection_utils.get_dialect_name',
+        side_effect=lambda obj: 'mssql' if (
+            obj is mock_conn or
+            obj is mock_conn.connection or
             (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
             (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or 
+                obj.driver_connection is mock_conn or
                 obj.driver_connection is mock_conn.connection
             ))
-        )
+        ) else None
     ))
 
     # And isconnection
@@ -1655,7 +1668,7 @@ def mock_sqlite_conn():
     # Create mock for sqlite3.Row factory
     # This simulates the behavior of the SQLite row_factory that allows
     # accessing columns by both index and name
-    class MockSqlite3Row(dict):
+    class MockSqlite3Row(UserDict):
         def __getitem__(self, key):
             if isinstance(key, int):
                 return list(self.values())[key]
@@ -1700,19 +1713,19 @@ def mock_sqlite_conn():
     patchers = [transaction_patcher] + schema_patchers
 
     # Connection type detection patches
-    # These ensure that is_sqlite3_connection() returns True for our mock
+    # These ensure that get_dialect_name() returns 'sqlite' for our mock
     patchers.append(patch(
-        'database.utils.connection_utils.is_sqlite3_connection',
-        side_effect=lambda obj, _seen=None: (
-            obj is mock_conn or 
+        'database.utils.connection_utils.get_dialect_name',
+        side_effect=lambda obj: 'sqlite' if (
+            obj is mock_conn or
             obj is mock_conn.connection or
             # Simplify the connection checks to avoid potential recursion
             (hasattr(obj, 'connection') and id(obj.connection) == id(mock_conn.connection)) or
             (hasattr(obj, 'driver_connection') and (
-                id(obj.driver_connection) == id(mock_conn) or 
+                id(obj.driver_connection) == id(mock_conn) or
                 id(obj.driver_connection) == id(mock_conn.connection)
             ))
-        )
+        ) else None
     ))
     patchers.append(patch(
         'database.utils.connection_utils.isconnection',

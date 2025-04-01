@@ -10,9 +10,7 @@ from database.operations.schema import get_table_columns
 from database.operations.schema import get_table_primary_keys
 from database.operations.schema import reset_table_sequence
 from database.strategy import get_db_strategy
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import get_param_limit_for_db, quote_identifier
 from database.utils.sql_generation import build_insert_sql
 
@@ -22,16 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 def _get_db_type_from_connection(cn):
-    """Get database type from connection object"""
-
-    if is_psycopg_connection(cn):
-        return 'postgresql'
-    elif is_pyodbc_connection(cn):
-        return 'mssql'
-    elif is_sqlite3_connection(cn):
-        return 'sqlite'
-    else:
-        return 'unknown'
+    """Get database type from connection object
+    """
+    dialect = get_dialect_name(cn)
+    return dialect if dialect is not None else 'unknown'
 
 
 def _build_upsert_sql(

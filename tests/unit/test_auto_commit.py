@@ -25,14 +25,14 @@ class TestAutoCommit:
         # Add driver_connection to mimic SQLAlchemy connection structure
         conn.driver_connection = conn.connection
 
-        # Define a simplified is_psycopg_connection function that will be mocked
-        def mock_is_psycopg(obj, _seen=None):
-            return obj is conn or obj is conn.connection
+        # Define a simplified get_dialect_name function that will be mocked
+        def mock_get_dialect_name(obj):
+            if obj is conn or obj is conn.connection:
+                return 'postgresql'
+            return None
 
-        # Mock the connection detection functions
-        mocker.patch('database.utils.auto_commit.is_psycopg_connection', side_effect=mock_is_psycopg)
-        mocker.patch('database.utils.auto_commit.is_sqlite3_connection', return_value=False)
-        mocker.patch('database.utils.auto_commit.is_pyodbc_connection', return_value=False)
+        # Mock the connection detection function
+        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
 
         # Enable auto-commit
         enable_auto_commit(conn)
@@ -57,14 +57,14 @@ class TestAutoCommit:
         conn.connection.isolation_level = 'DEFERRED'
         conn.driver_connection = sqlite_conn
 
-        # Define a simplified is_sqlite3_connection function that will be mocked
-        def mock_is_sqlite(obj, _seen=None):
-            return obj is conn or obj is conn.connection
+        # Define a simplified get_dialect_name function that will be mocked
+        def mock_get_dialect_name(obj):
+            if obj is conn or obj is conn.connection:
+                return 'sqlite'
+            return None
 
-        # Mock the connection detection functions
-        mocker.patch('database.utils.auto_commit.is_sqlite3_connection', side_effect=mock_is_sqlite)
-        mocker.patch('database.utils.auto_commit.is_psycopg_connection', return_value=False)
-        mocker.patch('database.utils.auto_commit.is_pyodbc_connection', return_value=False)
+        # Mock the connection detection function
+        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
 
         # Enable auto-commit
         enable_auto_commit(conn)
@@ -83,14 +83,14 @@ class TestAutoCommit:
         # Add driver_connection to mimic SQLAlchemy connection structure
         conn.driver_connection = conn.connection
 
-        # Define a simplified is_pyodbc_connection function that will be mocked
-        def mock_is_pyodbc(obj, _seen=None):
-            return obj is conn or obj is conn.connection
+        # Define a simplified get_dialect_name function that will be mocked
+        def mock_get_dialect_name(obj):
+            if obj is conn or obj is conn.connection:
+                return 'mssql'
+            return None
 
-        # Mock the connection detection functions
-        mocker.patch('database.utils.auto_commit.is_pyodbc_connection', side_effect=mock_is_pyodbc)
-        mocker.patch('database.utils.auto_commit.is_psycopg_connection', return_value=False)
-        mocker.patch('database.utils.auto_commit.is_sqlite3_connection', return_value=False)
+        # Mock the connection detection function
+        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
 
         # Enable auto-commit
         enable_auto_commit(conn)
@@ -108,14 +108,14 @@ class TestAutoCommit:
         # Add driver_connection to mimic SQLAlchemy connection structure
         conn.driver_connection = conn.connection
 
-        # Define a simplified is_psycopg_connection function that will be mocked
-        def mock_is_psycopg(obj, _seen=None):
-            return obj is conn or obj is conn.connection
+        # Define a simplified get_dialect_name function that will be mocked
+        def mock_get_dialect_name(obj):
+            if obj is conn or obj is conn.connection:
+                return 'postgresql'
+            return None
 
-        # Mock the connection detection functions
-        mocker.patch('database.utils.auto_commit.is_psycopg_connection', side_effect=mock_is_psycopg)
-        mocker.patch('database.utils.auto_commit.is_sqlite3_connection', return_value=False)
-        mocker.patch('database.utils.auto_commit.is_pyodbc_connection', return_value=False)
+        # Mock the connection detection function
+        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
 
         # Disable auto-commit
         disable_auto_commit(conn)
@@ -181,14 +181,14 @@ class TestAutoCommit:
         # Set in_transaction as an attribute, not a method
         conn.in_transaction = False
 
-        # Define simplified connection type detection functions
-        def mock_is_psycopg(obj, _seen=None):
-            return obj is conn or obj is conn.connection
+        # Define simplified connection type detection function
+        def mock_get_dialect_name(obj):
+            if obj is conn or obj is conn.connection:
+                return 'postgresql'
+            return None
 
-        # Mock the connection detection functions
-        mocker.patch('database.utils.auto_commit.is_psycopg_connection', side_effect=mock_is_psycopg)
-        mocker.patch('database.utils.auto_commit.is_sqlite3_connection', return_value=False)
-        mocker.patch('database.utils.auto_commit.is_pyodbc_connection', return_value=False)
+        # Mock the connection detection function
+        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
 
         # Get diagnostic info
         info = diagnose_connection(conn)

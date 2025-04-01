@@ -10,6 +10,8 @@ This module provides utility functions for SQL query formatting and parameter ha
 import re
 from functools import wraps
 
+from database.utils.connection_utils import get_dialect_name
+
 from libb.iterutils import isiterable, issequence
 
 #
@@ -91,21 +93,19 @@ def standardize_placeholders(cn, sql):
     Returns
         SQL with standardized placeholders
     """
-    from database.utils.connection_utils import is_psycopg_connection
-    from database.utils.connection_utils import is_pyodbc_connection
-    from database.utils.connection_utils import is_sqlite3_connection
-
     if not sql:
         return sql
 
-    if is_psycopg_connection(cn):
+    dialect = get_dialect_name(cn)
+
+    if dialect == 'postgresql':
         # For PostgreSQL, convert ? to %s, but preserve regex patterns
         if 'regexp_replace' in sql:
             return _preserve_regex_patterns_in_sql(sql)
         else:
             # No regexp_replace, simple replacement
             return re.sub(r'(?<!\w)\?(?!\w)', '%s', sql)
-    elif is_pyodbc_connection(cn) or is_sqlite3_connection(cn):
+    elif dialect in {'mssql', 'sqlite'}:
         # For SQL Server and SQLite, convert %s to ?
         # Pattern to handle %s placeholders not inside string literals
         return re.sub(r'(?<![\'"])%s(?![\'"])', '?', sql)
@@ -209,9 +209,7 @@ def chunk_sql_parameters(sql, args, param_limit):
         return [args]
 
     # Create chunks of parameters
-    chunks = []
-    for i in range(0, len(args), param_limit):
-        chunks.append(args[i:i + param_limit])
+    chunks = [args[i:i + param_limit] for i in range(0, len(args), param_limit)]
 
     return chunks
 
@@ -611,8 +609,7 @@ def prepare_sql_params_for_execution(sql, args, cn=None):
         args = TypeConverter.convert_params(args)
 
         # Database-specific parameter handling
-        from database.utils.connection_utils import is_pyodbc_connection
-        if is_pyodbc_connection(cn):
+        if get_dialect_name(cn) == 'mssql':
             from database.utils.sqlserver_utils import _handle_in_clause
 
             # SQL Server-specific IN clause handling
@@ -891,8 +888,7 @@ def _handle_positional_in_params(sql, args):
             result_args.append(param)
 
     # Add any remaining args that weren't part of IN clauses
-    for i in range(len(processed), len(args)):
-        result_args.append(args[i])
+    result_args.extend(args[i] for i in range(len(processed), len(args)))
 
     # Convert back to tuple if the input was a tuple
     if args_was_tuple:

@@ -4,9 +4,7 @@ Helper functions for managing auto-commit across different database drivers.
 import logging
 from typing import Any
 
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +35,25 @@ def enable_auto_commit(connection: Any) -> None:
     if hasattr(connection, 'driver_connection'):
         raw_conn = connection.driver_connection
 
+    # Get dialect name
+    dialect = get_dialect_name(connection)
+
     # PostgreSQL
-    if is_psycopg_connection(connection) or hasattr(raw_conn, 'autocommit'):
+    if dialect == 'postgresql' or hasattr(raw_conn, 'autocommit'):
         try:
             raw_conn.autocommit = True
         except Exception as e:
             logger.debug(f'Could not set PostgreSQL autocommit: {e}')
 
     # SQLite
-    elif is_sqlite3_connection(connection) or hasattr(raw_conn, 'isolation_level'):
+    elif dialect == 'sqlite' or hasattr(raw_conn, 'isolation_level'):
         try:
             raw_conn.isolation_level = None
         except Exception as e:
             logger.debug(f'Could not set SQLite isolation_level: {e}')
 
     # SQL Server via ODBC
-    elif is_pyodbc_connection(connection):
+    elif dialect == 'mssql':
         try:
             # First try the standard way
             if hasattr(raw_conn, 'autocommit'):
@@ -91,22 +92,21 @@ def disable_auto_commit(connection: Any) -> None:
     if hasattr(connection, 'driver_connection'):
         raw_conn = connection.driver_connection
 
-    # PostgreSQL
-    if is_psycopg_connection(connection) or hasattr(raw_conn, 'autocommit'):
+    dialect = get_dialect_name(connection)
+
+    if dialect == 'postgresql' or hasattr(raw_conn, 'autocommit'):
         try:
             raw_conn.autocommit = False
         except Exception as e:
             logger.debug(f'Could not set PostgreSQL autocommit: {e}')
 
-    # SQLite
-    elif is_sqlite3_connection(connection) or hasattr(raw_conn, 'isolation_level'):
+    elif dialect == 'sqlite' or hasattr(raw_conn, 'isolation_level'):
         try:
             raw_conn.isolation_level = 'DEFERRED'
         except Exception as e:
             logger.debug(f'Could not set SQLite isolation_level: {e}')
 
-    # SQL Server via ODBC
-    elif is_pyodbc_connection(connection):
+    elif dialect == 'mssql':
         try:
             # First try the standard way
             if hasattr(raw_conn, 'autocommit'):
@@ -169,11 +169,12 @@ def diagnose_connection(conn):
     }
 
     # Identify connection type
-    if is_psycopg_connection(conn):
+    dialect = get_dialect_name(conn)
+    if dialect == 'postgresql':
         info['type'] = 'postgresql'
-    elif is_sqlite3_connection(conn):
+    elif dialect == 'sqlite':
         info['type'] = 'sqlite'
-    elif is_pyodbc_connection(conn):
+    elif dialect == 'mssql':
         info['type'] = 'sqlserver'
 
     # Get SQLAlchemy/raw status

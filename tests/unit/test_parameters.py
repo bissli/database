@@ -14,12 +14,11 @@ def mock_postgres_connection(mocker):
     """Create a mock PostgreSQL connection for parameter testing."""
     mock_conn = mocker.Mock()
 
-    # Configure the mock to be identified as a PostgreSQL connection
-    def is_psycopg_connection_mock(conn, _seen=None):
-        return conn is mock_conn
+    def mock_get_dialect_name(conn):
+        return 'postgresql' if conn is mock_conn else None
 
-    with patch('database.utils.connection_utils.is_psycopg_connection',
-               side_effect=is_psycopg_connection_mock):
+    with patch('database.utils.connection_utils.get_dialect_name',
+               side_effect=mock_get_dialect_name):
         yield mock_conn
 
 
@@ -109,12 +108,11 @@ class TestDatabaseParameterHandling:
         mock_conn = mocker.Mock()
 
         # Configure the mock to be identified as a SQLite connection
-        def is_sqlite3_connection_mock(conn, _seen=None):
-            return conn is mock_conn
+        def mock_get_dialect_name(conn):
+            return 'sqlite' if conn is mock_conn else None
 
-        with patch('database.utils.connection_utils.is_psycopg_connection', return_value=False), \
-        patch('database.utils.connection_utils.is_sqlite3_connection',
-              side_effect=is_sqlite3_connection_mock):
+        with patch('database.utils.connection_utils.get_dialect_name',
+                   side_effect=mock_get_dialect_name):
 
             # Process parameters
             test_date1 = datetime.date(2025, 1, 1)

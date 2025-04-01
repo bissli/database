@@ -113,25 +113,19 @@ def test_database_row_adapter_factory(create_simple_mock_connection):
     sql_conn = create_simple_mock_connection('mssql')
 
     # Test with PostgreSQL
-    with patch('database.utils.connection_utils.is_psycopg_connection', return_value=True):
-        with patch('database.utils.connection_utils.is_pyodbc_connection', return_value=False):
-            with patch('database.utils.connection_utils.is_sqlite3_connection', return_value=False):
-                adapter = RowStructureAdapter.create(pg_conn, row_data)
-                assert isinstance(adapter, PostgreSQLRowAdapter)
+    with patch('database.utils.connection_utils.get_dialect_name', return_value='postgresql'):
+        adapter = RowStructureAdapter.create(pg_conn, row_data)
+        assert isinstance(adapter, PostgreSQLRowAdapter)
 
     # Test with SQLite
-    with patch('database.utils.connection_utils.is_psycopg_connection', return_value=False):
-        with patch('database.utils.connection_utils.is_pyodbc_connection', return_value=False):
-            with patch('database.utils.connection_utils.is_sqlite3_connection', return_value=True):
-                adapter = RowStructureAdapter.create(sqlite_conn, row_data)
-                assert isinstance(adapter, SQLiteRowAdapter)
+    with patch('database.utils.connection_utils.get_dialect_name', return_value='sqlite'):
+        adapter = RowStructureAdapter.create(sqlite_conn, row_data)
+        assert isinstance(adapter, SQLiteRowAdapter)
 
     # Test with SQL Server
-    with patch('database.utils.connection_utils.is_psycopg_connection', return_value=False):
-        with patch('database.utils.connection_utils.is_pyodbc_connection', return_value=True):
-            with patch('database.utils.connection_utils.is_sqlite3_connection', return_value=False):
-                adapter = RowStructureAdapter.create(sql_conn, row_data)
-                assert isinstance(adapter, SQLServerRowAdapter)
+    with patch('database.utils.connection_utils.get_dialect_name', return_value='mssql'):
+        adapter = RowStructureAdapter.create(sql_conn, row_data)
+        assert isinstance(adapter, SQLServerRowAdapter)
 
 
 if __name__ == '__main__':

@@ -7,9 +7,7 @@ handled exclusively by the database drivers and their registered adapters.
 """
 from typing import Any
 
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 
 from libb import attrdict
 
@@ -35,15 +33,14 @@ class RowStructureAdapter:
     @staticmethod
     def create(connection, row):
         """Factory method to create the appropriate adapter for the connection type"""
-        # Create the appropriate adapter
-        if is_psycopg_connection(connection):
+        dialect = get_dialect_name(connection)
+        if dialect == 'postgresql':
             return PostgreSQLRowAdapter(row)
-        elif is_sqlite3_connection(connection):
+        if dialect == 'sqlite':
             return SQLiteRowAdapter(row)
-        elif is_pyodbc_connection(connection):
+        if dialect == 'mssql':
             return SQLServerRowAdapter(row, connection)
-        else:
-            return GenericRowAdapter(row)
+        return GenericRowAdapter(row)
 
     @staticmethod
     def create_empty_dict(cols: list[str]) -> dict[str, None]:
@@ -158,7 +155,7 @@ class SQLServerRowAdapter(RowStructureAdapter):
 
     The values returned are the exact values provided by the pyodbc driver
     without any additional type conversion.
-    
+
     IMPORTANT: This adapter requires ODBC Driver 18+ for SQL Server. With older
     drivers, column names may be truncated and data access unreliable.
     """
@@ -170,14 +167,14 @@ class SQLServerRowAdapter(RowStructureAdapter):
 
     def to_dict(self) -> dict[str, Any]:
         """Convert SQL Server row to dictionary
-        
-        With ODBC Driver 18+, column names are preserved correctly, so this 
+
+        With ODBC Driver 18+, column names are preserved correctly, so this
         function is much simpler than before.
         """
         # Quick handling of special cases
         if isinstance(self.row, dict):
             return self.row
-            
+
         if self.row is None:
             return {}
 
@@ -206,7 +203,7 @@ class SQLServerRowAdapter(RowStructureAdapter):
                     clean_member = member.replace('\x00', '')
                     result[clean_member] = getattr(self.row, member)
                 return result
-            
+
         # Priority 3: Try row dictionary-like access with keys
         if hasattr(self.row, 'keys') and callable(self.row.keys):
             try:
@@ -221,8 +218,8 @@ class SQLServerRowAdapter(RowStructureAdapter):
             if hasattr(self, 'cursor') and hasattr(self.cursor, 'expected_column_names'):
                 names = self.cursor.expected_column_names
                 if len(names) == len(self.row):
-                    return {name: value for name, value in zip(names, self.row)}
-                    
+                    return dict(zip(names, self.row))
+
             # Otherwise use generic column names
             return {f'column_{i}': value for i, value in enumerate(self.row)}
 
@@ -231,7 +228,7 @@ class SQLServerRowAdapter(RowStructureAdapter):
 
     def get_value(self, key=None) -> Any:
         """Get value from SQL Server row
-        
+
         With ODBC Driver 18+, column access is much simpler as names are preserved.
         """
         if self.row is None:
@@ -253,11 +250,11 @@ class SQLServerRowAdapter(RowStructureAdapter):
 
             # Return the row itself as last resort
             return self.row
-            
+
         # With Driver 18+, we can usually use direct attribute access
         if hasattr(self.row, '__members__') and key in self.row.__members__:
             return getattr(self.row, key)
-            
+
         # For dict-like objects
         if isinstance(self.row, dict) and key in self.row:
             return self.row[key]
@@ -269,14 +266,14 @@ class SQLServerRowAdapter(RowStructureAdapter):
                     return self.row[key]
             except (IndexError, TypeError):
                 pass
-                
+
         # Last resort: try case-insensitive match
         if hasattr(self.row, '__members__') and isinstance(key, str):
             key_lower = key.lower()
             for member in self.row.__members__:
                 if isinstance(member, str) and member.lower() == key_lower:
                     return getattr(self.row, member)
-                    
+
         # Key not found
         raise KeyError(f"Column '{key}' not found in row")
 

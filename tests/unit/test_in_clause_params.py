@@ -5,9 +5,7 @@ These tests verify the behavior of the handle_in_clause_params function
 which is responsible for expanding parameters in SQL IN clauses.
 """
 
-from database.utils.connection_utils import is_psycopg_connection
-from database.utils.connection_utils import is_pyodbc_connection
-from database.utils.connection_utils import is_sqlite3_connection
+from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import handle_in_clause_params
 
 
@@ -331,14 +329,14 @@ def test_connection_type_detection():
     odbc_mock = _create_simple_mock_connection('mssql')
     sqlite_mock = _create_simple_mock_connection('sqlite')
 
-    # Test detection functions
-    assert is_psycopg_connection(pg_mock)
-    assert is_pyodbc_connection(odbc_mock)
-    assert is_sqlite3_connection(sqlite_mock)
+    # Test dialect name detection
+    assert get_dialect_name(pg_mock) == 'postgresql'
+    assert get_dialect_name(odbc_mock) == 'mssql'
+    assert get_dialect_name(sqlite_mock) == 'sqlite'
 
     # Test with connection wrappers
     pg_wrapper = _create_simple_mock_transaction(pg_mock)
-    assert is_psycopg_connection(pg_wrapper)
+    assert get_dialect_name(pg_wrapper) == 'postgresql'
 
 
 def test_transaction_compatible():
