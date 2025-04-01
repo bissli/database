@@ -10,12 +10,16 @@ It provides:
 3. Common handling for special string values: empty strings, 'null', 'nan', 'none'
 4. Support for NumPy, Pandas, and PyArrow data types
 
-With SQLAlchemy integration, this module:
-1. Registers type adapters with SQLAlchemy's type system for parameter handling
-2. Continues to provide direct type conversion for explicit parameter handling
-3. Maintains compatibility with existing type adapter patterns
+This module is designed to be used both directly with TypeConverter for parameter
+conversion and through database-specific adapter registration functions.
 
 Usage:
+    # Direct parameter conversion (recommended approach)
+    params = TypeConverter.convert_params(my_params)
+    cursor.execute(sql, params)
+
+    # For direct database connections:
+
     # Get adapter registry
     adapter_registry = get_adapter_registry()
 
@@ -26,10 +30,6 @@ Usage:
     # Register SQLite adapters
     sqlite_conn = sqlite3.connect(...)
     adapter_registry.sqlite(sqlite_conn)
-
-    # Direct parameter conversion
-    params = TypeConverter.convert_params(my_params)
-    cursor.execute(sql, params)
 """
 import datetime
 import logging
@@ -41,8 +41,7 @@ import dateutil.parser
 import numpy as np
 import pandas as pd
 import psycopg
-from psycopg.adapt import AdaptersMap, Dumper
-from psycopg.types.numeric import Float8, FloatDumper
+from psycopg.adapt import AdaptersMap
 
 # Optional PyArrow import
 try:
@@ -60,7 +59,7 @@ PostgresConnection = TypeVar('PostgresConnection')
 SQLServerConnection = TypeVar('SQLServerConnection')
 
 # Constants
-SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na'}
+SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
 
 
 def _check_special_string(value: str) -> None:
@@ -221,14 +220,27 @@ class TypeConverter:
         if value is None:
             return None
 
+        # Add specific handling for pandas.NaT
+        if pd and hasattr(pd, 'NaT') and isinstance(value, type(pd.NaT)):
+            return None
+
         # Handle Python built-in float NaN
         if isinstance(value, float) and math.isnan(value):
+            return None
+
+        # Infinity handling
+        if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
             return None
 
         if isinstance(value, str):
             # Convert empty strings and special string values to NULL
             if _check_special_string(value) is None:
                 return None
+
+        # Handle date and datetime objects
+        # if isinstance(value, datetime.date): CHECK SQLITE (but will
+        # cause issues in POSTGRES)
+            # return value.isoformat()
 
         # NumPy numeric types (float, int, datetime64)
         if isinstance(value, np.floating | np.integer | np.unsignedinteger | np.datetime64):
@@ -272,66 +284,11 @@ class TypeConverter:
             return {k: TypeConverter.convert_value(v) for k, v in params.items()}
 
         if isinstance(params, list | tuple):
+            if params and all(isinstance(p, (list, tuple)) for p in params):
+                return type(params)(TypeConverter.convert_params(p) for p in params)
             return type(params)(TypeConverter.convert_value(v) for v in params)
 
         return TypeConverter.convert_value(params)
-
-
-# PostgreSQL adapter classes
-class CustomFloatDumper(FloatDumper):
-    """Custom Float dumper that converts NaN to NULL"""
-
-    _special = {
-        b'inf': b"'Infinity'::float8",
-        b'-inf': b"'-Infinity'::float8",
-        b'nan': None  # Convert NaN to NULL
-    }
-
-    def dump(self, value):
-        """Enhanced dump method with faster NaN checking"""
-        if isinstance(value, float) and np.isnan(value):
-            return None
-        return super().dump(value)
-
-
-class NumPyDumperMixin:
-    """Mixin for NumPy value conversion logic"""
-
-    def convert_numpy(self, value):
-        """Convert NumPy value to Python type"""
-        return _convert_numpy_value(value)
-
-
-class NumPyFloatDumper(NumPyDumperMixin, Dumper):
-    """Dumper for NumPy float types"""
-
-    def dump(self, value):
-        """Convert NumPy float to Python float, handling NaN as NULL"""
-        return self.convert_numpy(value)
-
-
-class NumPyIntDumper(NumPyDumperMixin, Dumper):
-    """Dumper for NumPy integer types"""
-
-    def dump(self, value):
-        """Convert NumPy integer to Python int"""
-        return self.convert_numpy(value)
-
-
-class PandasNullableDumper(Dumper):
-    """Dumper for Pandas nullable types"""
-
-    def dump(self, value):
-        """Convert Pandas nullable type, handling NA as NULL"""
-        return _convert_pandas_nullable(value)
-
-
-class PyArrowDumper(Dumper):
-    """Dumper for PyArrow scalar values"""
-
-    def dump(self, value):
-        """Convert PyArrow scalar, handling null values appropriately"""
-        return _convert_pyarrow_value(value)
 
 
 class NumericMixin:
@@ -356,31 +313,7 @@ class CustomNumericLoader(NumericMixin):
         """Initialize loader (signature required by psycopg)"""
 
 
-# SQLite adapter functions
-def adapt_date_iso(val: datetime.date) -> str:
-    """Convert date to ISO 8601 format string.
-
-    Takes a date object and returns the ISO 8601 string representation.
-
-    >>> import datetime
-    >>> adapt_date_iso(datetime.date(2023, 5, 15))
-    '2023-05-15'
-    """
-    return val.isoformat()
-
-
-def adapt_datetime_iso(val: datetime.datetime) -> str:
-    """Convert datetime to ISO 8601 format string.
-
-    Takes a datetime object and returns the ISO 8601 string representation.
-
-    >>> import datetime
-    >>> dt = datetime.datetime(2023, 5, 15, 14, 30, 45)
-    >>> adapt_datetime_iso(dt).startswith('2023-05-15T14:30:45')
-    True
-    """
-    return val.isoformat()
-
+# SQLite converter functions
 
 def convert_date(val: bytes) -> datetime.date:
     """Convert ISO 8601 date string to date object"""
@@ -390,44 +323,6 @@ def convert_date(val: bytes) -> datetime.date:
 def convert_datetime(val: bytes) -> datetime.datetime:
     """Convert ISO 8601 datetime string to datetime object"""
     return dateutil.parser.isoparse(val.decode())
-
-
-def adapt_numpy_float(val: np.floating) -> float | None:
-    """Convert NumPy float to Python float, handling NaN as NULL.
-
-    >>> import numpy as np
-    >>> adapt_numpy_float(np.float64(3.14))
-    3.14
-    >>> round(adapt_numpy_float(np.float32(123.45)), 6)
-    123.449997
-    >>> adapt_numpy_float(np.float64('nan')) is None
-    True
-    """
-    return _convert_numpy_value(val)
-
-
-def adapt_numpy_int(val: np.integer | np.unsignedinteger) -> int:
-    """Convert NumPy integer to Python int.
-
-    >>> import numpy as np
-    >>> adapt_numpy_int(np.int32(42))
-    42
-    >>> adapt_numpy_int(np.int64(9999))
-    9999
-    >>> adapt_numpy_int(np.uint32(123))
-    123
-    """
-    return _convert_numpy_value(val)
-
-
-def adapt_pandas_nullable(val) -> Any:
-    """Convert Pandas nullable type, handling NA as NULL"""
-    return _convert_pandas_nullable(val)
-
-
-def adapt_pyarrow(val: Any) -> Any:
-    """Convert PyArrow scalar value, handling null appropriately"""
-    return _convert_pyarrow_value(val)
 
 
 class AdapterRegistry:
@@ -454,32 +349,6 @@ class AdapterRegistry:
         if PYARROW_AVAILABLE else ()
     )
 
-    def _register_postgres_type_dumpers(self, adapters: AdaptersMap) -> None:
-        """Register all type dumpers for PostgreSQL
-
-        Args:
-            adapters: PostgreSQL adapters map to update
-        """
-        # Register float handling
-        adapters.register_dumper(Float8, CustomFloatDumper)
-
-        # Register NumPy float types
-        for dtype in self.NUMPY_FLOAT_TYPES:
-            adapters.register_dumper(dtype, NumPyFloatDumper)
-
-        # Register NumPy int types
-        for dtype in self.NUMPY_INT_TYPES:
-            adapters.register_dumper(dtype, NumPyIntDumper)
-
-        # Register Pandas nullable types
-        for dtype in self.PANDAS_NULLABLE_TYPES:
-            adapters.register_dumper(dtype, PandasNullableDumper)
-
-        # Register PyArrow types if available
-        if PYARROW_AVAILABLE and self.PYARROW_FLOAT_TYPES:
-            for dtype in self.PYARROW_FLOAT_TYPES:
-                adapters.register_dumper(dtype, PyArrowDumper)
-
     def postgres(self) -> AdaptersMap:
         """Create PostgreSQL adapter map
 
@@ -488,9 +357,6 @@ class AdapterRegistry:
         """
         # Create a fresh adapters map
         postgres_adapters = psycopg.adapt.AdaptersMap(psycopg.adapters)
-
-        # Register all type dumpers
-        self._register_postgres_type_dumpers(postgres_adapters)
 
         # Try to register the numeric loader if possible
         try:
@@ -504,40 +370,21 @@ class AdapterRegistry:
         return postgres_adapters
 
     def sqlite(self, connection: SQLiteConnection) -> None:
-        """Register SQLite adapters for a connection
+        """Register SQLite converters for a connection
 
         Args:
             connection: SQLite connection object
 
         Note:
-            Due to SQLite's architecture, adapters are registered globally
+            Due to SQLite's architecture, converters are registered globally
             rather than per-connection.
         """
         # Ensure connection is established
         connection.execute('SELECT 1')
 
-        # Register date/time adapters
-        sqlite3.register_adapter(datetime.date, adapt_date_iso)
-        sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
+        # Register date/time converters - these convert database values TO Python objects
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
-
-        # Register NumPy float types
-        for dtype in self.NUMPY_FLOAT_TYPES:
-            sqlite3.register_adapter(dtype, adapt_numpy_float)
-
-        # Register NumPy int types
-        for dtype in self.NUMPY_INT_TYPES:
-            sqlite3.register_adapter(dtype, adapt_numpy_int)
-
-        # Register Pandas nullable types
-        for dtype in self.PANDAS_NULLABLE_TYPES:
-            sqlite3.register_adapter(dtype, adapt_pandas_nullable)
-
-        # Register PyArrow types if available
-        if PYARROW_AVAILABLE and self.PYARROW_FLOAT_TYPES:
-            for dtype in self.PYARROW_FLOAT_TYPES:
-                sqlite3.register_adapter(dtype, adapt_pyarrow)
 
     def sqlserver(self, connection: SQLServerConnection) -> None:
         """Register SQL Server adapters

@@ -75,10 +75,6 @@ def process_query_parameters(cn, sql, args):
     # 4. Handle IN clause parameters
     sql, args = handle_in_clause_params(sql, args)
 
-    # 5. Convert numpy and pandas values
-    from database.adapters.type_conversion import TypeConverter
-    args = TypeConverter.convert_params(args)
-
     return sql, args
 
 

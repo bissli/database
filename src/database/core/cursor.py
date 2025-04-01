@@ -10,6 +10,7 @@ from functools import wraps
 from numbers import Number
 from typing import Any, Generic, TypeVar
 
+from database.adapters.type_conversion import TypeConverter
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name, isconnection
 from database.utils.sql import has_placeholders, sanitize_sql_for_logging
@@ -26,6 +27,26 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 ConnectionType = TypeVar('ConnectionType')
 CursorType = TypeVar('CursorType')
+
+
+def convert_params(func):
+    """
+    Decorator to convert parameter types for database operations.
+
+    Applies TypeConverter to all parameters to ensure proper conversion of
+    special types like NumPy arrays, pandas Series, etc. to database-compatible formats.
+    This ensures consistent type handling at the cursor level rather than in SQL utilities.
+    """
+    @wraps(func)
+    def wrapper(self, operation: str, *args: Any, **kwargs: Any) -> Any:
+        if not args:
+            return func(self, operation, *args, **kwargs)
+
+        converted_args = tuple(TypeConverter.convert_params(arg) for arg in args)
+
+        return func(self, operation, *converted_args, **kwargs)
+
+    return wrapper
 
 
 def dumpsql(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -144,6 +165,7 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
 class PostgresqlCursor(AbstractCursor):
     """PostgreSQL cursor implementation."""
 
+    @convert_params
     @dumpsql
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation for PostgreSQL."""
@@ -247,6 +269,7 @@ class PostgresqlCursor(AbstractCursor):
 
             self.dbapi_cursor.execute(stmt, stmt_params)
 
+    @convert_params
     @dumpsql
     def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for PostgreSQL."""
@@ -274,6 +297,7 @@ class PostgresqlCursor(AbstractCursor):
 class MssqlCursor(AbstractCursor):
     """Microsoft SQL Server cursor implementation."""
 
+    @convert_params
     @dumpsql
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation for SQL Server."""
@@ -377,6 +401,7 @@ class MssqlCursor(AbstractCursor):
         else:
             raise error
 
+    @convert_params
     @dumpsql
     def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for SQL Server."""
@@ -405,6 +430,7 @@ class MssqlCursor(AbstractCursor):
 class SqliteCursor(AbstractCursor):
     """SQLite cursor implementation."""
 
+    @convert_params
     @dumpsql
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation for SQLite."""
@@ -440,6 +466,7 @@ class SqliteCursor(AbstractCursor):
 
         return self.dbapi_cursor.rowcount
 
+    @convert_params
     @dumpsql
     def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for SQLite."""

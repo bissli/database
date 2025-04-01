@@ -189,6 +189,7 @@ def test_postgres_nan_nat_handling(psql_docker, conn):
             ('NumPy float32 NaN', np.float32('nan')),
             ('NumPy float64 NaN', np.float64('nan')),
             ('NumPy datetime64 NaT', np.datetime64('NaT')),
+            ('Pandas NaT', pd.NaT),
             ('Python None', None),
             ('Pandas NA', pd.NA),
             ('Empty string', ''),
@@ -221,6 +222,54 @@ def test_postgres_nan_nat_handling(psql_docker, conn):
         # This should also be NULL
         result = tx.select_scalar('SELECT int_col FROM nan_test WHERE id = %s', len(test_values) + 1)
         assert result is None, 'Explicitly cast NaN should be NULL'
+
+
+def test_postgres_cursor_executemany(psql_docker, conn):
+    """Test using connection cursor directly to call executemany with special values.
+
+    Tests how multiple insertions of NaN, NaT and similar special values are handled
+    when using the low-level cursor directly instead of the transaction interface.
+    """
+    import numpy as np
+    import pandas as pd
+    from database.core.cursor import get_dict_cursor
+
+    with db.transaction(conn) as tx:
+        tx.execute('DROP TABLE IF EXISTS executemany_test')
+
+        tx.execute("""
+        CREATE TABLE executemany_test (
+            id SERIAL PRIMARY KEY,
+            int_col INTEGER,
+            label VARCHAR(100)
+        )
+        """)
+
+    test_values = [
+        ('Python float NaN', float('nan')),
+        ('NumPy float32 NaN', np.float32('nan')),
+        ('NumPy float64 NaN', np.float64('nan')),
+        ('NumPy datetime64 NaT', np.datetime64('NaT')),
+        ('Pandas NaT', pd.NaT),
+        ('Python None', None),
+        ('Pandas NA', pd.NA),
+        ('Empty string', ''),
+        ('String "nan"', 'nan'),
+        ('String "null"', 'null'),
+        ('String "none"', 'none'),
+        ('Regular integer', 42)
+    ]
+
+    cursor = get_dict_cursor(conn)
+    try:
+        params = [(value, label) for label, value in test_values]
+        cursor.executemany(
+            'INSERT INTO executemany_test (int_col, label) VALUES (%s, %s)',
+            params
+        )
+        conn.commit()
+    finally:
+        cursor.close()
 
 
 if __name__ == '__main__':
