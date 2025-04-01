@@ -55,9 +55,7 @@ def psql_docker(request):
 
         request.addfinalizer(finalizer)
 
-        # Wait for postgres to be ready
         for i in range(30):
-            # Check if postgres is accepting connections
             try:
                 cn = db.connect('postgresql', config=config)
                 cn.close()
@@ -76,7 +74,6 @@ def psql_docker(request):
 
 
 def stage_test_data(cn):
-    # Install hstore extension
     db.execute(cn, 'CREATE EXTENSION IF NOT EXISTS hstore')
 
     drop_table_if_exists = 'drop table if exists test_table'
@@ -127,18 +124,14 @@ def conn(psql_docker):
     cn = db.connect('postgresql', config=config)
     assert db.isconnection(cn)
 
-    # Ensure clean state for each test
-    cn.rollback()  # Ensure we're not in a failed transaction
-    terminate_postgres_connections(cn)
-    stage_test_data(cn)
-
     try:
+        stage_test_data(cn)
         yield cn
     finally:
-        # Clean up after the test
         try:
-            cn.rollback()  # Make sure we don't have open transactions
-            terminate_postgres_connections(cn)
+            cn.rollback()
             cn.close()
         except Exception as e:
             logger.warning(f'Error during connection cleanup: {e}')
+        finally:
+            terminate_postgres_connections(cn)

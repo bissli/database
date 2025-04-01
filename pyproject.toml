@@ -25,6 +25,7 @@ pytest = { version = "*", optional = true }
 docker = { version = "*", optional = true }
 pytest-cov = { version = "^6.0.0", optional = true }
 pytest-mock = { version = "*", optional = true }
+pdbpp = { git = "https://github.com/pdbpp/pdbpp.git", optional = true }
 
 [tool.poetry.extras]
 test = [
@@ -33,6 +34,7 @@ test = [
   "docker",
   "pytest-mock",
   "pytest-cov",
+  "pdbpp"
 ]
 
 [build-system]

@@ -28,8 +28,21 @@ ConnectionType = TypeVar('ConnectionType')
 CursorType = TypeVar('CursorType')
 
 
-def dumpsql(func: Callable) -> Callable:
-    """Decorator for logging SQL queries and parameters"""
+def dumpsql(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator for logging SQL queries and parameters.
+
+    Wraps database functions to log SQL statements and their parameters
+    before execution and log any errors that occur.
+
+    >>> class MockConnection:
+    ...     connnection = None
+    >>> @dumpsql
+    ... def example_query(cn, sql, *args):
+    ...     return "executed"
+    >>> result = example_query(MockConnection(), "SELECT * FROM table", 1, 2)
+    >>> result
+    'executed'
+    """
     @wraps(func)
     def wrapper(cn: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
         this_cn = isconnection(cn) and cn or cn.connnection
@@ -57,7 +70,7 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
             cursor: The underlying database cursor
             connection_wrapper: The connection wrapper that created this cursor
         """
-        self.cursor = cursor
+        self.dbapi_cursor = cursor
         self.connwrapper = connection_wrapper
         self._arraysize: int = 1
         self._original_sql: str = ''
@@ -65,11 +78,11 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
 
     def __getattr__(self, name: str) -> Any:
         """Delegate any members to the underlying cursor."""
-        return getattr(self.cursor, name)
+        return getattr(self.dbapi_cursor, name)
 
     def __iter__(self) -> Iterator:
         """Return an iterator for the cursor."""
-        return IterChunk(self.cursor)
+        return IterChunk(self.dbapi_cursor)
 
     @property
     def description(self) -> list[tuple] | None:
@@ -78,12 +91,12 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
         Returns a sequence of 7-item sequences:
         (name, type_code, display_size, internal_size, precision, scale, null_ok)
         """
-        return self.cursor.description
+        return self.dbapi_cursor.description
 
     @property
     def rowcount(self) -> int:
         """Return the number of rows produced/affected by last operation."""
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
     @property
     def arraysize(self) -> int:
@@ -97,21 +110,21 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
 
     def close(self) -> None:
         """Close the cursor, making it unusable for further operations."""
-        self.cursor.close()
+        self.dbapi_cursor.close()
 
     def fetchone(self) -> tuple | None:
         """Fetch the next row of a query result set."""
-        return self.cursor.fetchone()
+        return self.dbapi_cursor.fetchone()
 
     def fetchmany(self, size: int | None = None) -> list[tuple]:
         """Fetch the next set of rows of a query result."""
         if size is None:
             size = self.arraysize
-        return self.cursor.fetchmany(size)
+        return self.dbapi_cursor.fetchmany(size)
 
     def fetchall(self) -> list[tuple]:
         """Fetch all remaining rows of a query result."""
-        return self.cursor.fetchall()
+        return self.dbapi_cursor.fetchall()
 
     def setinputsizes(self, sizes: Sequence) -> None:
         """Predefine memory areas for parameters."""
@@ -128,7 +141,7 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
         """Execute against all parameter sequences."""
 
 
-class PgCursor(AbstractCursor):
+class PostgresqlCursor(AbstractCursor):
     """PostgreSQL cursor implementation."""
 
     @dumpsql
@@ -139,7 +152,7 @@ class PgCursor(AbstractCursor):
 
         try:
             self._execute_query(operation, args)
-            logger.debug(f'Query result: {self.cursor.statusmessage}')
+            logger.debug(f'Query result: {self.dbapi_cursor.statusmessage}')
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -148,98 +161,91 @@ class PgCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
     def _execute_query(self, sql: str, args: tuple) -> None:
-        """Execute a PostgreSQL specific query."""
+        """Execute a PostgreSQL specific query.
+
+        Handles special cases for PostgreSQL query execution including
+        multi-statement queries and dictionary parameters.
+        """
         self._original_sql = sql
 
-        # Check if SQL has placeholders - if not and we have args, ignore the args
         if args and not has_placeholders(sql):
             args_count = len(tuple(collapse(args)))
-            self.cursor.execute(sql)
+            self.dbapi_cursor.execute(sql)
+            logger.debug(f'Executed query without placeholders (ignoring {args_count} args)')
             return
 
-        # Handle dictionary parameters (for named placeholders)
         for arg in collapse(args):
             if isinstance(arg, dict):
-                # Check if we're dealing with multiple statements
                 is_multi_statement = ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
 
                 if is_multi_statement:
                     self._execute_multi_statement_named(sql, arg)
                     return
 
-                # Standard execution for single statements
-                self.cursor.execute(sql, arg)
+                self.dbapi_cursor.execute(sql, arg)
                 return
 
-        # Check if we're dealing with multiple statements
         is_multi_statement = ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
 
         if is_multi_statement and args:
-            # PostgreSQL doesn't support multi-statement prepared statements
             self._execute_multi_statement(sql, args)
             return
 
-        # Standard execution for all other cases
-        self.cursor.execute(sql, *args)
+        self.dbapi_cursor.execute(sql, *args)
 
     def _execute_multi_statement(self, sql: str, args: tuple) -> None:
-        """Execute multiple PostgreSQL statements with proper parameter handling."""
-        # Split into individual statements, keeping only non-empty ones
+        """Execute multiple PostgreSQL statements with proper parameter handling.
+
+        Splits a multi-statement SQL string into individual statements and
+        distributes parameters appropriately to each statement.
+        """
         statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
 
-        # Unwrap nested parameters if needed
         params = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
 
-        # Count total placeholders across all statements
         placeholder_count = sum(stmt.count('%s') for stmt in statements)
 
-        # Validate parameter count
         if len(params) != placeholder_count:
             raise ValueError(
                 f'Parameter count mismatch: SQL needs {placeholder_count} parameters '
                 f'but {len(params)} were provided'
             )
 
-        # Execute statements individually with their parameters
         param_index = 0
         for stmt in statements:
             placeholder_count = stmt.count('%s')
 
             if placeholder_count > 0:
-                # Extract just the parameters needed for this statement
                 stmt_params = params[param_index:param_index + placeholder_count]
                 param_index += placeholder_count
-                self.cursor.execute(stmt, stmt_params)
+                self.dbapi_cursor.execute(stmt, stmt_params)
             else:
-                # Execute without parameters
-                self.cursor.execute(stmt)
+                self.dbapi_cursor.execute(stmt)
 
     def _execute_multi_statement_named(self, sql: str, params_dict: dict) -> None:
-        """Execute multiple PostgreSQL statements with named parameter handling."""
-        # Split into individual statements, keeping only non-empty ones
+        """Execute multiple PostgreSQL statements with named parameter handling.
+
+        Splits a multi-statement SQL string with named parameters into individual
+        statements and executes each with the appropriate subset of parameters.
+        """
         statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
 
-        # Execute each statement individually
         for stmt in statements:
             if not stmt:
                 continue
 
-            # Extract the parameter names used in this statement
             param_names = re.findall(r'%\(([^)]+)\)s', stmt)
 
-            # If no parameters in this statement, execute it directly
             if not param_names:
-                self.cursor.execute(stmt)
+                self.dbapi_cursor.execute(stmt)
                 continue
 
-            # Create a filtered dictionary with only the parameters needed for this statement
             stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
 
-            # Execute the statement with its parameters
-            self.cursor.execute(stmt, stmt_params)
+            self.dbapi_cursor.execute(stmt, stmt_params)
 
     @dumpsql
     def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
@@ -252,8 +258,8 @@ class PgCursor(AbstractCursor):
             return 0
 
         try:
-            self.cursor.executemany(operation, seq_of_parameters)
-            logger.debug(f'Executemany result: {self.cursor.statusmessage}')
+            self.dbapi_cursor.executemany(operation, seq_of_parameters)
+            logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -262,10 +268,10 @@ class PgCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
 
-class MsCursor(AbstractCursor):
+class MssqlCursor(AbstractCursor):
     """Microsoft SQL Server cursor implementation."""
 
     @dumpsql
@@ -286,82 +292,88 @@ class MsCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
     def _execute_query(self, sql: str, args: tuple) -> None:
-        """Execute a query specifically for SQL Server with appropriate handling."""
-        # Only add explicit names for required expressions (@@identity, etc)
+        """Execute a query specifically for SQL Server with appropriate handling.
+
+        Processes SQL queries for SQL Server, handling placeholder conversion,
+        stored procedures, and parameter passing.
+        """
         sql = ensure_identity_column_named(sql)
 
-        # Save the final SQL
         self._sql = sql
         self._original_sql = sql
 
-        # Convert %s to ? for SQL Server
         sql = standardize_placeholders(self.connwrapper, sql)
 
-        # Handle stored procedures with named parameters for SQL Server
         if args and 'EXEC ' in sql.upper() and '@' in sql:
             self._execute_stored_procedure(sql, args)
         else:
-            # Standard execution for non-stored procedure queries
             if args:
                 if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                    self.cursor.execute(sql, args[0])
+                    self.dbapi_cursor.execute(sql, args[0])
                 else:
-                    self.cursor.execute(sql, args)
+                    self.dbapi_cursor.execute(sql, args)
             else:
-                self.cursor.execute(sql)
+                self.dbapi_cursor.execute(sql)
 
     def _execute_stored_procedure(self, sql: str, args: tuple) -> None:
-        """Handle execution of SQL Server stored procedures with parameters."""
-        # Convert parameters to positional placeholders (?)
+        """Handle execution of SQL Server stored procedures with parameters.
+
+        Prepares and executes stored procedure calls with appropriate parameter
+        handling for SQL Server's specific requirements.
+        """
         processed_sql, processed_args = prepare_sqlserver_params(sql, args)
 
-        # Count placeholders in the SQL
         placeholder_count = processed_sql.count('?')
         param_count = len(processed_args) if processed_args else 0
 
-        # Execute with the processed SQL and args
         if not processed_args:
-            self.cursor.execute(processed_sql)
+            self.dbapi_cursor.execute(processed_sql)
             return
 
         processed_args = self._adjust_parameter_count(placeholder_count, param_count, processed_args)
         self._execute_with_parameters(processed_sql, processed_args, placeholder_count)
 
     def _adjust_parameter_count(self, placeholder_count: int, param_count: int, processed_args: Sequence) -> Sequence:
-        """Adjust parameter count to match placeholders."""
+        """Adjust parameter count to match placeholders.
+
+        Ensures that the number of parameters matches the number of placeholders
+        by either adding None values or truncating excess parameters.
+        """
         if placeholder_count != param_count:
             logger.warning(f'Parameter count mismatch: {placeholder_count} placeholders, '
                            f'{param_count} parameters. Adjusting...')
 
-            # Adjust parameters to match placeholders
             if placeholder_count > param_count:
-                # Add None values if we need more parameters
                 processed_args = list(processed_args)
                 processed_args.extend([None] * (placeholder_count - param_count))
             else:
-                # Truncate if we have too many parameters
                 processed_args = processed_args[:placeholder_count]
 
         return processed_args
 
     def _execute_with_parameters(self, sql: str, params: Sequence, placeholder_count: int) -> None:
-        """Execute SQL with parameters, handling single parameter case specially."""
-        # Only use tuple unpacking for single parameters with single placeholders
+        """Execute SQL with parameters, handling single parameter case specially.
+
+        Handles the execution of SQL statements with parameters, accounting for
+        SQL Server's special handling of single parameters vs. parameter lists.
+        """
         if placeholder_count == 1 and len(params) >= 1:
-            # For a single placeholder, pass the first parameter directly
-            self.cursor.execute(sql, params[0])
+            self.dbapi_cursor.execute(sql, params[0])
         else:
-            # For multiple parameters, pass as a list
-            self.cursor.execute(sql, params)
+            self.dbapi_cursor.execute(sql, params)
 
     def _handle_sqlserver_error(self, error: Exception, sql: str, args: tuple) -> None:
-        """Handle SQL Server specific errors with automatic fixes."""
+        """Handle SQL Server specific errors with automatic fixes.
+
+        Attempts to recover from common SQL Server errors such as
+        unnamed columns by applying fixes and retrying the query.
+        """
         modified_sql, should_retry = handle_unnamed_columns_error(error, sql, args)
         if should_retry:
-            self.cursor.execute(modified_sql, *args)
+            self.dbapi_cursor.execute(modified_sql, *args)
         else:
             raise error
 
@@ -378,7 +390,7 @@ class MsCursor(AbstractCursor):
         try:
             modified_sql = standardize_placeholders(self.connwrapper, operation)
             modified_sql = ensure_identity_column_named(modified_sql)
-            self.cursor.executemany(modified_sql, seq_of_parameters)
+            self.dbapi_cursor.executemany(modified_sql, seq_of_parameters)
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -387,10 +399,10 @@ class MsCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
 
-class SlCursor(AbstractCursor):
+class SqliteCursor(AbstractCursor):
     """SQLite cursor implementation."""
 
     @dumpsql
@@ -402,24 +414,22 @@ class SlCursor(AbstractCursor):
         try:
             self._original_sql = operation
 
-            # Check if SQL has placeholders - if not and we have args, ignore the args
             if args and not has_placeholders(operation):
-                self.cursor.execute(operation)
+                self.dbapi_cursor.execute(operation)
+                logger.debug('Executed query without placeholders (ignoring args)')
             else:
-                # Handle dictionary parameters
                 for arg in collapse(args):
                     if isinstance(arg, dict):
-                        self.cursor.execute(operation, arg)
+                        self.dbapi_cursor.execute(operation, arg)
                         break
                 else:
-                    # Standard execution
                     if args:
                         if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                            self.cursor.execute(operation, args[0])
+                            self.dbapi_cursor.execute(operation, args[0])
                         else:
-                            self.cursor.execute(operation, args)
+                            self.dbapi_cursor.execute(operation, args)
                     else:
-                        self.cursor.execute(operation)
+                        self.dbapi_cursor.execute(operation)
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -428,7 +438,7 @@ class SlCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
     @dumpsql
     def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
@@ -441,7 +451,7 @@ class SlCursor(AbstractCursor):
             return 0
 
         try:
-            self.cursor.executemany(operation, seq_of_parameters)
+            self.dbapi_cursor.executemany(operation, seq_of_parameters)
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -450,7 +460,7 @@ class SlCursor(AbstractCursor):
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
 
-        return self.cursor.rowcount
+        return self.dbapi_cursor.rowcount
 
 
 class FakeCursor(AbstractCursor):
@@ -458,7 +468,7 @@ class FakeCursor(AbstractCursor):
 
     def __init__(self, cursor: Any = None, connection_wrapper: Any = None) -> None:
         """Initialize with optional cursor and connection wrapper."""
-        self.cursor = cursor or object()
+        self.dbapi_cursor = cursor or object()
         self.connwrapper = connection_wrapper or object()
         self._description: list[tuple] | None = None
         self._rowcount: int = -1
@@ -531,10 +541,11 @@ class FakeCursor(AbstractCursor):
         self._description = description
 
 
-def IterChunk(cursor: Any, size: int = 5000) -> Iterator:
-    """Alternative to builtin cursor generator
-    breaks fetches into smaller chunks to avoid malloc problems
-    for really large queries
+def IterChunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
+    """Iterate through cursor results in manageable chunks.
+
+    Alternative to builtin cursor generator that breaks fetches into smaller
+    chunks to avoid malloc problems for really large queries.
     """
     while True:
         try:
@@ -547,7 +558,11 @@ def IterChunk(cursor: Any, size: int = 5000) -> Iterator:
 
 
 class DictRowFactory:
-    """Row factory for psycopg that returns dictionary-like rows"""
+    """Row factory for psycopg that returns dictionary-like rows.
+
+    Converts tuple-based rows from the database cursor into dictionary objects
+    with column names as keys, applying type conversions where appropriate.
+    """
 
     def __init__(self, cursor: Any) -> None:
         # Make sure to get both name and type conversion function
@@ -560,15 +575,24 @@ class DictRowFactory:
                 for (name, cast), value in zip(self.fields, values)}
 
 
-def postgres_type_convert(type_code: int) -> Callable | None:
-    """Get type conversion function based on PostgreSQL type OID"""
+def postgres_type_convert(type_code: int) -> Callable[[Any], Any] | None:
+    """Get type conversion function based on PostgreSQL type OID.
+
+    Returns the appropriate type conversion function for a given PostgreSQL
+    type code, or None if no specific conversion is needed.
+    """
     # Import here to avoid circular imports
     from database.adapters.type_mapping import postgres_types
     return postgres_types.get(type_code)
 
 
 def get_dict_cursor(cn: Any) -> AbstractCursor:
-    """Get a cursor that returns rows as dictionaries for the given connection type"""
+    """Get a cursor that returns rows as dictionaries for the given connection type.
+
+    Creates and returns the appropriate cursor implementation based on the
+    database dialect of the provided connection, with results formatted as
+    dictionaries rather than tuples.
+    """
     if hasattr(cn, 'connection'):
         raw_conn = cn.connection
     else:
@@ -577,11 +601,15 @@ def get_dict_cursor(cn: Any) -> AbstractCursor:
     dialect_name = get_dialect_name(cn)
     if dialect_name == 'postgresql':
         cursor = raw_conn.cursor(row_factory=DictRowFactory)
-        return PgCursor(cursor, cn)
+        return PostgresqlCursor(cursor, cn)
     if dialect_name == 'mssql':
         cursor = raw_conn.cursor()
-        return MsCursor(cursor, cn)
+        return MssqlCursor(cursor, cn)
     if dialect_name == 'sqlite':
         cursor = raw_conn.cursor()
-        return SlCursor(cursor, cn)
+        return SqliteCursor(cursor, cn)
     raise ValueError('Unknown connection type')
+
+
+if __name__ == '__main__':
+    __import__('doctest').testmod(optionflags=4 | 8 | 32)

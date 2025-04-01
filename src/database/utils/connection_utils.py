@@ -30,8 +30,6 @@ __all__ = [
     'create_url_from_options',
     'get_engine_for_options',
     'dispose_all_engines',
-    'get_connection_from_engine',
-    'close_sqlalchemy_connection',
     'get_dialect_name',
 ]
 
@@ -189,11 +187,9 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
         # Create a new engine with provided settings
         url = create_url_from_options(options)
 
-        # SQLAlchemy 2.0
         engine_kwargs = {
             'pool_pre_ping': True,
             'pool_reset_on_return': 'rollback',
-            'future': True,
             'echo':  False
         }
 
@@ -244,30 +240,6 @@ def dispose_all_engines():
 
 # Register cleanup function to run at program exit
 atexit.register(dispose_all_engines)
-
-
-def get_connection_from_engine(engine):
-    """Get a connection from the engine.
-
-    This function uses SQLAlchemy 2.0 recommended connection patterns.
-
-    Args:
-        engine: SQLAlchemy engine
-
-    Returns
-        sqlalchemy.engine.Connection: SQLAlchemy connection
-    """
-    return engine.connect()
-
-
-def close_sqlalchemy_connection(connection):
-    """Close a SQLAlchemy connection.
-
-    Args:
-        connection: SQLAlchemy connection
-    """
-    if connection and not connection.closed:
-        connection.close()
 
 
 def get_dialect_name(obj):

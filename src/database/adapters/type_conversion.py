@@ -33,6 +33,7 @@ Usage:
 """
 import datetime
 import logging
+import sqlite3
 from typing import Any, TypeVar
 
 import dateutil.parser
@@ -149,11 +150,12 @@ def _convert_pyarrow_value(value: Any) -> Any:
         return None
 
 
-def _convert_numpy_value(val: Any) -> float | int | None:
+def _convert_numpy_value(val: Any) -> float | int | datetime.datetime | None:
     """
     Convert NumPy numeric value to Python type.
 
-    This is a shared implementation for both NumPy float and integer types.
+    This is a shared implementation for both NumPy float and integer types,
+    as well as datetime64 types (including NaT handling).
 
     Args:
         val: NumPy value to convert
@@ -164,19 +166,26 @@ def _convert_numpy_value(val: Any) -> float | int | None:
     if val is None:
         return None
 
+    # Handle NaN values from floating point types
     if isinstance(val, np.floating) and np.isnan(val):
         return None
 
-    if isinstance(val, np.floating):
-        return float(val)
+    # Handle NaT (Not a Time) values
+    if isinstance(val, np.datetime64) and np.isnat(val):
+        return None
 
-    if isinstance(val, np.integer | np.unsignedinteger):
-        return int(val)
+    if isinstance(val, (np.floating, np.integer | np.unsignedinteger)):
+        return val.item()
+
+    if isinstance(val, np.datetime64):
+        timestamp = val.astype('datetime64[s]').astype(int)
+        logger.debug(f'Converting np.datetime64 to Python datetime: {val}')
+        return datetime.datetime.utcfromtimestamp(timestamp)
 
     return val
 
 
-def _convert_pandas_nullable(val) -> Any:
+def _convert_pandas_nullable(val: Any) -> Any:
     """
     Convert Pandas nullable value to Python type.
 
@@ -216,8 +225,8 @@ class TypeConverter:
             if _check_special_string(value) is None:
                 return None
 
-        # NumPy numeric types (float and int)
-        if isinstance(value, np.floating | np.integer | np.unsignedinteger):
+        # NumPy numeric types (float, int, datetime64)
+        if isinstance(value, np.floating | np.integer | np.unsignedinteger | np.datetime64):
             return _convert_numpy_value(value)
 
         # Pandas types
@@ -344,12 +353,27 @@ class CustomNumericLoader(NumericMixin):
 
 # SQLite adapter functions
 def adapt_date_iso(val: datetime.date) -> str:
-    """Convert date to ISO 8601 format string"""
+    """Convert date to ISO 8601 format string.
+
+    Takes a date object and returns the ISO 8601 string representation.
+
+    >>> import datetime
+    >>> adapt_date_iso(datetime.date(2023, 5, 15))
+    '2023-05-15'
+    """
     return val.isoformat()
 
 
 def adapt_datetime_iso(val: datetime.datetime) -> str:
-    """Convert datetime to ISO 8601 format string"""
+    """Convert datetime to ISO 8601 format string.
+
+    Takes a datetime object and returns the ISO 8601 string representation.
+
+    >>> import datetime
+    >>> dt = datetime.datetime(2023, 5, 15, 14, 30, 45)
+    >>> adapt_datetime_iso(dt).startswith('2023-05-15T14:30:45')
+    True
+    """
     return val.isoformat()
 
 
@@ -364,12 +388,30 @@ def convert_datetime(val: bytes) -> datetime.datetime:
 
 
 def adapt_numpy_float(val: np.floating) -> float | None:
-    """Convert NumPy float to Python float, handling NaN as NULL"""
+    """Convert NumPy float to Python float, handling NaN as NULL.
+
+    >>> import numpy as np
+    >>> adapt_numpy_float(np.float64(3.14))
+    3.14
+    >>> round(adapt_numpy_float(np.float32(123.45)), 6)
+    123.449997
+    >>> adapt_numpy_float(np.float64('nan')) is None
+    True
+    """
     return _convert_numpy_value(val)
 
 
 def adapt_numpy_int(val: np.integer | np.unsignedinteger) -> int:
-    """Convert NumPy integer to Python int"""
+    """Convert NumPy integer to Python int.
+
+    >>> import numpy as np
+    >>> adapt_numpy_int(np.int32(42))
+    42
+    >>> adapt_numpy_int(np.int64(9999))
+    9999
+    >>> adapt_numpy_int(np.uint32(123))
+    123
+    """
     return _convert_numpy_value(val)
 
 
@@ -469,8 +511,6 @@ class AdapterRegistry:
         # Ensure connection is established
         connection.execute('SELECT 1')
 
-        import sqlite3
-
         # Register date/time adapters
         sqlite3.register_adapter(datetime.date, adapt_date_iso)
         sqlite3.register_adapter(datetime.datetime, adapt_datetime_iso)
@@ -513,3 +553,7 @@ def get_adapter_registry() -> AdapterRegistry:
         AdapterRegistry instance
     """
     return AdapterRegistry()
+
+
+if __name__ == '__main__':
+    __import__('doctest').testmod(optionflags=4 | 8 | 32)
