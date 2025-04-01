@@ -11,10 +11,10 @@ from numbers import Number
 from typing import Any, Generic, TypeVar
 
 from database.adapters.type_conversion import TypeConverter
+from database.adapters.type_mapping import postgres_types
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name, isconnection
-from database.utils.sql import has_placeholders
-from database.utils.sql import standardize_placeholders
+from database.utils.sql import has_placeholders, standardize_placeholders
 from database.utils.sqlserver_utils import ensure_identity_column_named
 from database.utils.sqlserver_utils import handle_unnamed_columns_error
 from database.utils.sqlserver_utils import prepare_sqlserver_params
@@ -35,7 +35,6 @@ def convert_params(func):
 
     Applies TypeConverter to all parameters to ensure proper conversion of
     special types like NumPy arrays, pandas Series, etc. to database-compatible formats.
-    This ensures consistent type handling at the cursor level rather than in SQL utilities.
     """
     @wraps(func)
     def wrapper(self, operation: str, *args: Any, **kwargs: Any) -> Any:
@@ -591,25 +590,13 @@ class DictRowFactory:
     """
 
     def __init__(self, cursor: Any) -> None:
-        # Make sure to get both name and type conversion function
-        self.fields = [(c.name, postgres_type_convert(c.type_code)) for c in (cursor.description or [])]
+        self.fields = [(c.name, postgres_types.get(c.type_code)) for c in (cursor.description or [])]
 
     def __call__(self, values: tuple) -> dict:
         return {name: cast(value)
                 if isinstance(value, Number) and cast is not None
                 else value
                 for (name, cast), value in zip(self.fields, values)}
-
-
-def postgres_type_convert(type_code: int) -> Callable[[Any], Any] | None:
-    """Get type conversion function based on PostgreSQL type OID.
-
-    Returns the appropriate type conversion function for a given PostgreSQL
-    type code, or None if no specific conversion is needed.
-    """
-    # Import here to avoid circular imports
-    from database.adapters.type_mapping import postgres_types
-    return postgres_types.get(type_code)
 
 
 def get_dict_cursor(cn: Any) -> AbstractCursor:
