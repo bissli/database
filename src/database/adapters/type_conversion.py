@@ -33,6 +33,7 @@ Usage:
 """
 import datetime
 import logging
+import math
 import sqlite3
 from typing import Any, TypeVar
 
@@ -218,6 +219,10 @@ class TypeConverter:
             Converted value suitable for database parameters
         """
         if value is None:
+            return None
+
+        # Handle Python built-in float NaN
+        if isinstance(value, float) and math.isnan(value):
             return None
 
         if isinstance(value, str):

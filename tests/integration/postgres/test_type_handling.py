@@ -160,5 +160,68 @@ def test_postgres_type_consistency(psql_docker, conn, value_dict):
             assert date_scalar.date() == value_dict['date_value']
 
 
+def test_postgres_nan_nat_handling(psql_docker, conn):
+    """Test handling of NaN, NaT and similar special values with PostgreSQL.
+
+    Verifies that Python's float('nan'), NumPy NaN, Pandas NaT, and similar
+    special values are properly converted to NULL when sent to the database.
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    # Create a test table with integer column (to ensure NaN/NaT gets converted to NULL)
+    with db.transaction(conn) as tx:
+        # Drop table if it exists
+        tx.execute('DROP TABLE IF EXISTS nan_test')
+
+        # Create a simple table with integer column
+        tx.execute("""
+        CREATE TABLE nan_test (
+            id SERIAL PRIMARY KEY,
+            int_col INTEGER
+        )
+        """)
+
+        # Create a list of special values to test
+        test_values = [
+            ('Python float NaN', float('nan')),
+            ('NumPy float32 NaN', np.float32('nan')),
+            ('NumPy float64 NaN', np.float64('nan')),
+            ('NumPy datetime64 NaT', np.datetime64('NaT')),
+            ('Python None', None),
+            ('Pandas NA', pd.NA),
+            ('Empty string', ''),
+            ('String "nan"', 'nan'),
+            ('String "null"', 'null'),
+            ('String "none"', 'none'),
+            ('Regular integer', 42)  # This one should work
+        ]
+
+        # Insert each test value
+        for label, value in test_values:
+            tx.execute('INSERT INTO nan_test (int_col) VALUES (%s)', value)
+
+        # Query all rows
+        rows = tx.select('SELECT * FROM nan_test ORDER BY id')
+
+        # All special values should be NULL except the last one (regular integer)
+        assert len(rows) == len(test_values)
+
+        # Check that all special values were converted to NULL
+        for i, (label, value) in enumerate(test_values):
+            if label == 'Regular integer':
+                assert rows[i]['int_col'] == 42, f"Expected 42 for {label}, got {rows[i]['int_col']}"
+            else:
+                assert rows[i]['int_col'] is None, f"Expected NULL for {label}, got {rows[i]['int_col']}"
+
+        # Extra validation: test with explicit casting to ensure handler works
+        tx.execute('INSERT INTO nan_test (int_col) VALUES (%s::integer)', float('nan'))
+
+        # This should also be NULL
+        result = tx.select_scalar('SELECT int_col FROM nan_test WHERE id = %s', len(test_values) + 1)
+        assert result is None, 'Explicitly cast NaN should be NULL'
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

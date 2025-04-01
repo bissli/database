@@ -109,8 +109,8 @@ def test_sqlite_numpy_adapters(mocker):
 
 def test_postgres_custom_dumpers():
     """Test custom dumpers for special value handling.
-    
-    Verifies that the PostgreSQL CustomFloatDumper correctly handles 
+
+    Verifies that the PostgreSQL CustomFloatDumper correctly handles
     special values like NaN by converting them to NULL.
     """
     # Import the custom dumpers
@@ -118,14 +118,15 @@ def test_postgres_custom_dumpers():
     from psycopg.types.numeric import FloatDumper
     assert issubclass(CustomFloatDumper, FloatDumper)
 
-    # Test NaN value handling
+    # Test NaN value handling (both NumPy and Python float NaN)
     assert TypeConverter.convert_value(np.float64('nan')) is None
+    assert TypeConverter.convert_value(float('nan')) is None
 
 
 def test_sqlite_datetime_adapters():
     """Test datetime adapters for SQLite.
-    
-    Verifies that date and datetime objects are correctly 
+
+    Verifies that date and datetime objects are correctly
     converted to ISO format strings for SQLite storage.
     """
     # Test date adapter
@@ -141,8 +142,8 @@ def test_sqlite_datetime_adapters():
 
 def test_conversion_consistency():
     """Test that values converted via different paths produce consistent results.
-    
-    Verifies that different data types (NumPy, Pandas, decimal) are 
+
+    Verifies that different data types (NumPy, Pandas, decimal) are
     consistently converted to their appropriate Python equivalents,
     and edge cases like NaT, NA values are properly handled as NULL.
     """
@@ -156,6 +157,11 @@ def test_conversion_consistency():
     np_nat_value = np.datetime64('NaT')
     python_nat_value = TypeConverter.convert_value(np_nat_value)
     assert python_nat_value is None
+
+    # Test Python built-in float NaN conversion
+    py_nan_value = float('nan')
+    python_nan_value = TypeConverter.convert_value(py_nan_value)
+    assert python_nan_value is None
 
     # Test NumPy datetime64 conversion (valid date)
     np_date_value = np.datetime64('2023-01-15')
