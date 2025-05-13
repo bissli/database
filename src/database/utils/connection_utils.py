@@ -46,7 +46,11 @@ def isconnection(obj):
     if hasattr(obj, 'driver_connection'):
         return True
     # Otherwise check if it has a recognized dialect
-    return get_dialect_name(obj) is not None
+    try:
+        get_dialect_name(obj)
+        return True
+    except:
+        return False
 
 
 def create_url_from_options(options, url_creator=sa.URL.create):
@@ -299,6 +303,6 @@ def get_dialect_name(obj):
         if 'sqlite3.Connection' in obj_type:
             return 'sqlite'
 
-        raise AttributeError('Unable to determine connection type in `get_dialect_name`') 
+        raise AttributeError(f'Unable to determine connection type for {obj_type} in `get_dialect_name`')
 
     return _get_dialect_name_internal(obj)
