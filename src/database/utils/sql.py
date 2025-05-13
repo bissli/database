@@ -133,6 +133,8 @@ def standardize_placeholders(sql, dialect='postgresql'):
     >>> standardize_placeholders("SELECT * FROM users WHERE name = 'what?'")
     "SELECT * FROM users WHERE name = 'what?'"
     """
+    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
+
     if not sql:
         return sql
 
@@ -255,6 +257,8 @@ def handle_in_clause_params(sql, args, dialect='postgresql'):
     >>> handle_in_clause_params("SELECT * FROM users", [])
     ('SELECT * FROM users', [])
     """
+    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
+
     # Quick exit if nothing to process
     if not args or not sql or ' in ' not in sql.lower():
         return sql, args
@@ -330,12 +334,15 @@ def quote_identifier(identifier, dialect='postgresql'):
           ...
         ValueError: Unknown database type: unknown
     """
+    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
+
     if dialect in {'postgresql', 'sqlite'}:
         return '"' + identifier.replace('"', '""') + '"'
-    elif dialect == 'mssql':
+
+    if dialect == 'mssql':
         return '[' + identifier.replace(']', ']]') + ']'
-    else:
-        raise ValueError(f'Unknown database type: {dialect}')
+
+    raise ValueError(f'Unknown dialect: {dialect}')
 
 
 def get_param_limit_for_db(dialect='postgresql'):
@@ -348,6 +355,8 @@ def get_param_limit_for_db(dialect='postgresql'):
     Returns
         int: Parameter limit for the database
     """
+    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
+
     if dialect == 'postgresql':
         return 65000  # PostgreSQL limit is 65535, using 65000 for safety
     if dialect == 'sqlite':
@@ -799,6 +808,8 @@ def prepare_sql_params_for_execution(sql, args, dialect='postgresql'):
     Returns
         Tuple of (processed_sql, processed_args)
     """
+    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
+
     # Check for named parameters with IN clauses before standard processing
     if ' in ' in sql.lower():
         if isinstance(args, dict):
