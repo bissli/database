@@ -315,7 +315,7 @@ class PostgresqlCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(self, sql: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for PostgreSQL."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
@@ -325,7 +325,7 @@ class PostgresqlCursor(AbstractCursor):
             return 0
 
         try:
-            self.dbapi_cursor.executemany(operation, seq_of_parameters)
+            self.dbapi_cursor.executemany(sql, seq_of_parameters)
             logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
         finally:
             end = time.time()
@@ -373,7 +373,8 @@ class MssqlCursor(AbstractCursor):
         self._sql = sql
         self._original_sql = sql
 
-        sql = standardize_placeholders(self.connwrapper, sql)
+        dialect = get_dialect_name(self.connwrapper)
+        sql = standardize_placeholders(sql, dialect=dialect)
 
         if args and 'EXEC ' in sql.upper() and '@' in sql:
             self._execute_stored_procedure(sql, args)
@@ -448,7 +449,7 @@ class MssqlCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(self, sql: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for SQL Server."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
@@ -458,7 +459,8 @@ class MssqlCursor(AbstractCursor):
             return 0
 
         try:
-            modified_sql = standardize_placeholders(self.connwrapper, operation)
+            dialect = get_dialect_name(self.connwrapper)
+            modified_sql = standardize_placeholders(sql, dialect=dialect)
             modified_sql = ensure_identity_column_named(modified_sql)
             self.dbapi_cursor.executemany(modified_sql, seq_of_parameters)
         finally:

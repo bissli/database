@@ -12,7 +12,7 @@ from database.adapters.column_info import Column
 from database.adapters.structure import RowStructureAdapter
 from database.core.connection import ConnectionWrapper
 from database.options import use_iterdict_data_loader
-from database.utils.connection_utils import check_connection
+from database.utils.connection_utils import check_connection, get_dialect_name
 from database.utils.query_utils import extract_column_info, load_data
 from database.utils.query_utils import process_multiple_result_sets
 from database.utils.sql import handle_query_params
@@ -52,7 +52,8 @@ def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs) -> ResultSet |
         or list of DataFrames (when return_all=True)
     """
     # Process parameters one final time right before execution
-    processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, cn)
+    dialect = get_dialect_name(cn)
+    processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
 
     cursor = cn.cursor()
 

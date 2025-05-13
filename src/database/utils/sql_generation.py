@@ -8,7 +8,7 @@ from database.utils.sql import quote_identifier
 logger = logging.getLogger(__name__)
 
 
-def build_select_sql(db_type, table, columns=None, where=None, order_by=None, limit=None):
+def build_select_sql(table, dialect, columns=None, where=None, order_by=None, limit=None):
     """Generate a SELECT statement for the specified database type.
 
     Args:
@@ -22,17 +22,17 @@ def build_select_sql(db_type, table, columns=None, where=None, order_by=None, li
     Returns
         SQL query string
     """
-    quoted_table = quote_identifier(db_type, table)
+    quoted_table = quote_identifier(table, dialect)
 
     # Handle columns
     if columns:
-        quoted_cols = ', '.join(quote_identifier(db_type, col) for col in columns)
+        quoted_cols = ', '.join(quote_identifier(col, dialect) for col in columns)
         select_clause = f'SELECT {quoted_cols}'
     else:
         select_clause = 'SELECT *'
 
     # Handle LIMIT/TOP
-    if limit is not None and db_type == 'mssql':
+    if limit is not None and dialect == 'mssql':
         select_clause = f'SELECT TOP {limit} ' + select_clause[7:]
         # SQLite and PostgreSQL use LIMIT at the end
 
@@ -48,13 +48,13 @@ def build_select_sql(db_type, table, columns=None, where=None, order_by=None, li
         sql += f' ORDER BY {order_by}'
 
     # Add LIMIT for PostgreSQL and SQLite
-    if limit is not None and db_type != 'mssql':
+    if limit is not None and dialect != 'mssql':
         sql += f' LIMIT {limit}'
 
     return sql
 
 
-def build_insert_sql(db_type, table, columns):
+def build_insert_sql(dialect, table, columns):
     """Generate an INSERT statement.
 
     Args:
@@ -65,11 +65,11 @@ def build_insert_sql(db_type, table, columns):
     Returns
         SQL query string with placeholders
     """
-    quoted_table = quote_identifier(db_type, table)
-    quoted_columns = ', '.join(quote_identifier(db_type, col) for col in columns)
+    quoted_table = quote_identifier(table, dialect)
+    quoted_columns = ', '.join(quote_identifier(col, dialect) for col in columns)
 
     # Create placeholders based on database type
-    if db_type == 'postgresql':
+    if dialect == 'postgresql':
         placeholders = ', '.join(['%s'] * len(columns))
     else:  # mssql, sqlite
         placeholders = ', '.join(['?'] * len(columns))

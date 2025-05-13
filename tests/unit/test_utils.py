@@ -6,8 +6,7 @@ import logging
 
 import pytest
 from database.operations.upsert import _build_insert_sql, _build_upsert_sql
-from database.utils.connection_utils import get_dialect_name
-from database.utils.connection_utils import isconnection
+from database.utils.connection_utils import get_dialect_name, isconnection
 from database.utils.sql import quote_identifier, standardize_placeholders
 
 logger = logging.getLogger(__name__)
@@ -94,26 +93,26 @@ def _create_mock_transaction(mocker, connection):
 class TestDatabaseUtilities:
     """Tests for general database utility functions"""
 
-    @pytest.mark.parametrize(('db_type', 'identifier', 'expected'), [
+    @pytest.mark.parametrize(('identifier', 'dialect', 'expected'), [
         # PostgreSQL
-        ('postgresql', 'table_name', '"table_name"'),
-        ('postgresql', 'column.with.dots', '"column.with.dots"'),
-        ('postgresql', 'table"quoted', '"table""quoted"'),
+        ('table_name', 'postgresql', '"table_name"'),
+        ('column.with.dots', 'postgresql', '"column.with.dots"'),
+        ('table"quoted', 'postgresql', '"table""quoted"'),
         # SQLite
-        ('sqlite', 'table_name', '"table_name"'),
-        ('sqlite', 'table"quoted', '"table""quoted"'),
+        ('table_name', 'sqlite', '"table_name"'),
+        ('table"quoted', 'sqlite', '"table""quoted"'),
         # SQL Server
-        ('mssql', 'table_name', '[table_name]'),
-        ('mssql', 'table]with]brackets', '[table]]with]]brackets]'),
+        ('table_name', 'mssql', '[table_name]'),
+        ('table]with]brackets', 'mssql', '[table]]with]]brackets]'),
     ])
-    def test_quote_identifier(self, db_type, identifier, expected):
+    def test_quote_identifier(self, identifier, dialect, expected):
         """Test identifier quoting for all database types"""
-        assert quote_identifier(db_type, identifier) == expected
+        assert quote_identifier(identifier, dialect) == expected
 
     def test_quote_identifier_error(self):
         """Test error handling in quote_identifier"""
         with pytest.raises(ValueError, match='Unknown database type'):
-            quote_identifier('unknown', 'table_name')
+            quote_identifier('table_name', 'unknown')
 
     def test_connection_detection_with_postgres(self, mocker):
         """Test PostgreSQL connection type detection"""

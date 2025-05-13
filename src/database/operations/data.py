@@ -75,15 +75,15 @@ def insert_rows(cn, table, rows):
     rows = tuple(filtered_rows)
 
     # Determine database type for quoting
-    db_type = get_dialect_name(cn) or 'unknown'
+    dialect = get_dialect_name(cn)
 
     # Prepare the SQL INSERT statement
     cols = tuple(rows[0].keys())
 
     # Handle unknown database type by using a safe fallback (no quoting)
     try:
-        quoted_table = quote_identifier(db_type, table)
-        quoted_cols = ','.join(quote_identifier(db_type, col) for col in cols)
+        quoted_table = quote_identifier(table, dialect)
+        quoted_cols = ','.join(quote_identifier(col, dialect) for col in cols)
     except ValueError:
         # For unknown database types, use the identifiers without quoting
         quoted_table = table

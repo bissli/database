@@ -154,7 +154,7 @@ def standardize_placeholders(sql, dialect='postgresql'):
 
 
 def handle_in_clause_params(sql, args, dialect='postgresql'):
-    """
+    r"""
     Expand list/tuple parameters for IN clauses across different database drivers.
 
     This function handles various parameter formats for SQL IN clauses:
@@ -387,8 +387,7 @@ def chunk_sql_parameters(sql, args, param_limit):
     return chunks
 
 
-def prepare_parameters_for_execution(sql: str, args: tuple,
-                                     param_limit: int, dialect='postgresql') -> list:
+def prepare_parameters_for_execution(sql: str, args: tuple, param_limit: int) -> list:
     """
     Prepare SQL parameters for execution, handling chunking if needed.
 
@@ -615,59 +614,59 @@ def handle_null_is_operators(sql, args):
 def _unwrap_nested_parameters(sql, args):
     """
     Unwrap nested parameters for multi-statement queries.
-    
+
     This function handles the case where parameters are wrapped in an extra list/tuple layer,
     which is commonly seen in multi-statement executions. It only unwraps parameters when:
     1. The SQL contains multiple statements (separated by semicolons)
     2. There's exactly one argument which is itself a sequence
     3. The number of placeholders in the SQL matches the length of the inner sequence
-    
+
     Args:
         sql: SQL query string
         args: Parameters (list, tuple, dict, or scalar)
-    
-    Returns:
+
+    Returns
         Parameters with unnecessary nesting removed if appropriate, otherwise original args
-    
-    Examples:
+
+    Examples
         Non-sequence args remain unchanged:
-        
+
     >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", "not_a_sequence")
     'not_a_sequence'
     >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", 42)
     42
     >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", None) is None
     True
-    
+
     Empty sequences remain unchanged:
-    
+
     >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", [])
     []
     >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", ())
     ()
-    
+
     Single-statement queries (no semicolon) remain unchanged:
-    
+
     >>> _unwrap_nested_parameters("SELECT * FROM users WHERE id = ?", [(1,)])
     [(1,)]
-    
+
     Multi-statement queries with multiple args remain unchanged:
-    
+
     >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [1, 2])
     [1, 2]
-    
+
     Multi-statement queries with one arg that's a string remain unchanged:
-    
+
     >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", ["not_a_sequence"])
     ['not_a_sequence']
-    
+
     Multi-statement with mismatched placeholder and parameter counts remain unchanged:
-    
+
     >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [(1, 2, 3)])
     [(1, 2, 3)]
-    
+
     Only unwraps when SQL has multiple statements, one arg is a sequence, and counts match:
-    
+
     >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [(1, 2)])
     (1, 2)
     >>> _unwrap_nested_parameters("INSERT INTO users VALUES (?, ?); SELECT ?", [('John', 25, 42)])
@@ -675,7 +674,7 @@ def _unwrap_nested_parameters(sql, args):
     """
     if args is None:
         return None
-        
+
     # Nothing to unwrap if not a sequence or empty
     if not isinstance(args, (list, tuple)) or not args:
         return args

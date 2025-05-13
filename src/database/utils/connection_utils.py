@@ -299,6 +299,6 @@ def get_dialect_name(obj):
         if 'sqlite3.Connection' in obj_type:
             return 'sqlite'
 
-        return None
+        raise AttributeError('Unable to determine connection type in `get_dialect_name`') 
 
     return _get_dialect_name_internal(obj)

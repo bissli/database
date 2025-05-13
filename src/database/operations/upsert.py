@@ -76,6 +76,8 @@ def _build_upsert_sql(
         else:
             expressions = get_db_strategy(cn).get_constraint_definition(cn, table, constraint_name)
             conflict_sql = f'on conflict {expressions}'
+        else:
+            conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
 
         # If no updates requested, do nothing
         if not (update_always or update_if_null):
@@ -84,10 +86,10 @@ def _build_upsert_sql(
         # Build update expressions
         update_exprs = []
         if update_always:
-            update_exprs.extend(f'{quote_identifier(db_type, col)} = excluded.{quote_identifier(db_type, col)}'
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
                                 for col in update_always)
         if update_if_null:
-            update_exprs.extend(f'{quote_identifier(db_type, col)} = coalesce({quoted_table}.{quote_identifier(db_type, col)}, excluded.{quote_identifier(db_type, col)})'
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = coalesce({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
                                 for col in update_if_null)
 
         update_sql = f"do update set {', '.join(update_exprs)}"
@@ -95,7 +97,7 @@ def _build_upsert_sql(
         return f'{insert_sql} {conflict_sql} {update_sql} RETURNING *'
 
     # SQLite uses INSERT ... ON CONFLICT DO UPDATE (similar to PostgreSQL)
-    elif db_type == 'sqlite':
+    elif dialect == 'sqlite':
         # build the basic insert part
         insert_sql = _build_insert_sql(cn, table, columns)
 
@@ -109,10 +111,10 @@ def _build_upsert_sql(
         # Build update expressions
         update_exprs = []
         if update_always:
-            update_exprs.extend(f'{quote_identifier(db_type, col)} = excluded.{quote_identifier(db_type, col)}'
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
                                 for col in update_always)
         if update_if_null:
-            update_exprs.extend(f'{quote_identifier(db_type, col)} = COALESCE({quoted_table}.{quote_identifier(db_type, col)}, excluded.{quote_identifier(db_type, col)})'
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = COALESCE({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
                                 for col in update_if_null)
 
         update_sql = f"do update set {', '.join(update_exprs)}"
@@ -120,18 +122,18 @@ def _build_upsert_sql(
         return f'{insert_sql} {conflict_sql} {update_sql}'
 
     # SQL Server uses MERGE INTO
-    elif db_type == 'mssql':
+    elif dialect == 'mssql':
         # For SQL Server we use MERGE statement
         placeholders = ','.join(['?'] * len(columns))
         temp_alias = 'src'
 
         # Build conditions for matching keys
         match_conditions = ' AND '.join(
-            f'target.{quote_identifier(db_type, col)} = {temp_alias}.{quote_identifier(db_type, col)}' for col in key_columns
+            f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}' for col in key_columns
         )
 
         # Build column value list for source
-        source_values = ', '.join(f'? as {quote_identifier(db_type, col)}' for col in columns)
+        source_values = ', '.join(f'? as {quote_identifier(col, dialect)}' for col in columns)
 
         # Build UPDATE statements
         update_cols = []
@@ -144,7 +146,7 @@ def _build_upsert_sql(
         update_clause = ''
         if update_cols:
             update_statements = ', '.join(
-                f'target.{quote_identifier(db_type, col)} = {temp_alias}.{quote_identifier(db_type, col)}' for col in update_cols
+                f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}' for col in update_cols
             )
             update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
         else:
@@ -153,7 +155,7 @@ def _build_upsert_sql(
 
         # Build INSERT statements
         quoted_all_columns = ', '.join(quoted_columns)
-        source_columns = ', '.join(f'{temp_alias}.{quote_identifier(db_type, col)}' for col in columns)
+        source_columns = ', '.join(f'{temp_alias}.{quote_identifier(col, dialect)}' for col in columns)
 
         # Full MERGE statement
         merge_sql = f"""
@@ -167,19 +169,38 @@ def _build_upsert_sql(
         return merge_sql
 
     else:
-        raise ValueError(f'Database type {db_type} not supported for UPSERT operations')
+        raise ValueError(f'Database type {dialect} not supported for UPSERT operations')
 
 
 def _build_insert_sql(cn, table: str, columns: tuple[str]) -> str:
-    """Builds the INSERT part of the SQL statement
-    """
-    db_type = _get_db_type_from_connection(cn)
+    """Build the INSERT part of the SQL statement.
 
-    return build_insert_sql(db_type, table, columns)
+    Parameters
+        cn: Database connection
+        table: Target table name
+        columns: Columns to include in the insert statement
+
+    Returns
+        SQL INSERT statement string
+    """
+    dialect = get_dialect_name(cn)
+    return build_insert_sql(dialect, table, columns)
 
 
 def _prepare_rows_for_upsert(cn, table, rows):
-    """Prepare and validate rows for upsert operation with case-insensitive matching"""
+    """Prepare and validate rows for upsert operation with case-insensitive matching.
+
+    Filters rows to include only valid columns that exist in the target table,
+    correcting column case to match the database's exact column case.
+
+    Parameters
+        cn: Database connection
+        table: Target table name
+        rows: Collection of row dictionaries to process
+
+    Returns
+        Tuple of filtered row dictionaries with corrected column names, or None if no valid rows
+    """
     if not rows:
         return None
 
@@ -211,7 +232,16 @@ def _prepare_rows_for_upsert(cn, table, rows):
 
 
 def _filter_update_columns(columns, update_cols, key_cols):
-    """Filter update columns to ensure they're valid using case-insensitive matching"""
+    """Filter update columns to ensure they're valid using case-insensitive matching.
+
+    Parameters
+        columns: Available column names with correct case
+        update_cols: Column names to be filtered
+        key_cols: Key column names to exclude from updates
+
+    Returns
+        List of valid update column names with database's exact case
+    """
     if not update_cols:
         return []
 
@@ -271,7 +301,19 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
     existing_rows = {}
     db_type = _get_db_type_from_connection(tx_or_cn)
 
-    quoted_table = quote_identifier(db_type, table)
+    Parameters
+        tx_or_cn: Database transaction or connection
+        table: Target table name
+        rows: Rows to check for existing matches
+        key_cols: Key columns to use for matching
+
+    Returns
+        Dictionary mapping row keys to existing row data
+    """
+    existing_rows = {}
+    
+    dialect = get_dialect_name(tx_or_cn)
+    quoted_table = quote_identifier(table, dialect)
 
     # Group rows by key columns to minimize database queries
     key_groups = {}
@@ -299,9 +341,9 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
         for row_key in key_groups:
             condition_parts = []
             for j, key_col in enumerate(key_cols):
-                quoted_key_col = quote_identifier(db_type, key_col)
+                quoted_key_col = quote_identifier(key_col, dialect)
                 # Use correct placeholder based on database
-                placeholder = '?' if db_type == 'mssql' else '%s'
+                placeholder = '?' if dialect == 'mssql' else '%s'
                 condition_parts.append(f'{quoted_key_col} = {placeholder}')
                 params.append(row_key[j])
 
@@ -329,9 +371,9 @@ def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
             for row_key in batch_keys:
                 condition_parts = []
                 for j, key_col in enumerate(key_cols):
-                    quoted_key_col = quote_identifier(db_type, key_col)
+                    quoted_key_col = quote_identifier(key_col, dialect)
                     # Use correct placeholder based on database
-                    placeholder = '?' if db_type == 'mssql' else '%s'
+                    placeholder = '?' if dialect == 'mssql' else '%s'
                     condition_parts.append(f'{quoted_key_col} = {placeholder}')
                     params.append(row_key[j])
 
@@ -362,7 +404,7 @@ def _upsert_sqlserver_with_nulls(
     """Special handling for SQL Server with NULL-preserving updates"""
 
     logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
-    db_type = 'mssql'
+    dialect = 'mssql'
 
     # First retrieve existing rows to handle COALESCE logic
     existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
@@ -387,7 +429,7 @@ def _upsert_sqlserver_with_nulls(
         key_columns=key_cols,
         update_always=update_always,  # Only handle "always update" columns
         update_if_null=[],  # No special NULL handling needed anymore since we modified the rows
-        db_type=db_type
+        dialect=dialect
     )
 
     params = [[row[col] for col in columns] for row in rows]

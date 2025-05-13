@@ -43,9 +43,10 @@ def execute(cn: object, sql: str, *args: object) -> int:
             cursor.execute(sql)
             logger.debug(f'Executed simple SELECT query directly: {sql[:60]}...')
         else:
-            processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, cn)
+            dialect = get_dialect_name(cn)
+            processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
 
-            if get_dialect_name(cn) == 'mssql':
+            if dialect == 'mssql':
                 processed_sql, processed_args = prepare_sqlserver_params(processed_sql, processed_args)
 
             cursor.execute(processed_sql, processed_args)

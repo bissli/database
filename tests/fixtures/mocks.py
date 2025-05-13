@@ -828,9 +828,8 @@ def _setup_schema_operations_tracking(mock_conn):
     strategy_mock.get_columns.side_effect = mock_get_columns
 
     # Configure quote_identifier
-    def mock_quote_identifier(identifier):
-        db_type = mock_conn.driver_type
-        if db_type in {'postgresql', 'sqlite'}:
+    def mock_quote_identifier(identifier, dialect):
+        if dialect in {'postgresql', 'sqlite'}:
             return f'"{identifier}"'
         else:  # sqlserver
             return f'[{identifier}]'
@@ -1170,7 +1169,7 @@ def mock_postgres_conn():
     # SQL handling patches
     patchers.append(patch(
         'database.utils.sql.quote_identifier',
-        side_effect=lambda db_type, ident: f'"{ident}"'
+        side_effect=lambda ident, dialect: f'"{ident}"'
     ))
     patchers.append(patch(
         'database.utils.sql.standardize_placeholders',
@@ -1449,7 +1448,7 @@ def mock_sqlserver_conn():
     # SQL handling patches
     patchers.append(patch(
         'database.utils.sql.quote_identifier',
-        side_effect=lambda db_type, ident: f"[{ident.replace(']', ']]')}]"
+        side_effect=lambda ident, dialect: f"[{ident.replace(']', ']]')}]"
     ))
     patchers.append(patch(
         'database.utils.sql.standardize_placeholders',
