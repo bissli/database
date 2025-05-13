@@ -788,7 +788,7 @@ def test_upsert_with_constraint_name(psql_docker, conn):
         conn,
         'test_constraint',
         rows,
-        constraint_name='test_unique_constraint',
+        update_cols_key='test_unique_constraint',
         update_cols_always=['value']
     )
 
@@ -803,7 +803,7 @@ def test_upsert_with_constraint_name(psql_docker, conn):
         conn,
         'test_constraint',
         rows,
-        constraint_name='test_unique_constraint',
+        update_cols_key='test_unique_constraint',
         update_cols_always=['value']
     )
 
@@ -908,7 +908,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [same_constraint_row],
-        constraint_name='complex_unique_index',
+        update_cols_key='complex_unique_index',
         update_cols_always=['last_updated']  # Only update the timestamp
     )
 
@@ -933,7 +933,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [different_value_row],
-        constraint_name='complex_unique_index',
+        update_cols_key='complex_unique_index',
         update_cols_always=['last_updated']  # Trying to update timestamp, but should insert instead
     )
 
@@ -962,7 +962,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [update_second_row],
-        constraint_name='complex_unique_index',
+        update_cols_key='complex_unique_index',
         update_cols_always=['last_updated']  # Only update timestamp
     )
 
@@ -1009,7 +1009,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_same_constraint],
-        constraint_name=constraint_name,
+        update_cols_key=constraint_name, 
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
 
@@ -1033,7 +1033,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [different_value_row],
-        constraint_name=constraint_name,
+        update_cols_key=constraint_name,  
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
 
@@ -1078,7 +1078,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_specific_row],
-        constraint_name=constraint_name,
+        update_cols_key=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
 
@@ -1101,7 +1101,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [null_value_row],
-        constraint_name=constraint_name,
+        update_cols_key=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
 
@@ -1121,7 +1121,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_null_row],
-        constraint_name=constraint_name,
+        update_cols_key=constraint_name, 
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
 

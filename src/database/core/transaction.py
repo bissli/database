@@ -128,7 +128,7 @@ class Transaction:
         """Execute SELECT query or procedure within transaction context"""
         cursor = self.cursor
 
-        dialect = get_dialect_name(self.connection) 
+        dialect = get_dialect_name(self.connection)
         processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
 
         cursor.execute(processed_sql, processed_args)

@@ -358,12 +358,12 @@ def get_param_limit_for_db(dialect='postgresql'):
     assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
 
     if dialect == 'postgresql':
-        return 65000  # PostgreSQL limit is 65535, using 65000 for safety
+        return 32000
     if dialect == 'sqlite':
-        return 900    # SQLite default is 999, using 900 for safety
+        return 900
     if dialect == 'mssql':
-        return 2000   # SQL Server limit is 2100, using 2000 for safety
-    return 900    # Conservative default for unknown databases
+        return 2000
+    return 900
 
 
 def chunk_sql_parameters(sql, args, param_limit):
