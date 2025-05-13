@@ -3,12 +3,10 @@ import database as db
 
 def test_upsert_basic(sqlite_conn):
     """Test basic upsert functionality"""
-    # Insert new rows
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
     assert row_count == 2, 'upsert should return 2 for new rows'
 
-    # Verify rows were inserted
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
@@ -17,11 +15,9 @@ def test_upsert_basic(sqlite_conn):
     assert result[1]['name'] == 'Wallace'
     assert result[1]['value'] == 92
 
-    # Update existing rows
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
 
-    # Verify rows were updated
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
@@ -31,18 +27,14 @@ def test_upsert_basic(sqlite_conn):
 
 def test_upsert_ifnull(sqlite_conn):
     """Test upsert with update_cols_ifnull option"""
-    # First insert a row
     db.insert(sqlite_conn, 'insert into test_table (name, value) values (?, ?)', 'UpsertNull', 100)
 
-    # Try to update with update_cols_ifnull - should not update existing value
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_ifnull=['value'])
+    db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_ifnull=['value'])
 
-    # Verify value was not updated
     result = db.select_scalar(sqlite_conn, 'select value from test_table where name = ?', 'UpsertNull')
     assert result == 100, 'Value should not be updated when using update_cols_ifnull'
 
-    # Create a new test table that allows nulls for this specific test
     db.execute(sqlite_conn, """
     CREATE TEMPORARY TABLE test_nullable (
         name VARCHAR(50) PRIMARY KEY,
@@ -50,17 +42,13 @@ def test_upsert_ifnull(sqlite_conn):
     )
     """)
 
-    # Insert initial data
     db.insert(sqlite_conn, 'INSERT INTO test_nullable (name, value) VALUES (?, ?)', 'UpsertNull', 100)
 
-    # Now set the value to NULL - this works because the new table allows nulls
     db.execute(sqlite_conn, 'UPDATE test_nullable SET value = NULL WHERE name = ?', 'UpsertNull')
 
-    # Try to update with update_cols_ifnull again - now it should update
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sqlite_conn, 'test_nullable', rows, update_cols_ifnull=['value'])
+    db.upsert_rows(sqlite_conn, 'test_nullable', rows, use_primary_key=True, update_cols_ifnull=['value'])
 
-    # Verify value was updated
     result = db.select_scalar(sqlite_conn, 'SELECT value FROM test_nullable WHERE name = ?', 'UpsertNull')
     assert result == 200, 'Value should be updated when target is NULL'
 
@@ -80,7 +68,7 @@ def test_upsert_mixed_operations(sqlite_conn):
         {'name': 'NewPerson2', 'value': 600}   # New - insert
     ]
 
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
     assert row_count == 3
 
     # Verify results
@@ -125,11 +113,11 @@ CREATE TEMPORARY TABLE test_rowid_table (
 
     # Insert a new row using upsert
     new_rows = [{'name': 'Third', 'value': 300}]
-    db.upsert_rows(sqlite_conn, 'test_rowid_table', new_rows, update_cols_key=['name'])
+    db.upsert_rows(sqlite_conn, 'test_rowid_table', new_rows, use_primary_key=True)
 
     # Update an existing row
     update_rows = [{'name': 'First', 'value': 150}]
-    db.upsert_rows(sqlite_conn, 'test_rowid_table', update_rows, update_cols_key=['name'], update_cols_always=['value'])
+    db.upsert_rows(sqlite_conn, 'test_rowid_table', update_rows, use_primary_key=True, update_cols_always=['value'])
 
     # Verify the rowid is preserved after update
     first_rowid_after = db.select_scalar(sqlite_conn, 'SELECT rowid FROM test_rowid_table WHERE name = ?', 'First')
@@ -163,13 +151,9 @@ def test_upsert_large_batch(sqlite_conn):
     )
     """)
 
-    # For SQLite, we don't need as many rows as PostgreSQL to test parameter limits
-    # SQLite has a parameter limit of 999 by default
-    # With 2 parameters per row (id and value), we need 500 rows to approach it
     start_time = time.time()
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 501)]
 
-    # Insert the rows
     batch_insert_time = time.time()
     row_count = db.upsert_rows(sqlite_conn, 'test_large_batch', rows)
     insert_end_time = time.time()
@@ -192,7 +176,7 @@ def test_upsert_large_batch(sqlite_conn):
     # Update the rows (this will use UPSERT with batching)
     update_start_time = time.time()
     update_count = db.upsert_rows(sqlite_conn, 'test_large_batch', update_rows,
-                                  update_cols_key=['id'],
+                                  use_primary_key=True,
                                   update_cols_always=['value'])
     update_end_time = time.time()
 
@@ -256,7 +240,7 @@ def test_upsert_no_primary_keys(sqlite_conn):
     ]
 
     # Without primary keys, all rows should be inserted
-    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows)
+    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, use_primary_key=True)
     assert row_count == 2, 'upsert should insert 2 rows'
 
     # Verify rows were inserted
@@ -273,7 +257,7 @@ def test_upsert_no_primary_keys(sqlite_conn):
         {'name': 'NoPK2', 'value': 201}
     ]
 
-    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, use_primary_key=True, update_cols_always=['value'])
     assert row_count == 2, 'upsert should insert 2 new rows'
 
     # We should now have 4 rows

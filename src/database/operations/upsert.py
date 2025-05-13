@@ -1,10 +1,10 @@
-"""
-Upsert operations for database tables.
+"""Upsert operations for database tables.
 
 This module provides functionality to insert or update rows in database tables
 based on constraint violations, with configurable update behavior for existing rows.
 """
 import logging
+from typing import Any
 
 from database.adapters.structure import RowStructureAdapter
 from database.operations.data import insert_rows
@@ -22,485 +22,17 @@ from libb import is_null
 logger = logging.getLogger(__name__)
 
 
-def filter_columns_by_table(cn, table: str, input_dict: dict) -> dict:
-    """Filter dictionary keys to match valid table columns using case-insensitive matching.
-
-    Takes a database connection, table name, and an input dictionary, and returns a new
-    dictionary with only keys that match column names in the table (case-insensitive),
-    with the keys converted to the database's exact column case.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        input_dict: Dictionary with keys to filter
-
-    Returns
-        Dictionary with only valid keys, using database's exact column case
-    """
-    # Get table columns with exact case
-    table_columns = get_table_columns(cn, table)
-
-    # Create case mapping for case-insensitive lookup
-    case_map = {col.lower(): col for col in table_columns}
-
-    # Filter dictionary keys to match valid columns
-    result = {}
-    for key, val in input_dict.items():
-        # Case-insensitive lookup of the column name
-        exact_key = case_map.get(key.lower())
-        if exact_key:
-            result[exact_key] = val
-
-    return result
-
-
-def _build_upsert_sql(
-    cn,
-    table: str,
-    columns: tuple[str],
-    key_columns_or_constraint: list[str] | str = None,
-    update_always: list[str] = None,
-    update_if_null: list[str] = None,
-    dialect: str = 'postgresql',
-) -> str:
-    """Build an UPSERT SQL statement for the specified database driver.
-
-    Creates database-specific SQL for upsert operations with configurable conflict
-    resolution rules, handling differences between PostgreSQL, SQLite, and SQL Server.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        columns: All columns to insert
-        key_columns_or_constraint: Columns that form conflict constraint or constraint name (PostgreSQL only)
-        update_always: Columns that should always be updated on conflict
-        update_if_null: Columns that should only be updated if target is null
-        : Database type ('postgresql', 'sqlite', 'mssql')
-
-    Returns
-        SQL statement string for the upsert operation
-
-    Raises
-        ValueError: If using a constraint name with non-PostgreSQL database
-                   or if update columns are not in column list
-    """
-    # Determine if we're using constraint name or columns
-    constraint_name = None
-    key_columns = None
-
-    if isinstance(key_columns_or_constraint, str):
-        constraint_name = key_columns_or_constraint
-        if dialect != 'postgresql':
-            raise ValueError(f'Constraint name is only supported for PostgreSQL, not {dialect}')
-    else:
-        key_columns = key_columns_or_constraint
-
-    # Fall back to regular insert if no conflict detection is requested
-    if not key_columns and not constraint_name:
-        return _build_insert_sql(cn, table, columns)
-
-    columns_lower = {col.lower() for col in columns}
-
-    # Filter update columns to only include those that exist in the main columns list
-    if update_always:
-        update_always = [col for col in update_always if col.lower() in columns_lower]
-
-    if update_if_null:
-        update_if_null = [col for col in update_if_null if col.lower() in columns_lower]
-
-    # Quote table name and all column names
-    quoted_table = quote_identifier(table, dialect)
-    quoted_columns = [quote_identifier(col, dialect) for col in columns]
-    quoted_key_columns = [quote_identifier(col, dialect) for col in key_columns] if key_columns else []
-
-    # PostgreSQL uses INSERT ... ON CONFLICT DO UPDATE
-    if dialect == 'postgresql':
-        insert_sql = _build_insert_sql(cn, table, columns)
-
-        if constraint_name:
-            expressions = get_db_strategy(cn).get_constraint_definition(cn, table, constraint_name)
-            conflict_sql = f'on conflict {expressions}'
-        else:
-            conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
-
-        # If no updates requested, do nothing
-        if not (update_always or update_if_null):
-            return f'{insert_sql} {conflict_sql} do nothing RETURNING *'
-
-        # Build update expressions
-        update_exprs = []
-        if update_always:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
-                                for col in update_always)
-        if update_if_null:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = coalesce({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
-                                for col in update_if_null)
-
-        update_sql = f"do update set {', '.join(update_exprs)}"
-
-        return f'{insert_sql} {conflict_sql} {update_sql} RETURNING *'
-
-    # SQLite uses INSERT ... ON CONFLICT DO UPDATE (similar to PostgreSQL)
-    elif dialect == 'sqlite':
-        # build the basic insert part
-        insert_sql = _build_insert_sql(cn, table, columns)
-
-        # build the on conflict clause
-        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
-
-        # If no updates requested, do nothing
-        if not (update_always or update_if_null):
-            return f'{insert_sql} {conflict_sql} do nothing'
-
-        # Build update expressions
-        update_exprs = []
-        if update_always:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
-                                for col in update_always)
-        if update_if_null:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = COALESCE({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
-                                for col in update_if_null)
-
-        update_sql = f"do update set {', '.join(update_exprs)}"
-
-        return f'{insert_sql} {conflict_sql} {update_sql}'
-
-    # SQL Server uses MERGE INTO
-    elif dialect == 'mssql':
-        # For SQL Server we use MERGE statement
-        placeholders = ','.join(['?'] * len(columns))
-        temp_alias = 'src'
-
-        # Build conditions for matching keys
-        match_conditions = ' AND '.join(
-            f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}' for col in key_columns
-        )
-
-        # Build column value list for source
-        source_values = ', '.join(f'? as {quote_identifier(col, dialect)}' for col in columns)
-
-        # Build UPDATE statements
-        update_cols = []
-        if update_always:
-            update_cols.extend(update_always)
-        if update_if_null:
-            # For SQL Server, handle COALESCE in the driver logic instead
-            update_cols.extend(update_if_null)
-
-        update_clause = ''
-        if update_cols:
-            update_statements = ', '.join(
-                f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}' for col in update_cols
-            )
-            update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
-        else:
-            # If no updates but we have keys, just match without updating
-            update_clause = 'WHEN MATCHED THEN DO NOTHING'
-
-        # Build INSERT statements
-        quoted_all_columns = ', '.join(quoted_columns)
-        source_columns = ', '.join(f'{temp_alias}.{quote_identifier(col, dialect)}' for col in columns)
-
-        # Full MERGE statement
-        merge_sql = f"""
-        MERGE INTO {quoted_table} AS target
-        USING (SELECT {source_values}) AS {temp_alias}
-        ON {match_conditions}
-        {update_clause}
-        WHEN NOT MATCHED THEN INSERT ({quoted_all_columns}) VALUES ({source_columns});
-        """
-
-        return merge_sql
-
-    else:
-        raise ValueError(f'Database type {dialect} not supported for UPSERT operations')
-
-
-def _build_insert_sql(cn, table: str, columns: tuple[str]) -> str:
-    """Build the INSERT part of the SQL statement.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        columns: Columns to include in the insert statement
-
-    Returns
-        SQL INSERT statement string
-    """
-    dialect = get_dialect_name(cn)
-    return build_insert_sql(dialect, table, columns)
-
-
-def _prepare_rows_for_upsert(cn, table, rows):
-    """Prepare and validate rows for upsert operation with case-insensitive matching.
-
-    Filters rows to include only valid columns that exist in the target table,
-    correcting column case to match the database's exact column case.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        rows: Collection of row dictionaries to process
-
-    Returns
-        Tuple of filtered row dictionaries with corrected column names, or None if no valid rows
-    """
-    if not rows:
-        return None
-
-    # Filter rows - keep only valid columns with database's exact column case
-    filtered_rows = []
-    for row in rows:
-        corrected_row = filter_columns_by_table(cn, table, row)
-
-        # Only include rows that have at least one valid column
-        if corrected_row:
-            filtered_rows.append(corrected_row)
-
-    if not filtered_rows:
-        logger.warning(f'No valid columns found for {table} after filtering')
-        return None
-
-    return tuple(filtered_rows)
-
-
-def _execute_standard_upsert(
-    cn,
-    table,
-    rows,
-    columns,
-    key_cols_or_constraint,
-    update_always,
-    update_ifnull,
-    dialect,
-):
-    """Execute standard upsert operation for supported databases using executemany.
-
-    Handles the execution of upsert operations for PostgreSQL, SQLite, and SQL Server,
-    automatically batching rows to stay within database parameter limits.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        rows: Rows to insert/update
-        columns: Column names in correct case
-        key_cols_or_constraint: Key columns list or constraint name
-        update_always: Columns to always update on conflict
-        update_ifnull: Columns to update only if target value is null
-        dialect: Database type identifier
-
-    Returns
-        Number of rows affected by the operation
-    """
-
-    sql = _build_upsert_sql(
-        cn=cn,
-        table=table,
-        columns=columns,
-        key_columns_or_constraint=key_cols_or_constraint,
-        update_always=update_always,
-        update_if_null=update_ifnull,
-        dialect=dialect
-    )
-
-    param_limit = get_param_limit_for_db(dialect)
-    max_rows_per_batch = max(1, param_limit // max(1, len(columns)))
-
-    if dialect == 'postgresql' and len(columns) > 10:
-        max_rows_per_batch = min(max_rows_per_batch, 1000)
-
-    logger.debug(f'Upserting {len(rows)} rows in batches of max {max_rows_per_batch} rows')
-
-    # Execute in batches
-    total_affected = 0
-    cursor = cn.cursor()
-
-    for batch_idx in range(0, len(rows), max_rows_per_batch):
-        batch_rows = rows[batch_idx:batch_idx + max_rows_per_batch]
-        params = [[row[col] for col in columns] for row in batch_rows]
-
-        rc = cursor.executemany(sql, params)
-
-        if isinstance(rc, int):
-            total_affected += rc
-            if rc != len(batch_rows):
-                logger.debug(f'Batch {batch_idx//max_rows_per_batch+1}: {len(batch_rows) - rc} rows skipped')
-        else:
-            # Some drivers don't return row count
-            logger.debug(f'Batch {batch_idx//max_rows_per_batch+1}: unknown count affected')
-
-    return total_affected
-
-
-def _fetch_existing_rows(tx_or_cn, table, rows, key_cols):
-    """Fetch existing rows for a set of key values - optimized for batch fetching.
-
-    Retrieves existing rows from the database using an efficient batching strategy
-    to minimize database queries while staying within parameter limits.
-
-    Parameters
-        tx_or_cn: Database transaction or connection
-        table: Target table name
-        rows: Rows to check for existing matches
-        key_cols: Key columns to use for matching
-
-    Returns
-        Dictionary mapping row keys to existing row data
-    """
-    existing_rows = {}
-
-    dialect = get_dialect_name(tx_or_cn)
-    quoted_table = quote_identifier(table, dialect)
-
-    # Group rows by key columns to minimize database queries
-    key_groups = {}
-    for row in rows:
-        row_key = tuple(row[key] for key in key_cols)
-        key_groups.setdefault(row_key, True)
-
-    # Handle empty key_cols case
-    if not key_cols:
-        logger.warning('No key columns specified for fetching existing rows')
-        return {}
-
-    # Calculate a reasonable parameter limit (accounting for complex queries)
-    safe_param_limit = max(50, get_param_limit_for_db(dialect) // 2)
-
-    # Each key will consume key_cols number of parameters
-    max_keys_per_query = max(1, safe_param_limit // len(key_cols))
-
-    # Handle cases where we can batch queries
-    if len(key_groups) <= max_keys_per_query:
-        # Build WHERE clause for fetching all needed rows at once
-        where_conditions = []
-        params = []
-
-        for row_key in key_groups:
-            condition_parts = []
-            for j, key_col in enumerate(key_cols):
-                quoted_key_col = quote_identifier(key_col, dialect)
-                # Use correct placeholder based on database
-                placeholder = '?' if dialect == 'mssql' else '%s'
-                condition_parts.append(f'{quoted_key_col} = {placeholder}')
-                params.append(row_key[j])
-
-            where_conditions.append(f"({' AND '.join(condition_parts)})")
-
-        if where_conditions:
-            where_clause = ' OR '.join(where_conditions)
-            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
-
-            # Fetch all matching rows at once
-            result = select(tx_or_cn, sql, *params)
-            for row in result:
-                adapter = RowStructureAdapter.create(tx_or_cn, row)
-                row_key = tuple(adapter.get_value(key) for key in key_cols)
-                existing_rows[row_key] = adapter.to_dict()
-    else:
-        # For very large datasets, process in batches to avoid parameter limits
-        keys_list = list(key_groups.keys())
-        for batch_idx in range(0, len(keys_list), max_keys_per_query):
-            batch_keys = keys_list[batch_idx:batch_idx+max_keys_per_query]
-
-            where_conditions = []
-            params = []
-
-            for row_key in batch_keys:
-                condition_parts = []
-                for j, key_col in enumerate(key_cols):
-                    quoted_key_col = quote_identifier(key_col, dialect)
-                    # Use correct placeholder based on database
-                    placeholder = '?' if dialect == 'mssql' else '%s'
-                    condition_parts.append(f'{quoted_key_col} = {placeholder}')
-                    params.append(row_key[j])
-
-                where_conditions.append(f"({' AND '.join(condition_parts)})")
-
-            where_clause = ' OR '.join(where_conditions)
-            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
-
-            # Fetch batch of rows
-            result = select(tx_or_cn, sql, *params)
-            for row in result:
-                adapter = RowStructureAdapter.create(tx_or_cn, row)
-                row_key = tuple(adapter.get_value(key) for key in key_cols)
-                existing_rows[row_key] = adapter.to_dict()
-
-    return existing_rows
-
-
-def _upsert_sqlserver_with_nulls(
-    cn,
-    table,
-    rows,
-    columns,
-    key_cols,
-    update_always,
-    update_ifnull,
-):
-    """Special handling for SQL Server with NULL-preserving updates.
-
-    Implements a specialized approach for SQL Server to preserve existing non-null values
-    during upsert operations, which isn't directly supported by MERGE statements.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        rows: Rows to insert/update
-        columns: Column names in correct case
-        key_cols: Key columns list
-        update_always: Columns to always update on conflict
-        update_ifnull: Columns to update only if target value is null
-
-    Returns
-        Number of rows affected by the operation
-    """
-
-    logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
-    dialect = 'mssql'
-
-    # First retrieve existing rows to handle COALESCE logic
-    existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
-
-    # Apply NULL-preservation logic to each row
-    for row in rows:
-        row_key = tuple(row[key] for key in key_cols)
-        existing_row = existing_rows.get(row_key)
-
-        if existing_row:
-            # Apply update_cols_ifnull logic manually
-            for col in update_ifnull:
-                if col in existing_row and not is_null(existing_row.get(col)):
-                    # Keep existing non-NULL value
-                    row[col] = existing_row.get(col)
-
-    # Build MERGE statement with only update_always columns
-    sql = _build_upsert_sql(
-        cn=cn,
-        table=table,
-        columns=columns,
-        key_columns=key_cols,
-        update_always=update_always,  # Only handle "always update" columns
-        update_if_null=[],  # No special NULL handling needed anymore since we modified the rows
-        dialect=dialect
-    )
-
-    params = [[row[col] for col in columns] for row in rows]
-
-    cursor = cn.cursor()
-    rc = cursor.executemany(sql, params)
-
-
 def upsert_rows(
-    cn,
+    cn: Any,
     table: str,
-    rows: tuple[dict],
-    update_cols_key: list | str = None,
-    update_cols_always: list = None,
-    update_cols_ifnull: list = None,
+    rows: tuple[dict[str, Any], ...],
+    use_primary_key: bool = True,
+    constraint_name: str | None = None,
+    update_cols_always: list[str] | None = None,
+    update_cols_ifnull: list[str] | None = None,
     reset_sequence: bool = False,
-    **kw
-):
+    **kw: Any
+) -> int:
     """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows with configurable update behavior.
 
     This function handles the "upsert" pattern: INSERT new rows or UPDATE existing ones based on
@@ -516,13 +48,13 @@ def upsert_rows(
         rows: Collection of row dictionaries to insert/update. Each dictionary's keys should match
             column names in the target table. Empty input will result in no operation.
 
-        update_cols_key: Either a list of columns that form the conflict constraint (typically primary
-            or unique keys), or a string with the constraint name (PostgreSQL only).
-            If omitted:
-            - For all DBs: primary keys will be automatically determined from table schema
-            - If no keys can be determined: falls back to plain INSERT operation
-            When providing a constraint name (string), it is only supported in PostgreSQL and
-            ignored for other database types.
+        use_primary_key: Whether to use the table's primary key for conflict detection.
+            Set to True to automatically retrieve and use primary key columns.
+            Default is True, which auto-detects primary keys from the table schema.
+
+        constraint_name: Name of a specific constraint to use for conflict detection.
+            Only supported in PostgreSQL, ignored for other database types.
+            Cannot be used together with use_primary_key=True.
 
         update_cols_always: Columns that should always be updated on conflict.
             If omitted, conflicting rows won't have any columns updated.
@@ -545,52 +77,35 @@ def upsert_rows(
     Raises
         ValueError: If constraint name provided for non-PostgreSQL database
         ValueError: If using an unsupported database connection
+        ValueError: If both use_primary_key=True and constraint_name are specified
     """
     if not rows:
         logger.debug('Skipping upsert of empty rows')
         return 0
 
-    # Get database dialect
     dialect = get_dialect_name(cn)
 
-    # Check if update_cols_key is a constraint name (string)
-    constraint_name = None
-    if isinstance(update_cols_key, str):
-        constraint_name = update_cols_key
-        update_cols_key = None
-        # Check constraint name is only used with PostgreSQL
-        if dialect != 'postgresql':
-            raise ValueError(f'Constraint name is only supported for PostgreSQL, not {dialect}')
+    if use_primary_key and constraint_name:
+        raise ValueError('Cannot specify both use_primary_key=True and constraint_name')
 
-    # Warning for SQL Server implementation
-    if dialect == 'mssql':
-        logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
+    if constraint_name and dialect != 'postgresql':
+        raise ValueError(f'Constraint name is only supported for PostgreSQL, not {dialect}')
 
-    # Log information about batching for large datasets
-    if len(rows) > 1000:
-        logger.debug(f'Processing large dataset with {len(rows)} rows - will use batching to avoid SSL errors')
-
-    # Get table columns to validate input
-    table_columns = set(get_table_columns(cn, table))
-
-    # Filter and validate rows
     rows = _prepare_rows_for_upsert(cn, table, rows)
     if not rows:
         return 0
 
-    # Get columns from the first row
     input_columns = set(rows[0].keys())
 
-    # Create case mapping for case-insensitive validation
+    table_columns = set(get_table_columns(cn, table))
+
     case_map = {col.lower(): col for col in table_columns}
     table_columns_lower = set(case_map.keys())
 
-    # Find columns that don't exist in the table (case-insensitive check)
     invalid_columns = [col for col in input_columns if col.lower() not in table_columns_lower]
     if invalid_columns:
         logger.warning(f'Ignoring columns not present in the table schema: {invalid_columns}')
 
-    # Filter to only valid columns with database's exact case, maintaining order from input
     columns = tuple(case_map.get(col.lower()) for col in rows[0]
                     if col.lower() in table_columns_lower)
 
@@ -598,29 +113,539 @@ def upsert_rows(
         logger.warning(f'No valid columns provided for table {table}')
         return 0
 
-    # Get primary keys if not specified
-    if not update_cols_key and not constraint_name:
-        update_cols_key = get_table_primary_keys(cn, table)
-        if not update_cols_key and dialect != 'postgresql':
+    key_cols = None
+    if use_primary_key:
+        key_cols = get_table_primary_keys(cn, table)
+        if not key_cols:
             logger.warning(f'No primary keys found for {table}, falling back to INSERT')
             return insert_rows(cn, table, rows)
+        key_cols_lower = [k.lower() for k in key_cols]
+        if update_cols_always:
+            update_cols_always = [col for col in update_cols_always if col.lower() not in key_cols_lower]
+        if update_cols_ifnull:
+            update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() not in key_cols_lower]
 
-    try:
-        # Handle the specific database type
-        if dialect == 'mssql' and update_cols_ifnull:
-            # For SQL Server with NULL preservation, use specialized function
-            return _upsert_sqlserver_with_nulls(cn, table, rows, columns,
-                                                update_cols_key, update_cols_always,
-                                                update_cols_ifnull)
+    match dialect:
+        case 'postgresql':
+            return _upsert_postgresql(cn, table, rows, columns,
+                                      constraint_name or key_cols,
+                                      update_cols_always,
+                                      update_cols_ifnull, reset_sequence)
+        case 'sqlite':
+            if not use_primary_key and not constraint_name:
+                return insert_rows(cn, table, rows)
+            return _upsert_sqlite(cn, table, rows, columns, key_cols,
+                                  update_cols_always, update_cols_ifnull,
+                                  reset_sequence)
+        case 'mssql':
+            if not use_primary_key and not constraint_name:
+                return insert_rows(cn, table, rows)
+            return _upsert_mssql(cn, table, rows, columns, key_cols,
+                                 update_cols_always, update_cols_ifnull, reset_sequence)
+
+
+def filter_columns_by_table(cn: Any, table: str, input_dict: dict[str, Any]) -> dict[str, Any]:
+    """Filter dictionary keys to match valid table columns using case-insensitive matching.
+
+    Takes a database connection, table name, and an input dictionary, and returns a new
+    dictionary with only keys that match column names in the table (case-insensitive),
+    with the keys converted to the database's exact column case.
+
+    Parameters
+        cn: Database connection
+        table: Target table name
+        input_dict: Dictionary with keys to filter
+
+    Returns
+        Dictionary with only valid keys, using database's exact column case
+    """
+    table_columns = get_table_columns(cn, table)
+
+    case_map = {col.lower(): col for col in table_columns}
+
+    result = {}
+    for key, val in input_dict.items():
+        exact_key = case_map.get(key.lower())
+        if exact_key:
+            result[exact_key] = val
+
+    return result
+
+
+def _prepare_rows_for_upsert(cn: Any, table: str, rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...] | None:
+    """Prepare and validate rows for upsert operation with case-insensitive matching.
+
+    Filters rows to include only valid columns that exist in the target table,
+    correcting column case to match the database's exact column case.
+
+    Parameters
+        cn: Database connection
+            Active connection to the target database
+        table: Target table name
+            Name of the table in the database
+        rows: Collection of row dictionaries to process
+            Input rows that need filtering
+
+    Returns
+        Tuple of filtered row dictionaries with corrected column names, or None if no valid rows
+    """
+    if not rows:
+        return None
+
+    filtered_rows = []
+    for row in rows:
+        corrected_row = filter_columns_by_table(cn, table, row)
+
+        if corrected_row:
+            filtered_rows.append(corrected_row)
+
+    if not filtered_rows:
+        logger.warning(f'No valid columns found for {table} after filtering')
+        return None
+
+    return tuple(filtered_rows)
+
+
+def batch_rows_for_execution(
+    dialect: str,
+    rows: tuple[dict[str, Any], ...],
+    columns: tuple[str, ...],
+    custom_batch_size: int | None = None
+) -> list[tuple[list[list[Any]], int]]:
+    """Create batches of rows for database operations to avoid parameter limits.
+
+    This function divides rows into appropriately sized batches based on
+    database parameter limits and returns data ready for execution.
+
+    Parameters
+        dialect: Database dialect name ('postgresql', 'sqlite', 'mssql')
+            The database type being used for the operation
+        rows: Collection of row dictionaries to batch
+            Input rows that need to be batched
+        columns: Column names in correct database case
+            Column names with case matching the database schema
+        custom_batch_size: Optional override for batch size calculation
+            Custom batch size to use instead of calculated limit
+
+    Returns
+        List of tuples containing (params_list, batch_size) where:
+            - params_list: List of parameter lists for executemany
+            - batch_size: Size of this batch
+    """
+    if custom_batch_size:
+        max_rows_per_batch = custom_batch_size
+    else:
+        param_limit = get_param_limit_for_db(dialect)
+        max_rows_per_batch = max(1, param_limit // max(1, len(columns)))
+
+        if dialect == 'postgresql' and len(columns) > 10:
+            max_rows_per_batch = min(max_rows_per_batch, 1000)
+
+    logger.debug(f'{dialect} batching {len(rows)} rows in batches of max {max_rows_per_batch} rows')
+
+    batches = []
+
+    for batch_idx in range(0, len(rows), max_rows_per_batch):
+        batch_rows = rows[batch_idx:batch_idx + max_rows_per_batch]
+        params = [[row[col] for col in columns] for row in batch_rows]
+        batches.append((params, len(batch_rows)))
+
+    return batches
+
+
+def _fetch_existing_rows(tx_or_cn: Any, table: str, rows: tuple[dict[str, Any], ...], key_cols: list[str]) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """Fetch existing rows for a set of key values - optimized for batch fetching.
+
+    Retrieves existing rows from the database using an efficient batching strategy
+    to minimize database queries while staying within parameter limits.
+
+    Parameters
+        tx_or_cn: Database transaction or connection
+            Active database transaction or connection
+        table: Target table name
+            Name of the table to query
+        rows: Rows to check for existing matches
+            Collection of row dictionaries to look up
+        key_cols: Key columns to use for matching
+            Column names that form the unique key for each row
+
+    Returns
+        Dictionary mapping row keys to existing row data
+    """
+    existing_rows = {}
+
+    dialect = get_dialect_name(tx_or_cn)
+    quoted_table = quote_identifier(table, dialect)
+
+    key_groups = {}
+    for row in rows:
+        row_key = tuple(row[key] for key in key_cols)
+        key_groups.setdefault(row_key, True)
+
+    if not key_cols:
+        logger.warning('No key columns specified for fetching existing rows')
+        return {}
+
+    safe_param_limit = max(50, get_param_limit_for_db(dialect) // 2)
+    max_keys_per_query = max(1, safe_param_limit // len(key_cols))
+
+    if len(key_groups) <= max_keys_per_query:
+        where_conditions = []
+        params = []
+
+        for row_key in key_groups:
+            condition_parts = []
+            for j, key_col in enumerate(key_cols):
+                quoted_key_col = quote_identifier(key_col, dialect)
+                placeholder = '?' if dialect == 'mssql' else '%s'
+                condition_parts.append(f'{quoted_key_col} = {placeholder}')
+                params.append(row_key[j])
+
+            where_conditions.append(f"({' AND '.join(condition_parts)})")
+
+        if where_conditions:
+            where_clause = ' OR '.join(where_conditions)
+            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
+
+            result = select(tx_or_cn, sql, *params)
+            for row in result:
+                adapter = RowStructureAdapter.create(tx_or_cn, row)
+                row_key = tuple(adapter.get_value(key) for key in key_cols)
+                existing_rows[row_key] = adapter.to_dict()
+    else:
+        keys_list = list(key_groups.keys())
+        for batch_idx in range(0, len(keys_list), max_keys_per_query):
+            batch_keys = keys_list[batch_idx:batch_idx+max_keys_per_query]
+
+            where_conditions = []
+            params = []
+
+            for row_key in batch_keys:
+                condition_parts = []
+                for j, key_col in enumerate(key_cols):
+                    quoted_key_col = quote_identifier(key_col, dialect)
+                    placeholder = '?' if dialect == 'mssql' else '%s'
+                    condition_parts.append(f'{quoted_key_col} = {placeholder}')
+                    params.append(row_key[j])
+
+                where_conditions.append(f"({' AND '.join(condition_parts)})")
+
+            where_clause = ' OR '.join(where_conditions)
+            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
+
+            result = select(tx_or_cn, sql, *params)
+            for row in result:
+                adapter = RowStructureAdapter.create(tx_or_cn, row)
+                row_key = tuple(adapter.get_value(key) for key in key_cols)
+                existing_rows[row_key] = adapter.to_dict()
+
+    return existing_rows
+
+
+def _upsert_postgresql(
+    cn: Any,
+    table: str,
+    rows: tuple[dict[str, Any], ...],
+    columns: tuple[str, ...],
+    key_cols_or_constraint: list[str] | str,
+    update_cols_always: list[str] | None,
+    update_cols_ifnull: list[str] | None,
+    reset_sequence: bool
+) -> int:
+    """Perform an UPSERT operation using PostgreSQL-specific syntax.
+
+    Uses INSERT ... ON CONFLICT ... DO UPDATE syntax for PostgreSQL.
+
+    Parameters
+        cn: Database connection
+            Active connection to the PostgreSQL database
+        table: Target table name
+            Name of the table to upsert rows into
+        rows: Prepared rows to upsert
+            Collection of row dictionaries with correct column cases
+        columns: Table columns in correct case
+            Column names matching database schema case
+        key_cols_or_constraint: Key columns or constraint name
+            Either a list of key column names or a constraint name string
+        update_cols_always: Columns to always update on conflict
+            Column names to update when a conflict occurs
+        update_cols_ifnull: Columns to update only if target is null
+            Column names to update only when target value is NULL
+        reset_sequence: Whether to reset table sequence after upsert
+            Flag to determine if auto-increment sequences should be reset
+
+    Returns
+        Number of rows affected by the operation
+    """
+    dialect = 'postgresql'
+
+    constraint_name = None
+    key_columns = None
+
+    if isinstance(key_cols_or_constraint, str):
+        constraint_name = key_cols_or_constraint
+    else:
+        key_columns = key_cols_or_constraint
+
+    columns_lower = {col.lower() for col in columns}
+
+    if update_cols_always:
+        update_cols_always = [col for col in update_cols_always if col.lower() in columns_lower]
+    if update_cols_ifnull:
+        update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() in columns_lower]
+        if update_cols_always:
+            update_cols_always_lower = {col.lower() for col in update_cols_always}
+            update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() not in update_cols_always_lower]
+
+    quoted_table = quote_identifier(table, dialect)
+    quoted_columns = [quote_identifier(col, dialect) for col in columns]
+    quoted_key_columns = [quote_identifier(col, dialect) for col in key_columns] if key_columns else []
+
+    insert_sql = build_insert_sql(dialect, table, columns)
+
+    if constraint_name:
+        expressions = get_db_strategy(cn).get_constraint_definition(cn, table, constraint_name)
+        conflict_sql = f'on conflict {expressions}'
+    else:
+        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
+
+    if not (update_cols_always or update_cols_ifnull):
+        sql = f'{insert_sql} {conflict_sql} do nothing RETURNING *'
+    else:
+        update_exprs = []
+        if update_cols_always:
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
+                                for col in update_cols_always)
+        if update_cols_ifnull:
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = coalesce({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
+                                for col in update_cols_ifnull)
+
+        update_sql = f"do update set {', '.join(update_exprs)}"
+        sql = f'{insert_sql} {conflict_sql} {update_sql} RETURNING *'
+
+    batches = batch_rows_for_execution(dialect, rows, columns)
+
+    total_affected = 0
+    cursor = cn.cursor()
+
+    for batch_idx, (params, batch_size) in enumerate(batches):
+        rc = cursor.executemany(sql, params)
+
+        if isinstance(rc, int):
+            total_affected += rc
+            if rc != batch_size:
+                logger.debug(f'Batch {batch_idx+1}: {batch_size - rc} rows skipped')
         else:
-            # Standard approach for PostgreSQL, SQLite and simple SQL Server cases
-            key_cols_or_constraint = constraint_name or update_cols_key
-            rc = _execute_standard_upsert(cn, table, rows, columns,
-                                          key_cols_or_constraint,
-                                          update_cols_always, update_cols_ifnull,
-                                          dialect)
-    finally:
-        if reset_sequence:
-            reset_table_sequence(cn, table)
+            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
 
-    return rc
+    if reset_sequence:
+        reset_table_sequence(cn, table)
+
+    return total_affected
+
+
+def _upsert_sqlite(
+    cn: Any,
+    table: str,
+    rows: tuple[dict[str, Any], ...],
+    columns: tuple[str, ...],
+    key_cols: list[str],
+    update_cols_always: list[str] | None,
+    update_cols_ifnull: list[str] | None,
+    reset_sequence: bool
+) -> int:
+    """Perform an UPSERT operation using SQLite-specific syntax.
+
+    Uses INSERT ... ON CONFLICT ... DO UPDATE syntax for SQLite.
+
+    Parameters
+        cn: Database connection
+            Active connection to the SQLite database
+        table: Target table name
+            Name of the table to upsert rows into
+        rows: Prepared rows to upsert
+            Collection of row dictionaries with correct column cases
+        columns: Table columns in correct case
+            Column names matching database schema case
+        key_cols: Key columns for conflict detection
+            List of column names that form the unique key
+        update_cols_always: Columns to always update on conflict
+            Column names to update when a conflict occurs
+        update_cols_ifnull: Columns to update only if target is null
+            Column names to update only when target value is NULL
+        reset_sequence: Whether to reset table sequence after upsert
+            Flag to determine if auto-increment sequences should be reset
+
+    Returns
+        Number of rows affected by the operation
+    """
+    dialect = 'sqlite'
+
+    if not key_cols:
+        logger.warning('No key columns specified for SQLite upsert, falling back to INSERT')
+        return insert_rows(cn, table, rows)
+
+    columns_lower = {col.lower() for col in columns}
+
+    if update_cols_always:
+        update_cols_always = [col for col in update_cols_always if col.lower() in columns_lower]
+
+    if update_cols_ifnull:
+        update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() in columns_lower]
+
+    quoted_table = quote_identifier(table, dialect)
+    quoted_columns = [quote_identifier(col, dialect) for col in columns]
+    quoted_key_columns = [quote_identifier(col, dialect) for col in key_cols]
+
+    insert_sql = build_insert_sql(dialect, table, columns)
+
+    conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
+
+    if not (update_cols_always or update_cols_ifnull):
+        sql = f'{insert_sql} {conflict_sql} do nothing'
+    else:
+        update_exprs = []
+        if update_cols_always:
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
+                                for col in update_cols_always)
+        if update_cols_ifnull:
+            update_exprs.extend(f'{quote_identifier(col, dialect)} = COALESCE({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
+                                for col in update_cols_ifnull)
+
+        update_sql = f"do update set {', '.join(update_exprs)}"
+        sql = f'{insert_sql} {conflict_sql} {update_sql}'
+
+    batches = batch_rows_for_execution(dialect, rows, columns)
+
+    total_affected = 0
+    cursor = cn.cursor()
+
+    for batch_idx, (params, batch_size) in enumerate(batches):
+        rc = cursor.executemany(sql, params)
+
+        if isinstance(rc, int):
+            total_affected += rc
+            if rc != batch_size:
+                logger.debug(f'Batch {batch_idx+1}: {batch_size - rc} rows skipped')
+        else:
+            # Some drivers don't return row count
+            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
+
+    if reset_sequence:
+        reset_table_sequence(cn, table)
+
+    return total_affected
+
+
+def _upsert_mssql(
+    cn: Any,
+    table: str,
+    rows: tuple[dict[str, Any], ...],
+    columns: tuple[str, ...],
+    key_cols: list[str],
+    update_cols_always: list[str] | None,
+    update_cols_ifnull: list[str] | None,
+    reset_sequence: bool
+) -> int:
+    """Perform an UPSERT operation using SQL Server-specific syntax.
+
+    Uses MERGE INTO syntax for SQL Server, with special handling for NULL values.
+
+    Parameters
+        cn: Database connection
+            Active connection to the SQL Server database
+        table: Target table name
+            Name of the table to upsert rows into
+        rows: Prepared rows to upsert
+            Collection of row dictionaries with correct column cases
+        columns: Table columns in correct case
+            Column names matching database schema case
+        key_cols: Key columns for matching
+            List of column names that form the unique key
+        update_cols_always: Columns to always update on match
+            Column names to update when a match occurs
+        update_cols_ifnull: Columns to update only if target is null
+            Column names to update only when target value is NULL
+        reset_sequence: Whether to reset table sequence after upsert
+            Flag to determine if identity columns should be reset
+
+    Returns
+        Number of rows affected by the operation
+    """
+    dialect = 'mssql'
+
+    if not key_cols:
+        logger.warning('No key columns specified for SQL Server upsert, falling back to INSERT')
+        return insert_rows(cn, table, rows)
+
+    logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
+
+    if update_cols_ifnull:
+        logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
+
+        existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
+
+        for row in rows:
+            row_key = tuple(row[key] for key in key_cols)
+            existing_row = existing_rows.get(row_key)
+
+            if existing_row:
+                for col in update_cols_ifnull:
+                    if col in existing_row and not is_null(existing_row.get(col)):
+                        row[col] = existing_row.get(col)
+
+        update_cols = update_cols_always or []
+    else:
+        update_cols = []
+        if update_cols_always:
+            update_cols.extend(update_cols_always)
+
+    quoted_table = quote_identifier(table, dialect)
+    quoted_columns = [quote_identifier(col, dialect) for col in columns]
+
+    temp_alias = 'src'
+
+    match_conditions = ' AND '.join(
+        f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}'
+        for col in key_cols
+    )
+
+    source_values = ', '.join(f'? as {quote_identifier(col, dialect)}' for col in columns)
+
+    if update_cols:
+        update_statements = ', '.join(
+            f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}'
+            for col in update_cols
+        )
+        update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
+    else:
+        update_clause = 'WHEN MATCHED THEN DO NOTHING'
+
+    quoted_all_columns = ', '.join(quoted_columns)
+    source_columns = ', '.join(f'{temp_alias}.{quote_identifier(col, dialect)}' for col in columns)
+
+    sql = f"""
+    MERGE INTO {quoted_table} AS target
+    USING (SELECT {source_values}) AS {temp_alias}
+    ON {match_conditions}
+    {update_clause}
+    WHEN NOT MATCHED THEN INSERT ({quoted_all_columns}) VALUES ({source_columns});
+    """
+
+    batches = batch_rows_for_execution(dialect, rows, columns)
+
+    total_affected = 0
+    cursor = cn.cursor()
+
+    for batch_idx, (params, batch_size) in enumerate(batches):
+        rc = cursor.executemany(sql, params)
+
+        if isinstance(rc, int):
+            total_affected += rc
+        else:
+            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
+
+    if reset_sequence:
+        reset_table_sequence(cn, table)
+
+    return total_affected
