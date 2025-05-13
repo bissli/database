@@ -11,7 +11,7 @@ python = "^3.9"
 
 pandas = "*"
 pyarrow = "*"
-psycopg = { extras = ["binary"], version = "*" }
+psycopg = { extras = ["binary"], version = "3.2.7" }
 pyodbc = "*"
 sqlalchemy = "^2.0.0"
 
