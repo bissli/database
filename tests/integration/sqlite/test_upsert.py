@@ -4,7 +4,7 @@ import database as db
 def test_upsert_basic(sqlite_conn):
     """Test basic upsert functionality"""
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should return 2 for new rows'
 
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
@@ -16,7 +16,7 @@ def test_upsert_basic(sqlite_conn):
     assert result[1]['value'] == 92
 
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
 
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
@@ -30,7 +30,7 @@ def test_upsert_ifnull(sqlite_conn):
     db.insert(sqlite_conn, 'insert into test_table (name, value) values (?, ?)', 'UpsertNull', 100)
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(sqlite_conn, 'select value from test_table where name = ?', 'UpsertNull')
     assert result == 100, 'Value should not be updated when using update_cols_ifnull'
@@ -47,7 +47,7 @@ def test_upsert_ifnull(sqlite_conn):
     db.execute(sqlite_conn, 'UPDATE test_nullable SET value = NULL WHERE name = ?', 'UpsertNull')
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sqlite_conn, 'test_nullable', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(sqlite_conn, 'test_nullable', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(sqlite_conn, 'SELECT value FROM test_nullable WHERE name = ?', 'UpsertNull')
     assert result == 200, 'Value should be updated when target is NULL'
@@ -68,7 +68,7 @@ def test_upsert_mixed_operations(sqlite_conn):
         {'name': 'NewPerson2', 'value': 600}   # New - insert
     ]
 
-    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 3
 
     # Verify results
@@ -176,7 +176,6 @@ def test_upsert_large_batch(sqlite_conn):
     # Update the rows (this will use UPSERT with batching)
     update_start_time = time.time()
     update_count = db.upsert_rows(sqlite_conn, 'test_large_batch', update_rows,
-                                  use_primary_key=True,
                                   update_cols_always=['value'])
     update_end_time = time.time()
 
@@ -240,7 +239,7 @@ def test_upsert_no_primary_keys(sqlite_conn):
     ]
 
     # Without primary keys, all rows should be inserted
-    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, use_primary_key=True)
+    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows)
     assert row_count == 2, 'upsert should insert 2 rows'
 
     # Verify rows were inserted
@@ -257,7 +256,7 @@ def test_upsert_no_primary_keys(sqlite_conn):
         {'name': 'NoPK2', 'value': 201}
     ]
 
-    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sqlite_conn, 'test_no_pk', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should insert 2 new rows'
 
     # We should now have 4 rows

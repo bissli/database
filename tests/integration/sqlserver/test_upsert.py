@@ -4,7 +4,7 @@ import database as db
 def test_upsert_basic(sconn):
     """Test basic upsert functionality"""
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    row_count = db.upsert_rows(sconn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sconn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should return 2 for new rows'
 
     result = db.select(sconn, 'select name, value from test_table where name in (?, ?) order by name',
@@ -16,7 +16,7 @@ def test_upsert_basic(sconn):
     assert result[1]['value'] == 92
 
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
-    row_count = db.upsert_rows(sconn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sconn, 'test_table', rows, update_cols_always=['value'])
 
     result = db.select(sconn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
@@ -30,7 +30,7 @@ def test_upsert_ifnull(sconn):
     db.insert(sconn, 'insert into test_table (name, value) values (?, ?)', 'UpsertNull', 100)
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sconn, 'test_table', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(sconn, 'test_table', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(sconn, 'select value from test_table where name = ?', 'UpsertNull')
     assert result == 100, 'Value should not be updated when using update_cols_ifnull'
@@ -47,7 +47,7 @@ def test_upsert_ifnull(sconn):
     db.execute(sconn, 'UPDATE #test_nullable SET value = NULL WHERE name = ?', 'UpsertNull')
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(sconn, '#test_nullable', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(sconn, '#test_nullable', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(sconn, 'SELECT value FROM #test_nullable WHERE name = ?', 'UpsertNull')
     assert result == 200, 'Value should be updated when target is NULL'
@@ -68,7 +68,7 @@ def test_upsert_mixed_operations(sconn):
         {'name': 'NewPerson2', 'value': 600}   # New - insert
     ]
 
-    row_count = db.upsert_rows(sconn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sconn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 3
 
     # Verify results
@@ -116,7 +116,7 @@ WHERE name IN ('Alice', 'Bob', 'Charlie')
 
     # Insert a new row
     new_rows = [{'name': 'Zack', 'value': 150}]
-    db.upsert_rows(sconn, '#test_identity_table', new_rows, use_primary_key=True)
+    db.upsert_rows(sconn, '#test_identity_table', new_rows)
 
     # Verify the insertion worked
     result = db.select_scalar(sconn, 'SELECT value FROM #test_identity_table WHERE name = ?', 'Zack')
@@ -124,7 +124,7 @@ WHERE name IN ('Alice', 'Bob', 'Charlie')
 
     # Now insert another row and check that identity is incremented properly
     new_rows = [{'name': 'Yvonne', 'value': 175}]
-    db.upsert_rows(sconn, '#test_identity_table', new_rows, use_primary_key=True)
+    db.upsert_rows(sconn, '#test_identity_table', new_rows)
 
     # Get the highest ID after insertions
     max_id_after = db.select_scalar(sconn, 'SELECT max(test_id) FROM #test_identity_table')
@@ -136,7 +136,7 @@ WHERE name IN ('Alice', 'Bob', 'Charlie')
 def test_upsert_empty_rows(sconn):
     """Test upsert with empty rows list"""
     # Should not error and return 0
-    result = db.upsert_rows(sconn, 'test_table', [], use_primary_key=True)
+    result = db.upsert_rows(sconn, 'test_table', [])
     assert result == 0
 
 
@@ -156,7 +156,7 @@ def test_upsert_large_batch(sconn):
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 1201)]
 
     batch_insert_time = time.time()
-    row_count = db.upsert_rows(sconn, '#test_large_batch', rows, use_primary_key=True)
+    row_count = db.upsert_rows(sconn, '#test_large_batch', rows)
     insert_end_time = time.time()
 
     # Verify correct number of rows inserted
@@ -177,7 +177,6 @@ def test_upsert_large_batch(sconn):
     # Update the rows (this will use UPSERT with batching)
     update_start_time = time.time()
     update_count = db.upsert_rows(sconn, '#test_large_batch', update_rows,
-                                  use_primary_key=True,
                                   update_cols_always=['value'])
     update_end_time = time.time()
 
@@ -216,7 +215,7 @@ def test_upsert_invalid_columns(sconn):
         pass
 
     rows = [{'name': 'InvalidTest', 'value': 100, 'nonexistent': 'should be filtered'}]
-    db.upsert_rows(sconn, 'test_table', rows, use_primary_key=True)
+    db.upsert_rows(sconn, 'test_table', rows)
 
     # Verify the row was inserted without error
     result = db.select_row(sconn, 'select name, value from test_table where name = ?', 'InvalidTest')
@@ -241,7 +240,7 @@ def test_upsert_no_primary_keys(sconn):
     ]
 
     # Without primary keys, all rows should be inserted
-    row_count = db.upsert_rows(sconn, '#test_no_pk', rows, use_primary_key=True)
+    row_count = db.upsert_rows(sconn, '#test_no_pk', rows)
     assert row_count == 2, 'upsert should insert 2 rows'
 
     # Verify rows were inserted
@@ -258,7 +257,7 @@ def test_upsert_no_primary_keys(sconn):
         {'name': 'NoPK2', 'value': 201}
     ]
 
-    row_count = db.upsert_rows(sconn, '#test_no_pk', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(sconn, '#test_no_pk', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should insert 2 new rows'
 
     # We should now have 4 rows

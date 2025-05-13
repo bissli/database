@@ -26,7 +26,6 @@ def upsert_rows(
     cn: Any,
     table: str,
     rows: tuple[dict[str, Any], ...],
-    use_primary_key: bool = True,
     constraint_name: str | None = None,
     update_cols_always: list[str] | None = None,
     update_cols_ifnull: list[str] | None = None,
@@ -48,13 +47,9 @@ def upsert_rows(
         rows: Collection of row dictionaries to insert/update. Each dictionary's keys should match
             column names in the target table. Empty input will result in no operation.
 
-        use_primary_key: Whether to use the table's primary key for conflict detection.
-            Set to True to automatically retrieve and use primary key columns.
-            Default is True, which auto-detects primary keys from the table schema.
-
         constraint_name: Name of a specific constraint to use for conflict detection.
             Only supported in PostgreSQL, ignored for other database types.
-            Cannot be used together with use_primary_key=True.
+            If provided, this will be used instead of primary key columns.
 
         update_cols_always: Columns that should always be updated on conflict.
             If omitted, conflicting rows won't have any columns updated.
@@ -77,7 +72,6 @@ def upsert_rows(
     Raises
         ValueError: If constraint name provided for non-PostgreSQL database
         ValueError: If using an unsupported database connection
-        ValueError: If both use_primary_key=True and constraint_name are specified
     """
     if not rows:
         logger.debug('Skipping upsert of empty rows')
@@ -85,125 +79,96 @@ def upsert_rows(
 
     dialect = get_dialect_name(cn)
 
-    if use_primary_key and constraint_name:
-        raise ValueError('Cannot specify both use_primary_key=True and constraint_name')
+    if dialect != 'postgresql':
+        constraint_name = None
 
-    if constraint_name and dialect != 'postgresql':
-        raise ValueError(f'Constraint name is only supported for PostgreSQL, not {dialect}')
-
-    rows = _prepare_rows_for_upsert(cn, table, rows)
-    if not rows:
-        return 0
-
-    input_columns = set(rows[0].keys())
-
-    table_columns = set(get_table_columns(cn, table))
-
+    # Get table columns and create case mapping once
+    table_columns = get_table_columns(cn, table)
     case_map = {col.lower(): col for col in table_columns}
     table_columns_lower = set(case_map.keys())
 
-    invalid_columns = [col for col in input_columns if col.lower() not in table_columns_lower]
-    if invalid_columns:
-        logger.warning(f'Ignoring columns not present in the table schema: {invalid_columns}')
+    # Filter and correct column cases for each row, preserving table column order
+    filtered_rows = []
+    for row in rows:
+        row_lower = {k.lower(): v for k, v in row.items()}
+        corrected_row = {col: row_lower[col.lower()] for col in table_columns if col.lower() in row_lower}
+        if corrected_row:
+            filtered_rows.append(corrected_row)
 
-    columns = tuple(case_map.get(col.lower()) for col in rows[0]
-                    if col.lower() in table_columns_lower)
+    if not filtered_rows:
+        logger.debug(f'No valid columns found for {table} after filtering')
+        return 0
+
+    rows = tuple(filtered_rows)
+
+    invalid_columns = [col for col in list(set().union(*(r.keys() for r in rows))) if
+                       col.lower() not in table_columns_lower]
+    if invalid_columns:
+        logger.debug(f'Ignoring columns not present in the table schema: {invalid_columns}')
+
+    provided_keys = {key for row in rows for key in row}
+    columns = tuple(col for col in table_columns if col in provided_keys)
 
     if not columns:
         logger.warning(f'No valid columns provided for table {table}')
         return 0
 
-    key_cols = None
-    if use_primary_key:
-        key_cols = get_table_primary_keys(cn, table)
+    should_update = update_cols_always is not None or update_cols_ifnull is not None
+
+    key_cols = get_table_primary_keys(cn, table)
+
+    if should_update and ((dialect != 'postgresql') or (dialect == 'postgresql' and not constraint_name)):
         if not key_cols:
-            logger.warning(f'No primary keys found for {table}, falling back to INSERT')
+            logger.debug(f'No primary keys found for {table}, falling back to INSERT')
             return insert_rows(cn, table, rows)
-        key_cols_lower = [k.lower() for k in key_cols]
-        if update_cols_always:
-            update_cols_always = [col for col in update_cols_always if col.lower() not in key_cols_lower]
-        if update_cols_ifnull:
-            update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() not in key_cols_lower]
+
+    columns_lower = {col.lower() for col in columns}
+    key_cols_lower = {k.lower() for k in key_cols} if key_cols else set()
+
+    if update_cols_always:
+        orig_update_cols_always = update_cols_always[:]
+        valid_update_always = []
+        for col in orig_update_cols_always:
+            lower = col.lower()
+            if lower in columns_lower and (constraint_name is not None or lower not in key_cols_lower):
+                valid_update_always.append(case_map[lower])
+        update_cols_always = valid_update_always
+        invalid_always = [col for col in orig_update_cols_always if col.lower() not in {c.lower() for c in update_cols_always}]
+        if invalid_always:
+            logger.debug(f'Filtered invalid columns from update_cols_always: {invalid_always}')
+    if update_cols_ifnull:
+        orig_update_cols_ifnull = update_cols_ifnull[:]
+        valid_update_ifnull = []
+        uc_always_lower = {c.lower() for c in update_cols_always} if update_cols_always else set()
+        for col in orig_update_cols_ifnull:
+            lower = col.lower()
+            if lower in columns_lower and (constraint_name is not None or lower not in key_cols_lower) and lower not in uc_always_lower:
+                valid_update_ifnull.append(case_map[lower])
+        update_cols_ifnull = valid_update_ifnull
+        invalid_ifnull = [col for col in orig_update_cols_ifnull if col.lower() not in {c.lower() for c in update_cols_ifnull}]
+        if invalid_ifnull:
+            logger.debug(f'Filtered invalid columns from update_cols_ifnull: {invalid_ifnull}')
+
+    if not key_cols and (dialect != 'postgresql' or not constraint_name):
+        logger.debug(f'No constraint or key columns provided for {dialect} upsert, falling back to INSERT')
+        return insert_rows(cn, table, rows)
 
     match dialect:
         case 'postgresql':
-            return _upsert_postgresql(cn, table, rows, columns,
-                                      constraint_name or key_cols,
-                                      update_cols_always,
-                                      update_cols_ifnull, reset_sequence)
+            return _upsert_postgresql(cn, table, rows, columns, constraint_name or key_cols,
+                                      update_cols_always if should_update else None,
+                                      update_cols_ifnull if should_update else None,
+                                      reset_sequence)
         case 'sqlite':
-            if not use_primary_key and not constraint_name:
-                return insert_rows(cn, table, rows)
             return _upsert_sqlite(cn, table, rows, columns, key_cols,
-                                  update_cols_always, update_cols_ifnull,
+                                  update_cols_always if should_update else None,
+                                  update_cols_ifnull if should_update else None,
                                   reset_sequence)
         case 'mssql':
-            if not use_primary_key and not constraint_name:
+            if not should_update:
                 return insert_rows(cn, table, rows)
-            return _upsert_mssql(cn, table, rows, columns, key_cols,
-                                 update_cols_always, update_cols_ifnull, reset_sequence)
-
-
-def filter_columns_by_table(cn: Any, table: str, input_dict: dict[str, Any]) -> dict[str, Any]:
-    """Filter dictionary keys to match valid table columns using case-insensitive matching.
-
-    Takes a database connection, table name, and an input dictionary, and returns a new
-    dictionary with only keys that match column names in the table (case-insensitive),
-    with the keys converted to the database's exact column case.
-
-    Parameters
-        cn: Database connection
-        table: Target table name
-        input_dict: Dictionary with keys to filter
-
-    Returns
-        Dictionary with only valid keys, using database's exact column case
-    """
-    table_columns = get_table_columns(cn, table)
-
-    case_map = {col.lower(): col for col in table_columns}
-
-    result = {}
-    for key, val in input_dict.items():
-        exact_key = case_map.get(key.lower())
-        if exact_key:
-            result[exact_key] = val
-
-    return result
-
-
-def _prepare_rows_for_upsert(cn: Any, table: str, rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...] | None:
-    """Prepare and validate rows for upsert operation with case-insensitive matching.
-
-    Filters rows to include only valid columns that exist in the target table,
-    correcting column case to match the database's exact column case.
-
-    Parameters
-        cn: Database connection
-            Active connection to the target database
-        table: Target table name
-            Name of the table in the database
-        rows: Collection of row dictionaries to process
-            Input rows that need filtering
-
-    Returns
-        Tuple of filtered row dictionaries with corrected column names, or None if no valid rows
-    """
-    if not rows:
-        return None
-
-    filtered_rows = []
-    for row in rows:
-        corrected_row = filter_columns_by_table(cn, table, row)
-
-        if corrected_row:
-            filtered_rows.append(corrected_row)
-
-    if not filtered_rows:
-        logger.warning(f'No valid columns found for {table} after filtering')
-        return None
-
-    return tuple(filtered_rows)
+            return _upsert_mssql(cn, table, rows, columns, key_cols, update_cols_always,
+                                 update_cols_ifnull, reset_sequence)
 
 
 def batch_rows_for_execution(
@@ -387,16 +352,6 @@ def _upsert_postgresql(
     else:
         key_columns = key_cols_or_constraint
 
-    columns_lower = {col.lower() for col in columns}
-
-    if update_cols_always:
-        update_cols_always = [col for col in update_cols_always if col.lower() in columns_lower]
-    if update_cols_ifnull:
-        update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() in columns_lower]
-        if update_cols_always:
-            update_cols_always_lower = {col.lower() for col in update_cols_always}
-            update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() not in update_cols_always_lower]
-
     quoted_table = quote_identifier(table, dialect)
     quoted_columns = [quote_identifier(col, dialect) for col in columns]
     quoted_key_columns = [quote_identifier(col, dialect) for col in key_columns] if key_columns else []
@@ -480,19 +435,6 @@ def _upsert_sqlite(
         Number of rows affected by the operation
     """
     dialect = 'sqlite'
-
-    if not key_cols:
-        logger.warning('No key columns specified for SQLite upsert, falling back to INSERT')
-        return insert_rows(cn, table, rows)
-
-    columns_lower = {col.lower() for col in columns}
-
-    if update_cols_always:
-        update_cols_always = [col for col in update_cols_always if col.lower() in columns_lower]
-
-    if update_cols_ifnull:
-        update_cols_ifnull = [col for col in update_cols_ifnull if col.lower() in columns_lower]
-
     quoted_table = quote_identifier(table, dialect)
     quoted_columns = [quote_identifier(col, dialect) for col in columns]
     quoted_key_columns = [quote_identifier(col, dialect) for col in key_cols]
@@ -573,11 +515,6 @@ def _upsert_mssql(
         Number of rows affected by the operation
     """
     dialect = 'mssql'
-
-    if not key_cols:
-        logger.warning('No key columns specified for SQL Server upsert, falling back to INSERT')
-        return insert_rows(cn, table, rows)
-
     logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
 
     if update_cols_ifnull:

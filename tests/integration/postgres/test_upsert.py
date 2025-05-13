@@ -7,7 +7,7 @@ import pytest
 def test_upsert_basic(psql_docker, conn):
     """Test basic upsert functionality"""
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should return 2 for new rows'
 
     result = db.select(conn, 'select name, value from test_table where name in (%s, %s) order by name',
@@ -19,7 +19,7 @@ def test_upsert_basic(psql_docker, conn):
     assert result[1]['value'] == 92
 
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
 
     result = db.select(conn, 'select name, value from test_table where name in (%s, %s) order by name',
                        'Barry', 'Wallace')
@@ -33,7 +33,7 @@ def test_upsert_ifnull(psql_docker, conn):
     db.insert(conn, 'insert into test_table (name, value) values (%s, %s)', 'UpsertNull', 100)
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(conn, 'test_table', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(conn, 'test_table', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(conn, 'select value from test_table where name = %s', 'UpsertNull')
     assert result == 100, 'Value should not be updated when using update_cols_ifnull'
@@ -50,7 +50,7 @@ def test_upsert_ifnull(psql_docker, conn):
     db.execute(conn, 'UPDATE test_nullable SET value = NULL WHERE name = %s', 'UpsertNull')
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(conn, 'test_nullable', rows, use_primary_key=True, update_cols_ifnull=['value'])
+    db.upsert_rows(conn, 'test_nullable', rows, update_cols_ifnull=['value'])
 
     result = db.select_scalar(conn, 'SELECT value FROM test_nullable WHERE name = %s', 'UpsertNull')
     assert result == 200, 'Value should be updated when target is NULL'
@@ -69,7 +69,7 @@ def test_upsert_mixed_operations(psql_docker, conn):
         {'name': 'NewPerson2', 'value': 600}
     ]
 
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 3
 
     result = db.select(conn, """
@@ -115,7 +115,7 @@ SELECT name, value FROM test_table
 
     # Insert a new row with reset_sequence=False (default)
     new_rows = [{'name': 'Zack', 'value': 150}]
-    db.upsert_rows(conn, 'test_sequence_table', new_rows, use_primary_key=True)
+    db.upsert_rows(conn, 'test_sequence_table', new_rows)
 
     # Now get the next sequence value by inserting a row directly
     db.execute(conn, "INSERT INTO test_sequence_table (name, value) VALUES ('SequenceTest1', 200)")
@@ -123,7 +123,7 @@ SELECT name, value FROM test_table
 
     # Insert another row but with reset_sequence=True
     new_rows = [{'name': 'Yvonne', 'value': 175}]
-    db.upsert_rows(conn, 'test_sequence_table', new_rows, use_primary_key=True, reset_sequence=True)
+    db.upsert_rows(conn, 'test_sequence_table', new_rows, reset_sequence=True)
 
     # Now the sequence should be set to the max id + 1
     # Insert another row to check
@@ -140,7 +140,7 @@ SELECT name, value FROM test_table
 def test_upsert_empty_rows(psql_docker, conn):
     """Test upsert with empty rows list"""
     # Should not error and return 0
-    result = db.upsert_rows(conn, 'test_table', [], use_primary_key=True)
+    result = db.upsert_rows(conn, 'test_table', [])
     assert result == 0
 
 
@@ -160,7 +160,7 @@ def test_upsert_large_batch(psql_docker, conn):
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 35001)]
 
     batch_insert_time = time.time()
-    row_count = db.upsert_rows(conn, 'test_large_batch', rows, use_primary_key=True)
+    row_count = db.upsert_rows(conn, 'test_large_batch', rows)
     insert_end_time = time.time()
 
     # Verify correct number of rows inserted
@@ -181,7 +181,6 @@ def test_upsert_large_batch(psql_docker, conn):
     # Update the rows (this will use UPSERT with batching)
     update_start_time = time.time()
     update_count = db.upsert_rows(conn, 'test_large_batch', update_rows,
-                                  use_primary_key=True,
                                   update_cols_always=['value'])
     update_end_time = time.time()
 
@@ -220,7 +219,7 @@ def test_upsert_invalid_columns(psql_docker, conn):
         pass
 
     rows = [{'name': 'InvalidTest', 'value': 100, 'nonexistent': 'should be filtered'}]
-    db.upsert_rows(conn, 'test_table', rows, use_primary_key=True)
+    db.upsert_rows(conn, 'test_table', rows)
 
     # Verify the row was inserted without error
     result = db.select_row(conn, 'select name, value from test_table where name = %s', 'InvalidTest')
@@ -245,7 +244,7 @@ def test_upsert_no_primary_keys(psql_docker, conn):
     ]
 
     # Without primary keys, all rows should be inserted
-    row_count = db.upsert_rows(conn, 'test_no_pk', rows, use_primary_key=True)
+    row_count = db.upsert_rows(conn, 'test_no_pk', rows)
     assert row_count == 2, 'upsert should insert 2 rows'
 
     # Verify rows were inserted
@@ -262,7 +261,7 @@ def test_upsert_no_primary_keys(psql_docker, conn):
         {'name': 'NoPK2', 'value': 201}
     ]
 
-    row_count = db.upsert_rows(conn, 'test_no_pk', rows, use_primary_key=True, update_cols_always=['value'])
+    row_count = db.upsert_rows(conn, 'test_no_pk', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should insert 2 new rows'
 
     # We should now have 4 rows
@@ -304,7 +303,7 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
     ]
 
     # Insert with mixed valid/invalid columns
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True)
+    row_count = db.upsert_rows(conn, 'test_table', rows)
 
     # Verify the correct number of rows were inserted
     assert row_count == 2, 'Expected 2 rows to be inserted'
@@ -341,7 +340,7 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
     ]
 
     # Insert with mixed case and invalid columns
-    row_count = db.upsert_rows(conn, 'test_table', rows_mixed_case, use_primary_key=True)
+    row_count = db.upsert_rows(conn, 'test_table', rows_mixed_case)
 
     # Verify the correct number of rows were inserted
     assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive column filtering'
@@ -475,13 +474,11 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
     # Test case-insensitive query parameter columns
     db.upsert_rows(conn, 'test_table',
                    [{'name': 'CaseTest4', 'value': 404}],
-                   use_primary_key=True,
                    update_cols_always=['value'])  # Must use exact case for update columns
 
     # Insert another row with the same primary key but different case to test update
     db.upsert_rows(conn, 'test_table',
                    [{'name': 'CaseTest4', 'value': 444}],
-                   use_primary_key=True,
                    update_cols_always=['value'])
 
     # Verify the update worked with case-insensitive key & update columns
@@ -654,7 +651,6 @@ def test_upsert_error_handling(psql_docker, conn):
         conn,
         'test_error_handling',
         pk_update,
-        use_primary_key=True,
         update_cols_always=['name', 'value']
     )
 
@@ -670,7 +666,6 @@ def test_upsert_error_handling(psql_docker, conn):
         conn,
         'test_error_handling',
         unique_update,
-        use_primary_key=False,
         constraint_name='test_error_handling_name_key',
         update_cols_always=['id', 'value']
     )
@@ -687,7 +682,6 @@ def test_upsert_error_handling(psql_docker, conn):
         conn,
         'test_error_handling',
         new_row,
-        use_primary_key=True,
         update_cols_always=['name', 'value']
     )
 
@@ -705,7 +699,6 @@ def test_upsert_error_handling(psql_docker, conn):
             conn,
             'test_error_handling',
             conflict_row,
-            use_primary_key=True,  # Using primary key (id)
             update_cols_always=['name', 'value']
         )
 
@@ -728,7 +721,6 @@ def test_upsert_error_handling(psql_docker, conn):
                 conn,
                 'test_error_handling',
                 [row],  # Single row at a time
-                use_primary_key=True,
                 update_cols_always=['name', 'value']
             )
         except Exception as e:
@@ -769,7 +761,6 @@ def test_upsert_with_constraint_name(psql_docker, conn):
         conn,
         'test_constraint',
         rows,
-        use_primary_key=False,
         constraint_name='test_unique_constraint',
         update_cols_always=['value']
     )
@@ -785,7 +776,6 @@ def test_upsert_with_constraint_name(psql_docker, conn):
         conn,
         'test_constraint',
         rows,
-        use_primary_key=False,
         constraint_name='test_unique_constraint',
         update_cols_always=['value']
     )
@@ -891,7 +881,6 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [same_constraint_row],
-        use_primary_key=False,
         constraint_name='complex_unique_index',
         update_cols_always=['last_updated']  # Only update the timestamp
     )
@@ -917,7 +906,6 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [different_value_row],
-        use_primary_key=False,
         constraint_name='complex_unique_index',
         update_cols_always=['last_updated']  # Trying to update timestamp, but should insert instead
     )
@@ -947,7 +935,6 @@ def test_upsert_with_complex_index(psql_docker, conn):
         conn,
         'test_complex_index',
         [update_second_row],
-        use_primary_key=False,
         constraint_name='complex_unique_index',
         update_cols_always=['last_updated']  # Only update timestamp
     )
@@ -995,7 +982,6 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_same_constraint],
-        use_primary_key=False,
         constraint_name=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
@@ -1020,7 +1006,6 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [different_value_row],
-        use_primary_key=False,
         constraint_name=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
@@ -1066,7 +1051,6 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_specific_row],
-        use_primary_key=False,
         constraint_name=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
@@ -1090,7 +1074,6 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [null_value_row],
-        use_primary_key=False,
         constraint_name=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
@@ -1111,7 +1094,6 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         conn,
         table_name,
         [update_null_row],
-        use_primary_key=False,
         constraint_name=constraint_name,
         update_cols_always=['value', 'last_updated']  # Add 'value' to columns to update
     )
@@ -1339,6 +1321,26 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     assert result.user_id == 1, "Primary key 'user_id' should not be updated"
     assert result.user_id_type == 'LOCAL', "Primary key 'user_id_type' should not be updated"
     assert result.user_desc == 'Updated user description', 'Description should be updated'
+
+
+def test_upsert_with_smartcase_update_columns(psql_docker, conn):
+    """Test upsert with update_cols_always provided in SmartCase while database columns are lower-case.
+
+    This test ensures that the upsert operation correctly maps SmartCase
+    column names (e.g., 'Value') to the lower-case database columns (e.g., 'value')
+    for update operations.
+    """
+    db.execute(conn, """
+    CREATE TEMPORARY TABLE test_smart_case (
+        name VARCHAR(50) PRIMARY KEY,
+        value INTEGER NOT NULL
+    )
+    """)
+    db.insert(conn, 'INSERT INTO test_smart_case (name, value) VALUES (%s, %s)', 'SmartCaseTest', 100)
+    rows = [{'name': 'SmartCaseTest', 'value': 200}]
+    row_count = db.upsert_rows(conn, 'test_smart_case', rows, use_primary_key=True, update_cols_always=['Value'])
+    result = db.select_row(conn, 'SELECT name, value FROM test_smart_case WHERE name = %s', 'SmartCaseTest')
+    assert result['value'] == 200, 'Row should be updated even when update_cols_always is given in SmartCase'
 
 
 if __name__ == '__main__':
