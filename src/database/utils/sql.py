@@ -330,7 +330,7 @@ def get_param_limit_for_db(dialect: str = 'postgresql') -> int:
     assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
 
     if dialect == 'postgresql':
-        return 32000
+        return 9999 
     if dialect == 'sqlite':
         return 900
     if dialect == 'mssql':
