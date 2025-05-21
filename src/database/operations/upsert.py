@@ -14,7 +14,7 @@ from database.operations.schema import get_table_primary_keys
 from database.operations.schema import reset_table_sequence
 from database.strategy import get_db_strategy
 from database.utils.connection_utils import get_dialect_name
-from database.utils.sql import get_param_limit_for_db, quote_identifier
+from database.utils.sql import quote_identifier
 from database.utils.sql_generation import build_insert_sql
 
 from libb import is_null
@@ -30,6 +30,7 @@ def upsert_rows(
     update_cols_always: list[str] | None = None,
     update_cols_ifnull: list[str] | None = None,
     reset_sequence: bool = False,
+    batch_size: int = 500,
     **kw: Any
 ) -> int:
     """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows with configurable update behavior.
@@ -63,6 +64,8 @@ def upsert_rows(
 
         reset_sequence: Whether to reset the table's auto-increment sequence after operation.
             Useful after bulk loads to ensure next generated ID is correct.
+
+        batch_size: Maximum rows per batch to process.
 
     Returns
         Number of rows affected by the operation.
@@ -158,12 +161,14 @@ def upsert_rows(
             return _upsert_postgresql(cn, table, rows, columns, constraint_name or key_cols,
                                       update_cols_always if should_update else None,
                                       update_cols_ifnull if should_update else None,
-                                      reset_sequence)
+                                      reset_sequence,
+                                      batch_size)
         case 'sqlite':
             return _upsert_sqlite(cn, table, rows, columns, key_cols,
                                   update_cols_always if should_update else None,
                                   update_cols_ifnull if should_update else None,
-                                  reset_sequence)
+                                  reset_sequence,
+                                  batch_size)
         case 'mssql':
             if not should_update:
                 return insert_rows(cn, table, rows)
@@ -171,139 +176,63 @@ def upsert_rows(
                                  update_cols_ifnull, reset_sequence)
 
 
-def batch_rows_for_execution(
-    dialect: str,
+def _fetch_existing_rows(
+    tx_or_cn: Any,
+    table: str,
     rows: tuple[dict[str, Any], ...],
-    columns: tuple[str, ...],
-    custom_batch_size: int | None = None
-) -> list[tuple[list[list[Any]], int]]:
-    """Create batches of rows for database operations to avoid parameter limits.
-
-    This function divides rows into appropriately sized batches based on
-    database parameter limits and returns data ready for execution.
-
-    Parameters
-        dialect: Database dialect name ('postgresql', 'sqlite', 'mssql')
-            The database type being used for the operation
-        rows: Collection of row dictionaries to batch
-            Input rows that need to be batched
-        columns: Column names in correct database case
-            Column names with case matching the database schema
-        custom_batch_size: Optional override for batch size calculation
-            Custom batch size to use instead of calculated limit
-
-    Returns
-        List of tuples containing (params_list, batch_size) where:
-            - params_list: List of parameter lists for executemany
-            - batch_size: Size of this batch
-    """
-    if custom_batch_size:
-        max_rows_per_batch = custom_batch_size
-    else:
-        param_limit = get_param_limit_for_db(dialect)
-        max_rows_per_batch = max(1, param_limit // max(1, len(columns)))
-
-        if dialect == 'postgresql' and len(columns) > 10:
-            max_rows_per_batch = min(max_rows_per_batch, 1000)
-
-    logger.debug(f'{dialect} batching {len(rows)} rows in batches of max {max_rows_per_batch} rows')
-
-    batches = []
-
-    for batch_idx in range(0, len(rows), max_rows_per_batch):
-        batch_rows = rows[batch_idx:batch_idx + max_rows_per_batch]
-        params = [[row[col] for col in columns] for row in batch_rows]
-        batches.append((params, len(batch_rows)))
-
-    return batches
-
-
-def _fetch_existing_rows(tx_or_cn: Any, table: str, rows: tuple[dict[str, Any], ...], key_cols: list[str]) -> dict[tuple[Any, ...], dict[str, Any]]:
-    """Fetch existing rows for a set of key values - optimized for batch fetching.
-
-    Retrieves existing rows from the database using an efficient batching strategy
-    to minimize database queries while staying within parameter limits.
+    key_cols: list[str],
+    batch_size: int,
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """Fetch existing rows for a set of key values using batching.
 
     Parameters
         tx_or_cn: Database transaction or connection
-            Active database transaction or connection
+            Active connection to the database.
         table: Target table name
-            Name of the table to query
+            Name of the table to query.
         rows: Rows to check for existing matches
-            Collection of row dictionaries to look up
+            Collection of row dictionaries.
         key_cols: Key columns to use for matching
-            Column names that form the unique key for each row
+            Column names that form the unique key.
+        batch_size: Maximum rows per batch
+            Maximum number of keys to query per batch.
 
     Returns
-        Dictionary mapping row keys to existing row data
+        Dictionary mapping row keys to existing row data.
     """
     existing_rows = {}
-
     dialect = get_dialect_name(tx_or_cn)
     quoted_table = quote_identifier(table, dialect)
 
-    key_groups = {}
+    # Collect unique keys from rows
+    keys_set = set()
+    keys_list = []
     for row in rows:
-        row_key = tuple(row[key] for key in key_cols)
-        key_groups.setdefault(row_key, True)
+        key_value = tuple(row[key] for key in key_cols)
+        if key_value not in keys_set:
+            keys_set.add(key_value)
+            keys_list.append(key_value)
 
     if not key_cols:
         logger.warning('No key columns specified for fetching existing rows')
         return {}
 
-    safe_param_limit = max(50, get_param_limit_for_db(dialect) // 2)
-    max_keys_per_query = max(1, safe_param_limit // len(key_cols))
-
-    if len(key_groups) <= max_keys_per_query:
+    placeholder = '?' if dialect == 'mssql' else '%s'
+    for batch_idx in range(0, len(keys_list), batch_size):
+        batch_keys = keys_list[batch_idx: batch_idx + batch_size]
         where_conditions = []
         params = []
-
-        for row_key in key_groups:
-            condition_parts = []
-            for j, key_col in enumerate(key_cols):
-                quoted_key_col = quote_identifier(key_col, dialect)
-                placeholder = '?' if dialect == 'mssql' else '%s'
-                condition_parts.append(f'{quoted_key_col} = {placeholder}')
-                params.append(row_key[j])
-
+        for key_value in batch_keys:
+            condition_parts = [f'{quote_identifier(key, dialect)} = {placeholder}' for key in key_cols]
             where_conditions.append(f"({' AND '.join(condition_parts)})")
-
-        if where_conditions:
-            where_clause = ' OR '.join(where_conditions)
-            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
-
-            result = select(tx_or_cn, sql, *params)
-            for row in result:
-                adapter = RowStructureAdapter.create(tx_or_cn, row)
-                row_key = tuple(adapter.get_value(key) for key in key_cols)
-                existing_rows[row_key] = adapter.to_dict()
-    else:
-        keys_list = list(key_groups.keys())
-        for batch_idx in range(0, len(keys_list), max_keys_per_query):
-            batch_keys = keys_list[batch_idx:batch_idx+max_keys_per_query]
-
-            where_conditions = []
-            params = []
-
-            for row_key in batch_keys:
-                condition_parts = []
-                for j, key_col in enumerate(key_cols):
-                    quoted_key_col = quote_identifier(key_col, dialect)
-                    placeholder = '?' if dialect == 'mssql' else '%s'
-                    condition_parts.append(f'{quoted_key_col} = {placeholder}')
-                    params.append(row_key[j])
-
-                where_conditions.append(f"({' AND '.join(condition_parts)})")
-
-            where_clause = ' OR '.join(where_conditions)
-            sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
-
-            result = select(tx_or_cn, sql, *params)
-            for row in result:
-                adapter = RowStructureAdapter.create(tx_or_cn, row)
-                row_key = tuple(adapter.get_value(key) for key in key_cols)
-                existing_rows[row_key] = adapter.to_dict()
-
+            params.extend(key_value)
+        where_clause = ' OR '.join(where_conditions)
+        sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
+        result = select(tx_or_cn, sql, *params)
+        for row in result:
+            adapter = RowStructureAdapter.create(tx_or_cn, row)
+            key_val = tuple(adapter.get_value(key) for key in key_cols)
+            existing_rows[key_val] = adapter.to_dict()
     return existing_rows
 
 
@@ -315,7 +244,8 @@ def _upsert_postgresql(
     key_cols_or_constraint: list[str] | str,
     update_cols_always: list[str] | None,
     update_cols_ifnull: list[str] | None,
-    reset_sequence: bool
+    reset_sequence: bool,
+    batch_size: int
 ) -> int:
     """Perform an UPSERT operation using PostgreSQL-specific syntax.
 
@@ -378,20 +308,16 @@ def _upsert_postgresql(
         update_sql = f"do update set {', '.join(update_exprs)}"
         sql = f'{insert_sql} {conflict_sql} {update_sql} RETURNING *'
 
-    batches = batch_rows_for_execution(dialect, rows, columns)
+    params = [[row[col] for col in columns] for row in rows]
 
-    total_affected = 0
     cursor = cn.cursor()
+    rc = cursor.executemany(sql, params, batch_size)
 
-    for batch_idx, (params, batch_size) in enumerate(batches):
-        rc = cursor.executemany(sql, params)
-
-        if isinstance(rc, int):
-            total_affected += rc
-            if rc != batch_size:
-                logger.debug(f'Batch {batch_idx+1}: {batch_size - rc} rows skipped')
-        else:
-            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
+    total_affected = rc if isinstance(rc, int) else 0
+    if isinstance(rc, int) and rc != len(rows):
+        logger.debug(f'{len(rows) - rc} rows skipped')
+    elif not isinstance(rc, int):
+        logger.debug('Unknown count affected')
 
     if reset_sequence:
         reset_table_sequence(cn, table)
@@ -407,7 +333,8 @@ def _upsert_sqlite(
     key_cols: list[str],
     update_cols_always: list[str] | None,
     update_cols_ifnull: list[str] | None,
-    reset_sequence: bool
+    reset_sequence: bool,
+    batch_size: int
 ) -> int:
     """Perform an UPSERT operation using SQLite-specific syntax.
 
@@ -457,21 +384,17 @@ def _upsert_sqlite(
         update_sql = f"do update set {', '.join(update_exprs)}"
         sql = f'{insert_sql} {conflict_sql} {update_sql}'
 
-    batches = batch_rows_for_execution(dialect, rows, columns)
+    params = [[row[col] for col in columns] for row in rows]
 
-    total_affected = 0
     cursor = cn.cursor()
+    rc = cursor.executemany(sql, params, batch_size)
 
-    for batch_idx, (params, batch_size) in enumerate(batches):
-        rc = cursor.executemany(sql, params)
-
-        if isinstance(rc, int):
-            total_affected += rc
-            if rc != batch_size:
-                logger.debug(f'Batch {batch_idx+1}: {batch_size - rc} rows skipped')
-        else:
-            # Some drivers don't return row count
-            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
+    total_affected = rc if isinstance(rc, int) else 0
+    if isinstance(rc, int) and rc != len(rows):
+        logger.debug(f'{len(rows) - rc} rows skipped')
+    elif not isinstance(rc, int):
+        # Some drivers don't return row count
+        logger.debug('Unknown count affected')
 
     if reset_sequence:
         reset_table_sequence(cn, table)
@@ -487,7 +410,8 @@ def _upsert_mssql(
     key_cols: list[str],
     update_cols_always: list[str] | None,
     update_cols_ifnull: list[str] | None,
-    reset_sequence: bool
+    reset_sequence: bool,
+    batch_size: int = 500,
 ) -> int:
     """Perform an UPSERT operation using SQL Server-specific syntax.
 
@@ -569,18 +493,14 @@ def _upsert_mssql(
     WHEN NOT MATCHED THEN INSERT ({quoted_all_columns}) VALUES ({source_columns});
     """
 
-    batches = batch_rows_for_execution(dialect, rows, columns)
+    params = [[row[col] for col in columns] for row in rows]
 
-    total_affected = 0
     cursor = cn.cursor()
+    rc = cursor.executemany(sql, params, batch_size)
 
-    for batch_idx, (params, batch_size) in enumerate(batches):
-        rc = cursor.executemany(sql, params)
-
-        if isinstance(rc, int):
-            total_affected += rc
-        else:
-            logger.debug(f'Batch {batch_idx+1}: unknown count affected')
+    total_affected = rc if isinstance(rc, int) else 0
+    if not isinstance(rc, int):
+        logger.debug('Unknown count affected')
 
     if reset_sequence:
         reset_table_sequence(cn, table)

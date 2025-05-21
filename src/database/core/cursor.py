@@ -14,8 +14,7 @@ from database.adapters.type_conversion import TypeConverter
 from database.adapters.type_mapping import postgres_types
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name, isconnection
-from database.utils.sql import get_param_limit_for_db, has_placeholders
-from database.utils.sql import standardize_placeholders
+from database.utils.sql import has_placeholders, standardize_placeholders
 from database.utils.sqlserver_utils import ensure_identity_column_named
 from database.utils.sqlserver_utils import handle_unnamed_columns_error
 from database.utils.sqlserver_utils import prepare_sqlserver_params
@@ -41,30 +40,27 @@ def batch_execute(func):
     Must be the outermost decorator (applied first in code, executed last).
     """
     @wraps(func)
-    def wrapper(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def wrapper(
+        self,
+        operation: str,
+        seq_of_parameters: Sequence,
+        batch_size: int = 500,
+        **kwargs: Any
+    ) -> int:
         if not seq_of_parameters:
             logger.warning('executemany called with no parameter sequences, skipping')
             return 0
 
-        # Get connection information
-        cn = self.connwrapper
-        db_type = get_dialect_name(cn) or 'unknown'
-        param_limit = get_param_limit_for_db(db_type)
-
-        # Calculate batch size
-        params_per_row = len(seq_of_parameters[0]) if isinstance(seq_of_parameters[0], (list, tuple)) else 1
-        max_batch_size = max(1, param_limit // params_per_row)
-
         # If parameters fit within a single batch, just call the original function
-        if len(seq_of_parameters) <= max_batch_size:
+        if len(seq_of_parameters) <= batch_size:
             return func(self, operation, seq_of_parameters, **kwargs)
 
-        logger.debug(f'Batching {len(seq_of_parameters)} parameter sets into chunks of {max_batch_size}')
+        logger.debug(f'Batching {len(seq_of_parameters)} parameter sets into chunks of {batch_size}')
 
         # Execute in batches
         total_rows = 0
-        for i in range(0, len(seq_of_parameters), max_batch_size):
-            chunk = seq_of_parameters[i:i+max_batch_size]
+        for i in range(0, len(seq_of_parameters), batch_size):
+            chunk = seq_of_parameters[i:i+batch_size]
             rows = func(self, operation, chunk, **kwargs)
             if rows >= 0:  # Some drivers might return -1 for unknown row count
                 total_rows += rows
@@ -201,7 +197,13 @@ class AbstractCursor(ABC, Generic[ConnectionType]):
         """Execute a database operation (query or command)."""
 
     @abstractmethod
-    def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(
+        self,
+        operation: str,
+        seq_of_parameters: Sequence,
+        batch_size: int = 500,
+        **kwargs: Any
+    ) -> int:
         """Execute against all parameter sequences."""
 
 
@@ -315,7 +317,8 @@ class PostgresqlCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, sql: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(self, sql: str, seq_of_parameters: Sequence, batch_size: int = 500, 
+                    **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for PostgreSQL."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
@@ -449,7 +452,8 @@ class MssqlCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, sql: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(self, sql: str, seq_of_parameters: Sequence, batch_size: int = 500, 
+                    **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for SQL Server."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
@@ -516,7 +520,13 @@ class SqliteCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, operation: str, seq_of_parameters: Sequence, **kwargs: Any) -> int:
+    def executemany(
+        self,
+        operation: str,
+        seq_of_parameters: Sequence,
+        batch_size: int = 500,
+        **kwargs: Any
+    ) -> int:
         """Execute the SQL statement against all parameter sequences for SQLite."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)

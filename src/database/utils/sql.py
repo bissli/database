@@ -318,26 +318,6 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     raise ValueError(f'Unknown dialect: {dialect}')
 
 
-def get_param_limit_for_db(dialect: str = 'postgresql') -> int:
-    """Get the parameter limit for a given database type.
-
-    Parameters
-        dialect: Database dialect name (default: 'postgresql')
-
-    Returns
-        Parameter limit for the database
-    """
-    assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
-
-    if dialect == 'postgresql':
-        return 9999 
-    if dialect == 'sqlite':
-        return 900
-    if dialect == 'mssql':
-        return 2000
-    return 900
-
-
 def chunk_sql_parameters(sql: str, args: list | tuple, param_limit: int) -> list:
     """Split parameters into chunks to avoid database parameter limits.
 
