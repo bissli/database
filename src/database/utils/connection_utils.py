@@ -191,11 +191,7 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
         # Create a new engine with provided settings
         url = create_url_from_options(options)
 
-        engine_kwargs = {
-            'pool_pre_ping': True,
-            'pool_reset_on_return': 'rollback',
-            'echo':  False
-        }
+        engine_kwargs = { 'echo':  False}
 
         # Configure pooling based on use_pool parameter
         if not use_pool:
@@ -205,6 +201,8 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
             engine_kwargs['pool_recycle'] = pool_recycle
             engine_kwargs['pool_timeout'] = pool_timeout
             engine_kwargs['max_overflow'] = 10
+            engine_kwargs['pool_pre_ping'] = True
+            engine_kwargs['pool_reset_on_return']= 'rollback'
 
         # Add any additional engine parameters
         engine_kwargs.update(kwargs)
