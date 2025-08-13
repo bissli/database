@@ -5,6 +5,8 @@ These tests verify the behavior of the handle_in_clause_params function
 which is responsible for expanding parameters in SQL IN clauses.
 """
 
+import datetime
+
 from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import handle_in_clause_params
 
@@ -319,37 +321,26 @@ def test_multiple_direct_list_parameters():
     assert len(result_args) == 4
 
 
-def test_connection_type_detection():
+def test_connection_type_detection(simple_mock_postgresql_connection, simple_mock_mssql_connection, simple_mock_sqlite_connection, simple_mock_transaction_factory):
     """Test that connection type detection works correctly with mocked connections"""
-    # Create mock connections
-    from tests.fixtures.mocks import _create_simple_mock_connection
-    from tests.fixtures.mocks import _create_simple_mock_transaction
-
-    pg_mock = _create_simple_mock_connection('postgresql')
-    odbc_mock = _create_simple_mock_connection('mssql')
-    sqlite_mock = _create_simple_mock_connection('sqlite')
 
     # Test dialect name detection
-    assert get_dialect_name(pg_mock) == 'postgresql'
-    assert get_dialect_name(odbc_mock) == 'mssql'
-    assert get_dialect_name(sqlite_mock) == 'sqlite'
+    assert get_dialect_name(simple_mock_postgresql_connection) == 'postgresql'
+    assert get_dialect_name(simple_mock_mssql_connection) == 'mssql'
+    assert get_dialect_name(simple_mock_sqlite_connection) == 'sqlite'
 
     # Test with connection wrappers
-    pg_wrapper = _create_simple_mock_transaction(pg_mock)
+    pg_wrapper = simple_mock_transaction_factory(simple_mock_postgresql_connection)
     assert get_dialect_name(pg_wrapper) == 'postgresql'
 
 
-def test_transaction_compatible():
+def test_transaction_compatible(simple_mock_postgresql_connection, simple_mock_transaction_factory):
     """Test that IN clause parameter processing works with transaction-like objects"""
     # This is a basic compatibility test to ensure the functionality would work with transactions
     # Full transaction testing would need a live database connection
 
-    from tests.fixtures.mocks import _create_simple_mock_connection
-    from tests.fixtures.mocks import _create_simple_mock_transaction
-
-    # Create a mock connection and transaction
-    mock_conn = _create_simple_mock_connection('postgresql')
-    mock_tx = _create_simple_mock_transaction(mock_conn)
+    # Create a mock transaction
+    mock_tx = simple_mock_transaction_factory(simple_mock_postgresql_connection)
 
     # Test that the connection type detection works with transaction objects
     sql = 'DELETE FROM users WHERE id IN %s'
@@ -361,6 +352,186 @@ def test_transaction_compatible():
     # Verify result has expected format
     assert '(%s, %s, %s)' in result_sql or '(?, ?, ?)' in result_sql
     assert result_args == (1, 2, 3)
+
+
+class TestMultiParameterInClause:
+    """Test SQL queries with multiple parameters including IN clause variations."""
+
+    def test_standard_in_clause_format(self):
+        """Test SQL query with standard 'item_id in %s' format."""
+        sql = """
+        select * from user_items
+        where
+            created_date = %s and
+            user_id = %s and
+            item_id in %s
+        """
+
+        item_ids = ['ITM001', 'ITM002', 'ITM003', 'ITM004']
+
+        params = ('2025-08-08', 'USER_A', item_ids)
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        # Verify the IN clause was expanded correctly
+        expected_placeholders = ', '.join(['%s'] * len(item_ids))
+        assert f'in ({expected_placeholders})' in result_sql.lower() or f'in ({", ".join(["?"] * len(item_ids))})' in result_sql.lower()
+
+        # Verify parameters were flattened correctly
+        expected_args = ('2025-08-08', 'USER_A') + tuple(item_ids)
+        assert result_args == expected_args
+
+    def test_parenthesized_in_clause_format(self):
+        """Test SQL query with parenthesized 'item_id in (%s)' format."""
+        sql = """
+        select * from user_items
+        where
+            created_date = %s and
+            user_id = %s and
+            item_id in (%s)
+        """
+
+        item_ids = ('ITM001', 'ITM002', 'ITM003', 'ITM004')
+
+        params = (datetime.date(2025, 8, 8), 'USER_A', item_ids)
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        # Verify the IN clause was expanded correctly
+        expected_placeholders = ', '.join(['%s'] * len(item_ids))
+        assert f'in ({expected_placeholders})' in result_sql.lower() or f'in ({", ".join(["?"] * len(item_ids))})' in result_sql.lower()
+
+        # Verify parameters were flattened correctly
+        expected_args = (datetime.date(2025, 8, 8), 'USER_A') + tuple(item_ids)
+        assert result_args == expected_args
+
+    def test_parenthesized_in_clause_basic(self):
+        """Ensure IN clause already containing parentheses is expanded correctly.
+        """
+        sql = 'SELECT * FROM items WHERE item_id IN (%s)'
+        args = (('ITM001', 'ITM002', 'ITM003', 'ITM004'),)
+
+        result_sql, result_args = handle_in_clause_params(sql, args)
+
+        assert '))' not in result_sql
+        expected_placeholders = ', '.join(['%s'] * 4)
+        assert f'in ({expected_placeholders})' in result_sql.lower() or f'in ({", ".join(["?"]*4)})' in result_sql.lower()
+        assert result_args == ('ITM001', 'ITM002', 'ITM003', 'ITM004')
+
+    def test_explicit_placeholder_in_clause(self):
+        """Test SQL query with explicit placeholders in IN clause like 'id in (%s, %s, %s)'."""
+        sql = """
+        select * from user_items
+        where
+            (created_date) = %s and
+            (user_id = %s) and
+            (item_id in (%s, %s, %s))
+        """
+
+        params = ('2025-08-08', 'USER_A', 'ITM001', 'ITM002', 'ITM003')
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        assert 'item_id in (%s, %s, %s)' in result_sql
+
+        assert result_args == params
+
+    def test_in_clause_as_first_condition(self):
+        """Test SQL query where IN clause is the first condition in WHERE statement."""
+        sql = """
+        select * from user_items
+        where
+            item_id in %s and
+            created_date = %s and
+            user_id = %s
+        """
+
+        item_ids = ['ITM001', 'ITM002', 'ITM003']
+        params = (item_ids, '2025-08-08', 'USER_A')
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        expected_placeholders = ', '.join(['%s'] * len(item_ids))
+        assert f'in ({expected_placeholders})' in result_sql.lower() or f'in ({", ".join(["?"] * len(item_ids))})' in result_sql.lower()
+
+        expected_args = tuple(item_ids) + ('2025-08-08', 'USER_A')
+        assert result_args == expected_args
+
+    def test_in_clause_as_middle_condition(self):
+        """Test SQL query where IN clause is in the middle of WHERE conditions."""
+        sql = """
+        select * from user_items
+        where
+            created_date = %s and
+            item_id in (%s) and
+            user_id = %s and
+            status = %s
+        """
+
+        item_ids = ['ITM001', 'ITM002']
+        params = ('2025-08-08', item_ids, 'USER_A', 'active')
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        expected_placeholders = ', '.join(['%s'] * len(item_ids))
+        assert f'in ({expected_placeholders})' in result_sql.lower() or f'in ({", ".join(["?"] * len(item_ids))})' in result_sql.lower()
+
+        expected_args = ('2025-08-08',) + tuple(item_ids) + ('USER_A', 'active')
+        assert result_args == expected_args
+
+    def test_multiple_in_clauses_various_positions(self):
+        """Test SQL query with multiple IN clauses in different positions."""
+        sql = """
+        select * from user_items
+        where
+            item_id in (%s) and
+            created_date in (%s) and
+            status in (%s) and
+            user_id in (%s)
+        """
+
+        item_ids = ('ITM001', 'ITM002')
+        statuses = ('active', 'pending', 'archived')
+        params = (item_ids, '2025-08-08', statuses, 'USER_A')
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        item_placeholders = ', '.join(['%s'] * len(item_ids))
+        status_placeholders = ', '.join(['%s'] * len(statuses))
+
+        assert f'item_id in ({item_placeholders})' in result_sql.lower() or f'item_id in ({", ".join(["?"] * len(item_ids))})' in result_sql.lower()
+        assert f'status in ({status_placeholders})' in result_sql.lower() or f'status in ({", ".join(["?"] * len(statuses))})' in result_sql.lower()
+
+        expected_args = tuple(item_ids) + ('2025-08-08',) + tuple(statuses) + ('USER_A',)
+        assert result_args == expected_args
+
+    def test_in_clause_first_with_named_params(self):
+        """Test SQL query with IN clause first using named parameters."""
+        sql = """
+        select * from user_items
+        where
+            item_id in %(item_ids)s and
+            created_date = %(created_date)s and
+            user_id = %(user_id)s
+        """
+
+        params = {
+            'item_ids': ['ITM001', 'ITM002', 'ITM003'],
+            'created_date': '2025-08-08',
+            'user_id': 'USER_A'
+        }
+
+        result_sql, result_args = handle_in_clause_params(sql, params)
+
+        assert 'item_id in (%(item_ids_0)s, %(item_ids_1)s, %(item_ids_2)s)' in result_sql.lower()
+
+        assert result_args['item_ids_0'] == 'ITM001'
+        assert result_args['item_ids_1'] == 'ITM002'
+        assert result_args['item_ids_2'] == 'ITM003'
+        assert result_args['created_date'] == '2025-08-08'
+        assert result_args['user_id'] == 'USER_A'
+
+        assert 'item_ids' not in result_args
 
 
 def test_different_parameter_formats():
@@ -443,14 +614,10 @@ def test_parameter_handling_edge_cases():
     assert result_args[0] is None
 
 
-def test_direct_list_parameter_with_transaction():
+def test_direct_list_parameter_with_transaction(simple_mock_postgresql_connection, simple_mock_transaction_factory):
     """Verify direct list parameters work with transaction-like objects."""
-    from tests.fixtures.mocks import _create_simple_mock_connection
-    from tests.fixtures.mocks import _create_simple_mock_transaction
-
-    # Create mock connection and transaction
-    mock_conn = _create_simple_mock_connection('postgresql')
-    mock_tx = _create_simple_mock_transaction(mock_conn)
+    # Create mock transaction
+    mock_tx = simple_mock_transaction_factory(simple_mock_postgresql_connection)
 
     # Test single item list with transaction
     sql = 'SELECT * FROM users WHERE id IN %s'

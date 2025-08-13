@@ -175,6 +175,78 @@ def _create_simple_mock_transaction(connection):
 
 
 @pytest.fixture
+def simple_mock_postgresql_connection():
+    """
+    Fixture that provides a simple PostgreSQL mock connection.
+
+    This fixture is designed for testing connection type detection. For more
+    comprehensive mocks, use mock_postgres_conn.
+
+    Returns
+        Simple mock PostgreSQL connection object
+    """
+    return _create_simple_mock_connection('postgresql')
+
+
+@pytest.fixture
+def simple_mock_mssql_connection():
+    """
+    Fixture that provides a simple SQL Server mock connection.
+
+    This fixture is designed for testing connection type detection. For more
+    comprehensive mocks, use mock_sqlserver_conn.
+
+    Returns
+        Simple mock SQL Server connection object
+    """
+    return _create_simple_mock_connection('mssql')
+
+
+@pytest.fixture
+def simple_mock_sqlite_connection():
+    """
+    Fixture that provides a simple SQLite mock connection.
+
+    This fixture is designed for testing connection type detection. For more
+    comprehensive mocks, use mock_sqlite_conn.
+
+    Returns
+        Simple mock SQLite connection object
+    """
+    return _create_simple_mock_connection('sqlite')
+
+
+@pytest.fixture
+def simple_mock_unknown_connection():
+    """
+    Fixture that provides a simple unknown type mock connection.
+
+    This fixture is designed for testing connection type detection with
+    unrecognized connection types.
+
+    Returns
+        Simple mock connection object of unknown type
+    """
+    return _create_simple_mock_connection('unknown')
+
+
+@pytest.fixture
+def simple_mock_transaction_factory():
+    """
+    Fixture that provides a factory function to create simple mock transactions.
+
+    This fixture is designed for testing transaction-related functions that need
+    to detect the underlying connection type through a transaction object.
+
+    Returns
+        Factory function that creates mock transactions from connections
+    """
+    def factory(connection):
+        return _create_simple_mock_transaction(connection)
+    return factory
+
+
+@pytest.fixture
 def create_simple_mock_connection():
     """
     Fixture that provides a factory function to create simple mock connections.

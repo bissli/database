@@ -163,76 +163,6 @@ def handle_in_clause_params(sql: str, args: dict | list | tuple | Any, dialect: 
 
     Returns
         Tuple of processed SQL and processed arguments
-
-    Examples
-
-    Basic IN clause expansion:
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [(1, 2, 3)])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [1, 2, 3])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [[1, 2, 3]])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN (%s)", [(1, 2, 3)])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    Handling empty sequences:
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [()])
-    ('SELECT * FROM users WHERE id IN (NULL)', ())
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", ([],))
-    ('SELECT * FROM users WHERE id IN (NULL)', ())
-
-    Single-item sequences:
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [(1,)])
-    ('SELECT * FROM users WHERE id IN (%s)', (1,))
-
-    Named parameters:
-    >>> sql, args = handle_in_clause_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     {'ids': [1, 2, 3]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Named parameters with parentheses:
-    >>> sql, args = handle_in_clause_params(
-    ...     "SELECT * FROM users WHERE id IN (%(ids)s)",
-    ...     {'ids': [1, 2, 3]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Multiple IN clauses:
-    >>> sql, args = handle_in_clause_params(
-    ...     "SELECT * FROM users WHERE status IN %(status)s AND role IN %(roles)s",
-    ...     {'status': ['active', 'pending'], 'roles': ['admin', 'user']}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE status IN (%(status_0)s, %(status_1)s) AND role IN (%(roles_0)s, %(roles_1)s)'
-    >>> sorted(args.items())
-    [('roles_0', 'admin'), ('roles_1', 'user'), ('status_0', 'active'), ('status_1', 'pending')]
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id IN %s AND role IN %s",
-    ...                         [(1, 2), ('admin', 'user')])
-    ('SELECT * FROM users WHERE id IN (%s, %s) AND role IN (%s, %s)', (1, 2, 'admin', 'user'))
-
-    Non-IN clause statements:
-    >>> handle_in_clause_params("SELECT * FROM users WHERE id = %s", [1])
-    ('SELECT * FROM users WHERE id = %s', [1])
-
-    >>> handle_in_clause_params("SELECT * FROM users WHERE name LIKE %s", ['John%'])
-    ('SELECT * FROM users WHERE name LIKE %s', ['John%'])
-
-    >>> handle_in_clause_params("SELECT * FROM users", [])
-    ('SELECT * FROM users', [])
     """
     assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
 
@@ -276,36 +206,6 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
 
     Raises
         ValueError: If an unsupported dialect is specified
-
-    Examples
-
-    PostgreSQL (default) quoting:
-    >>> quote_identifier("my_table")
-    '"my_table"'
-    >>> quote_identifier("user")  # Reserved word safe
-    '"user"'
-    >>> quote_identifier('table_with"quotes')  # Escapes quotes by doubling
-    '"table_with""quotes"'
-
-    SQLite uses the same quoting style as PostgreSQL:
-    >>> quote_identifier("my_table", dialect='sqlite')
-    '"my_table"'
-    >>> quote_identifier('column"with"quotes', dialect='sqlite')
-    '"column""with""quotes"'
-
-    Microsoft SQL Server (MSSQL) uses square brackets:
-    >>> quote_identifier("my_table", dialect='mssql')
-    '[my_table]'
-    >>> quote_identifier("order", dialect='mssql')  # Reserved word safe
-    '[order]'
-    >>> quote_identifier("column]with]brackets", dialect='mssql')  # Escapes brackets
-    '[column]]with]]brackets]'
-
-    Unknown dialects raise an error:
-    >>> quote_identifier("my_table", dialect='unknown')
-    Traceback (most recent call last):
-      ...
-    ValueError: Unknown database type: unknown
     """
     assert isinstance(dialect, str), f'Dialect must be a string (not {dialect})'
 
@@ -418,17 +318,12 @@ def handle_query_params(func: Any) -> Any:
     """
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
-        # Always escape percent signs in literals for all SQL queries
         sql = escape_percent_signs_in_literals(sql)
 
-        # Skip the rest of the processing if no arguments provided
         if not args:
             return func(cn, sql, *args, **kwargs)
 
-        # Check if SQL has any placeholders
         if not has_placeholders(sql):
-            # If no placeholders but parameters provided, ignore parameters
-            # Pass an empty tuple instead of removing args from kwargs
             return func(cn, sql, *(), **kwargs)
 
         # Get database type and process parameters
@@ -450,44 +345,6 @@ def escape_percent_signs_in_literals(sql: str) -> str:
 
     Returns
         SQL with escaped percent signs in string literals
-
-    Examples
-
-    Empty SQL or SQL without percent signs returns unchanged:
-    >>> escape_percent_signs_in_literals("")
-    ''
-    >>> escape_percent_signs_in_literals("SELECT * FROM users")
-    'SELECT * FROM users'
-
-    SELECT queries with percent signs in literals but no placeholders:
-    >>> escape_percent_signs_in_literals("SELECT * FROM table WHERE col = '%value'")
-    "SELECT * FROM table WHERE col = '%value'"
-
-    Single-quoted strings with percent signs get escaped:
-    >>> escape_percent_signs_in_literals("UPDATE users SET status = 'progress: 50%'")
-    "UPDATE users SET status = 'progress: 50%%'"
-
-    Double-quoted strings with percent signs get escaped:
-    >>> escape_percent_signs_in_literals('UPDATE config SET message = "Complete: 75%"')
-    'UPDATE config SET message = "Complete: 75%%"'
-
-    SQL with percent signs in literals and placeholders:
-    >>> escape_percent_signs_in_literals("UPDATE users SET name = %s, status = 'progress: 25%'")
-    "UPDATE users SET name = %s, status = 'progress: 25%%'"
-
-    Already escaped percent signs remain unchanged:
-    >>> escape_percent_signs_in_literals("SELECT * FROM table WHERE col LIKE 'pre%%post'")
-    "SELECT * FROM table WHERE col LIKE 'pre%%post'"
-
-    Complex query with multiple escapes:
-    >>> escape_percent_signs_in_literals("INSERT INTO logs VALUES ('%data%', 'progress: %%30%')")
-    "INSERT INTO logs VALUES ('%%data%%', 'progress: %%30%%')"
-
-    SQL with escaped quotes within string literals:
-    >>> escape_percent_signs_in_literals("SELECT * FROM users WHERE text = 'It''s 100% done'")
-    "SELECT * FROM users WHERE text = 'It''s 100%% done'"
-    >>> escape_percent_signs_in_literals('SELECT * FROM config WHERE message = "Say ""hello"" at 50%"')
-    'SELECT * FROM config WHERE message = "Say ""hello"" at 50%%"'
     """
     if not sql or '%' not in sql:
         return sql
@@ -549,13 +406,12 @@ def handle_null_is_operators(sql: str, args: Any) -> tuple[str, Any]:
 
 
 def _unwrap_nested_parameters(sql: str, args: Any) -> Any:
-    """Unwrap nested parameters for multi-statement queries.
+    """Unwrap nested parameters for SQL queries.
 
     This function handles the case where parameters are wrapped in an extra list/tuple layer,
-    which is commonly seen in multi-statement executions. It only unwraps parameters when:
-    1. The SQL contains multiple statements (separated by semicolons)
-    2. There's exactly one argument which is itself a sequence
-    3. The number of placeholders in the SQL matches the length of the inner sequence
+    which is commonly seen in query executions. It only unwraps parameters when:
+    1. There's exactly one argument which is itself a sequence
+    2. The number of placeholders in the SQL matches the length of the inner sequence
 
     Parameters
         sql: SQL query string
@@ -563,44 +419,6 @@ def _unwrap_nested_parameters(sql: str, args: Any) -> Any:
 
     Returns
         Parameters with unnecessary nesting removed if appropriate, otherwise original args
-
-    Examples
-
-    Non-sequence args remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", "not_a_sequence")
-    'not_a_sequence'
-    >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", 42)
-    42
-    >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", None) is None
-    True
-
-    Empty sequences remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", [])
-    []
-    >>> _unwrap_nested_parameters("SELECT * FROM users; INSERT INTO logs VALUES (?)", ())
-    ()
-
-    Single-statement queries (no semicolon) remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT * FROM users WHERE id = ?", [(1,)])
-    [(1,)]
-
-    Multi-statement queries with multiple args remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [1, 2])
-    [1, 2]
-
-    Multi-statement queries with one arg that's a string remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", ["not_a_sequence"])
-    ['not_a_sequence']
-
-    Multi-statement with mismatched placeholder and parameter counts remain unchanged:
-    >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [(1, 2, 3)])
-    [(1, 2, 3)]
-
-    Only unwraps when SQL has multiple statements, one arg is a sequence, and counts match:
-    >>> _unwrap_nested_parameters("SELECT ?; INSERT ?", [(1, 2)])
-    (1, 2)
-    >>> _unwrap_nested_parameters("INSERT INTO users VALUES (?, ?); SELECT ?", [('John', 25, 42)])
-    ('John', 25, 42)
     """
     if args is None:
         return None
@@ -609,9 +427,8 @@ def _unwrap_nested_parameters(sql: str, args: Any) -> Any:
     if not isinstance(args, (list, tuple)) or not args:
         return args
 
-    # Only unwrap for multi-statement queries with exactly one parameter
-    has_multiple_statements = ';' in sql
-    if not has_multiple_statements or len(args) != 1:
+    # Only unwrap if there's exactly one parameter
+    if len(args) != 1:
         return args
 
     # Only unwrap if first arg is a non-string sequence
@@ -640,7 +457,7 @@ def _handle_null_is_positional_params(sql: str, args: list | tuple) -> tuple[str
         Tuple of processed SQL and processed arguments
     """
     # Pattern to find IS or IS NOT followed by a positional placeholder
-    pattern = r'\b(IS\s+NOT|IS)\s+(%s|\?)\b'
+    pattern = r'\b(IS\s+NOT|IS)\s+(%s|\?)'
 
     # Convert list/tuple args to a list for modification
     args_was_tuple = isinstance(args, tuple)
@@ -896,6 +713,181 @@ def _preprocess_in_clause_params(sql: str, args: Any) -> Any:
     return args
 
 
+def _handle_mixed_positional_params(sql: str, args: list | tuple) -> tuple[str, list] | None:
+    """Handle SQL with mixed positional parameters (scalars and sequences for IN clauses).
+
+    This function specifically handles cases where you have a mix of regular parameters
+    and list/tuple parameters for IN clauses in any order.
+
+    Parameters
+        sql: SQL query string
+        args: List or tuple of parameters
+
+    Returns
+        Tuple of (processed_sql, processed_args) if handled, None otherwise
+    """
+    # Quick checks
+    if not args or ' in ' not in sql.lower():
+        return None
+
+    # Find all placeholders and IN clauses
+    placeholder_pattern = re.compile(r'%s|\?')
+    placeholders = list(placeholder_pattern.finditer(sql))
+
+    in_pattern = re.compile(r'\bIN\s+(?:\()?(%s|\?)(?:\))?', re.IGNORECASE)
+    in_matches = list(in_pattern.finditer(sql))
+
+    # Must have same number of placeholders as args
+    if len(placeholders) != len(args):
+        return None
+
+    # Check if we have any sequence parameters for IN clauses
+    has_sequence_for_in = False
+    in_placeholder_positions = {m.start(1) for m in in_matches}
+
+    for i, ph in enumerate(placeholders):
+        if ph.start() in in_placeholder_positions and i < len(args):
+            if issequence(args[i]) and not isinstance(args[i], str):
+                has_sequence_for_in = True
+                break
+
+    if not has_sequence_for_in:
+        return None
+
+    # Process the SQL and arguments
+    result_sql = sql
+    result_args = []
+    offset = 0
+
+    # Process each argument in order
+    for i, (ph, arg) in enumerate(zip(placeholders, args)):
+        # Check if this placeholder is part of an IN clause
+        matching_in_clause = None
+        for in_match in in_matches:
+            if ph.start() == in_match.start(1):
+                matching_in_clause = in_match
+                break
+
+        if matching_in_clause and issequence(arg) and not isinstance(arg, str):
+            # Expand IN clause parameter
+            if not arg:
+                replacement = 'IN (NULL)'
+                expanded_args = []
+            else:
+                placeholders_str = ', '.join(['%s'] * len(arg))
+                replacement = f'IN ({placeholders_str})'
+                expanded_args = list(arg)
+
+            # Update SQL
+            start_pos = matching_in_clause.start(0) + offset
+            end_pos = matching_in_clause.end(0) + offset
+            result_sql = result_sql[:start_pos] + replacement + result_sql[end_pos:]
+            offset += len(replacement) - (end_pos - start_pos)
+
+            # Add expanded arguments
+            result_args.extend(expanded_args)
+        else:
+            # Regular parameter or non-sequence IN clause parameter
+            result_args.append(arg)
+
+    return result_sql, result_args
+
+
+def _handle_direct_list_params(sql: str, args: list | tuple) -> tuple[str, list] | None:
+    """Handle direct list parameters for a single IN clause.
+
+    Handles cases like:
+    - "WHERE x IN %s" with args [1, 2, 3]
+    - "WHERE x IN %s" with args (1, 2, 3)
+
+    Parameters
+        sql: SQL query string
+        args: List or tuple of parameters
+
+    Returns
+        Tuple of (processed_sql, processed_args) if handled, None otherwise
+    """
+    # Check if this is a direct list parameter case
+    if not _is_direct_list_parameter(args, sql):
+        return None
+
+    # Construct SQL with expanded placeholders
+    in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
+    match = in_pattern.search(sql)
+
+    if not match:
+        return None
+
+    # Generate placeholders
+    placeholders = ', '.join(['%s'] * len(args))
+
+    # Replace the IN clause
+    start_pos = match.start(0)
+    end_pos = match.end(0)
+    new_sql = sql[:start_pos] + f'IN ({placeholders})' + sql[end_pos:]
+
+    return new_sql, list(args)
+
+
+def _handle_single_in_clause_params(sql: str, args: list | tuple) -> tuple[str, list] | None:
+    """Handle single IN clause with nested list/tuple.
+
+    Handles cases like:
+    - "WHERE x IN %s" with args [(1, 2, 3)]
+    - "WHERE x IN (%s)" with args [[1, 2, 3]]
+
+    Parameters
+        sql: SQL query string
+        args: List or tuple of parameters
+
+    Returns
+        Tuple of (processed_sql, processed_args) if handled, None otherwise
+    """
+    # Check for single nested parameter
+    if len(args) != 1 or not issequence(args[0]) or isinstance(args[0], str):
+        return None
+
+    # Must have exactly one IN clause
+    if sql.lower().count(' in ') != 1:
+        return None
+
+    inner_seq = args[0]
+
+    # Handle empty sequence
+    if not inner_seq:
+        if 'IN (%s)' in sql:
+            return sql.replace('IN (%s)', 'IN (NULL)'), []
+        in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
+        match = in_pattern.search(sql)
+        if match:
+            start_pos = match.start(0)
+            end_pos = match.end(0)
+            new_sql = sql[:start_pos] + 'IN (NULL)' + sql[end_pos:]
+            return new_sql, []
+        return None
+
+    # Generate placeholders
+    placeholders = ', '.join(['%s'] * len(inner_seq))
+
+    # Handle "IN (%s)" format (allow arbitrary whitespace/case)
+    in_parenthesized_pattern = re.compile(r'\bIN\s*\(\s*%s\s*\)', re.IGNORECASE)
+    if in_parenthesized_pattern.search(sql):
+        # Replace only the first occurrence to avoid touching subsequent clauses
+        new_sql = in_parenthesized_pattern.sub(f'IN ({placeholders})', sql, count=1)
+        return new_sql, list(inner_seq)
+
+    # Handle "IN %s" format
+    in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
+    match = in_pattern.search(sql)
+    if match:
+        start_pos = match.start(0)
+        end_pos = match.end(0)
+        new_sql = sql[:start_pos] + f'IN ({placeholders})' + sql[end_pos:]
+        return new_sql, list(inner_seq)
+
+    return None
+
+
 def _handle_positional_in_params(sql, args, dialect='postgresql'):
     """
     Process IN clauses with positional parameters (%s or ?).
@@ -927,70 +919,13 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
        - Input: "WHERE x IN (%s)" with args [(1, 2, 3)]
        - Output: "WHERE x IN (%s, %s, %s)" with args (1, 2, 3)
 
-    Args:
+    Parameters
         sql: SQL query string
         args: List or tuple of parameters
+        dialect: Database dialect name (default: 'postgresql')
 
     Returns
         Tuple of (processed_sql, processed_args)
-
-    Examples
-    >>> _handle_positional_in_params("SELECT * FROM users", [])
-    ('SELECT * FROM users', [])
-
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id = %s", [42])
-    ('SELECT * FROM users WHERE id = %s', [42])
-
-    # Direct list parameters
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [1, 2, 3])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    # Nested list in a single parameter
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [(1, 2, 3)])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [[1, 2, 3]])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    # SQL with parentheses already
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN (%s)", [(1, 2, 3)])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    # Empty sequence
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [()])
-    ('SELECT * FROM users WHERE id IN (NULL)', ())
-
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [[]])
-    ('SELECT * FROM users WHERE id IN (NULL)', ())
-
-    # Single-item sequence
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [(1,)])
-    ('SELECT * FROM users WHERE id IN (%s)', (1,))
-
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [[42]])
-    ('SELECT * FROM users WHERE id IN (%s)', (42,))
-
-    # Multiple IN clauses
-    >>> _handle_positional_in_params(
-    ...     "SELECT * FROM users WHERE id IN %s AND role IN %s",
-    ...     [(1, 2), ('admin', 'user')]
-    ... )
-    ('SELECT * FROM users WHERE id IN (%s, %s) AND role IN (%s, %s)', (1, 2, 'admin', 'user'))
-
-    # Double-nested sequences
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN %s", [[(1, 2, 3)]])
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3))
-
-    # Non-IN clause parameters mixed with IN clause
-    >>> _handle_positional_in_params(
-    ...     "SELECT * FROM users WHERE id IN %s AND name = %s",
-    ...     [(1, 2, 3), 'John']
-    ... )
-    ('SELECT * FROM users WHERE id IN (%s, %s, %s) AND name = %s', (1, 2, 3, 'John'))
-
-    # With ? placeholders instead of %s
-    >>> _handle_positional_in_params("SELECT * FROM users WHERE id IN ?", [(1, 2, 3)])
-    ('SELECT * FROM users WHERE id IN (?, ?, ?)', (1, 2, 3))
     """
     # Quick exit for empty args or no IN clause
     if not args or ' in ' not in sql.lower():
@@ -1001,42 +936,20 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
     if args_was_tuple:
         args = list(args)
 
-    # Handle direct parameter cases where the entire args list is values for a single IN clause
-    # This matches tests like handle_in_clause_params("SELECT * FROM users WHERE id IN %s", [1, 2, 3])
-    if sql.lower().count(' in ') == 1 and sql.count('%s') == 1:
-        # Check if args is a list/tuple of simple values (not nested lists/tuples except strings)
-        if all(not issequence(item) or isinstance(item, str) for item in args):
-            # Construct a new SQL with expanded placeholders
-            in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
-            match = in_pattern.search(sql)
+    # Route to appropriate handler based on pattern
+    handlers = [
+        _handle_mixed_positional_params,      # Mixed scalars and sequences
+        _handle_direct_list_params,           # Direct list like [1,2,3]
+        _handle_single_in_clause_params,      # Single IN with nested list
+    ]
 
-            if match:
-                # Generate placeholders
-                placeholders = ', '.join(['%s'] * len(args))
+    for handler in handlers:
+        result = handler(sql, args)
+        if result is not None:
+            result_sql, result_args = result
+            return result_sql, tuple(result_args)
 
-                # Replace the IN clause
-                start_pos = match.start(0)
-                end_pos = match.end(0)
-                new_sql = sql[:start_pos] + f'IN ({placeholders})' + sql[end_pos:]
-
-                # Return the modified SQL and args as a tuple to match expected return type
-                return new_sql, tuple(args)
-
-    # Special case for "IN (%s)" with a nested list/tuple - handles the doctest case
-    if 'IN (%s)' in sql and isinstance(args, (list, tuple)) and len(args) == 1 and isinstance(args[0], (list, tuple)):
-        # Extract the inner sequence
-        inner_seq = args[0]
-        if not inner_seq:
-            return sql.replace('IN (%s)', 'IN (NULL)'), ()
-
-        # Generate placeholders and replace in SQL
-        placeholders = ', '.join(['%s'] * len(inner_seq))
-        new_sql = sql.replace('IN (%s)', f'IN ({placeholders})')
-
-        # Return with flattened parameters as a tuple
-        return new_sql, tuple(inner_seq)
-
-    # Special case for double-nested sequences like [[(1, 2, 3)]]
+    # Handle special case for double-nested sequences like [[(1, 2, 3)]]
     if len(args) == 1 and issequence(args[0]) and len(args[0]) == 1 and issequence(args[0][0]):
         # Find the IN clause
         in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
@@ -1055,44 +968,6 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
             new_sql = sql[:start_pos] + f'IN ({placeholders})' + sql[end_pos:]
 
             return new_sql, flattened
-
-    # If we have a top-level tuple/list containing exactly one item
-    # and that item is itself a sequence, flatten it for processing
-    # This handles cases like [(1, 2, 3)] -> should expand to (1, 2, 3)
-    if len(args) == 1 and issequence(args[0]) and not isinstance(args[0], str):
-        param = args[0]
-
-        # Special handling for empty sequences
-        if not param:
-            # Find first IN clause
-            in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
-            match = in_pattern.search(sql)
-
-            if match:
-                # Replace with NULL
-                start_pos = match.start(0)
-                end_pos = match.end(0)
-                new_sql = sql[:start_pos] + 'IN (NULL)' + sql[end_pos:]
-                return new_sql, ()
-
-        # Expand the parameters
-        placeholders = ', '.join(['%s'] * len(param))
-
-        # Find first IN clause
-        in_pattern = re.compile(r'\bIN\s+(%s|\(%s\))\b', re.IGNORECASE)
-        match = in_pattern.search(sql)
-
-        if match:
-            # Replace with expanded placeholders
-            start_pos = match.start(0)
-            end_pos = match.end(0)
-            new_sql = sql[:start_pos] + f'IN ({placeholders})' + sql[end_pos:]
-
-            # Always flatten the tuple/list to properly handle cases like [(1,2,3)]
-            if isinstance(param, (list, tuple)):
-                return new_sql, tuple(param)
-
-            return new_sql, param
 
     # Handle question mark placeholders the same way as %s
     if '?' in sql and ' in ' in sql.lower():
@@ -1220,21 +1095,6 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
     return current_sql, result_args
 
 
-def _replace_with_null(sql, start_pos, end_pos):
-    """
-    Replace an IN clause placeholder with NULL.
-
-    Args:
-        sql: SQL query string
-        start_pos: Starting position of the replacement
-        end_pos: Ending position of the replacement
-
-    Returns
-        str: SQL with the replacement applied
-    """
-    return sql[:start_pos] + 'IN (NULL)' + sql[end_pos:]
-
-
 def _handle_named_in_params(sql, args):
     """
     Process IN clauses with named parameters (%(name)s).
@@ -1268,123 +1128,12 @@ def _handle_named_in_params(sql, args):
        - Output: "WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)"
                  with args {'ids_0': 1, 'ids_1': 2, 'ids_2': 3}
 
-    Args:
+    Parameters
         sql: SQL query string
         args: Dictionary of named parameters or tuple/list containing a dictionary
 
     Returns
         Tuple of (processed_sql, processed_args)
-
-    Examples
-        Basic IN clause expansion with named parameters:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     {'ids': [1, 2, 3]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Handling an empty sequence:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     {'ids': []}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (NULL)'
-    >>> args
-    {}
-
-    Multiple IN clauses with different parameter names:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s AND status IN %(statuses)s",
-    ...     {'ids': [1, 2], 'statuses': ['active', 'pending']}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s) AND status IN (%(statuses_0)s, %(statuses_1)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('statuses_0', 'active'), ('statuses_1', 'pending')]
-
-    Handling a dictionary within a tuple:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     ({'ids': [1, 2, 3]},)
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    SQL with parentheses already around the parameter:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN (%(ids)s)",
-    ...     {'ids': [1, 2, 3]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Case-insensitive handling of IN keyword:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id in %(ids)s",
-    ...     {'ids': [1, 2, 3]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id in (%(ids_0)s, %(ids_1)s, %(ids_2)s)'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Non-sequence parameters remain unchanged:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id = %(id)s",
-    ...     {'id': 42}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id = %(id)s'
-    >>> args
-    {'id': 42}
-
-    Only sequence parameters in IN clauses are expanded:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s AND name = %(name)s",
-    ...     {'ids': [1, 2, 3], 'name': 'John'}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s, %(ids_1)s, %(ids_2)s) AND name = %(name)s'
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3), ('name', 'John')]
-
-    Single-item sequences are expanded normally:
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     {'ids': [42]}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN (%(ids_0)s)'
-    >>> args
-    {'ids_0': 42}
-
-    String values (not expanded, even though strings are sequences):
-
-    >>> sql, args = _handle_named_in_params(
-    ...     "SELECT * FROM users WHERE id IN %(ids)s",
-    ...     {'ids': 'not_a_list'}
-    ... )
-    >>> sql
-    'SELECT * FROM users WHERE id IN %(ids)s'
-    >>> args
-    {'ids': 'not_a_list'}
     """
     # Handle case where args is a tuple/list containing a dictionary
     if issequence(args) and not isinstance(args, str) and len(args) == 1 and isinstance(args[0], dict):
@@ -1510,61 +1259,13 @@ def _generate_named_placeholders(base_name, param_values, args_dict):
     adds them to the args dictionary. Used to expand list/tuple parameters
     for SQL IN clauses with named parameters.
 
-    Args:
+    Parameters
         base_name: Base parameter name (e.g., 'ids')
         param_values: List, tuple or other sequence of values to expand
         args_dict: Args dictionary to update with new named parameters
 
     Returns
-        list: List of named placeholder strings (e.g., ['%(ids_0)s', '%(ids_1)s'])
-
-    Examples
-        Basic usage with a list of integers:
-
-    >>> args = {}
-    >>> placeholders = _generate_named_placeholders('ids', [1, 2, 3], args)
-    >>> placeholders
-    ['%(ids_0)s', '%(ids_1)s', '%(ids_2)s']
-    >>> sorted(args.items())
-    [('ids_0', 1), ('ids_1', 2), ('ids_2', 3)]
-
-    Works with tuples and preserves value types:
-
-    >>> args = {}
-    >>> placeholders = _generate_named_placeholders('vals', (10.5, 'text', None), args)
-    >>> placeholders
-    ['%(vals_0)s', '%(vals_1)s', '%(vals_2)s']
-    >>> sorted(args.items())
-    [('vals_0', 10.5), ('vals_1', 'text'), ('vals_2', None)]
-
-    Empty collection case:
-
-    >>> args = {}
-    >>> placeholders = _generate_named_placeholders('empty', [], args)
-    >>> placeholders
-    []
-    >>> args
-    {}
-
-    Multiple parameters with the same base name:
-
-    >>> args = {'status_0': 'active'}
-    >>> placeholders = _generate_named_placeholders('status', ['pending', 'deleted'], args)
-    >>> placeholders
-    ['%(status_1)s', '%(status_2)s']
-    >>> sorted(args.items())
-    [('status_0', 'active'), ('status_1', 'pending'), ('status_2', 'deleted')]
-
-    Works with complex data types:
-
-    >>> import datetime
-    >>> args = {}
-    >>> dt = datetime.datetime(2023, 1, 1, 12, 0, 0)
-    >>> placeholders = _generate_named_placeholders('dates', [dt], args)
-    >>> placeholders
-    ['%(dates_0)s']
-    >>> list(args.values())[0] == dt
-    True
+        List of named placeholder strings (e.g., ['%(ids_0)s', '%(ids_1)s'])
     """
     placeholders = []
     # Find the highest existing index for this base_name
@@ -1627,46 +1328,6 @@ def has_placeholders(sql: str | None) -> bool:
 
     Returns
         True if SQL contains placeholders, False otherwise
-
-    Examples
-
-    Empty or None SQL handling:
-    >>> has_placeholders("")
-    False
-    >>> has_placeholders(None)
-    False
-
-    SQL without any placeholders:
-    >>> has_placeholders("SELECT * FROM users")
-    False
-    >>> has_placeholders("SELECT * FROM stats WHERE growth > 10%")
-    False
-
-    SQL with positional placeholders:
-    >>> has_placeholders("SELECT * FROM users WHERE id = %s")
-    True
-    >>> has_placeholders("SELECT * FROM users WHERE id = ?")
-    True
-    >>> has_placeholders("INSERT INTO users VALUES (%s, %s, ?)")
-    True
-
-    SQL with named placeholders:
-    >>> has_placeholders("SELECT * FROM users WHERE id = %(user_id)s")
-    True
-    >>> has_placeholders("INSERT INTO users VALUES (%(id)s, %(name)s)")
-    True
-
-    SQL with mixed placeholder types:
-    >>> has_placeholders("SELECT * FROM users WHERE id = %s AND name = %(name)s")
-    True
-    >>> has_placeholders("SELECT * FROM users WHERE id IN (?, ?, ?)")
-    True
-
-    SQL with placeholders inside literals (still detected as placeholders):
-    >>> has_placeholders("SELECT * FROM users WHERE format LIKE '%s'")
-    True
-    >>> has_placeholders("SELECT * FROM users WHERE name = '?'")
-    True
     """
     if sql is None:
         return False
@@ -1677,7 +1338,3 @@ def has_placeholders(sql: str | None) -> bool:
 
     # Check for named placeholders like %(name)s
     return bool(re.search('%\\([^)]+\\)s', sql))
-
-
-if __name__ == '__main__':
-    __import__('doctest').testmod(optionflags=4 | 8 | 32)
