@@ -19,6 +19,29 @@ from libb.iterutils import isiterable, issequence
 logger = logging.getLogger(__name__)
 
 #
+# Pre-compiled regex patterns for performance optimization
+#
+
+_PLACEHOLDER_PATTERNS = {
+    'positional': re.compile(r'%s|\?'),
+    'named': re.compile(r'%\([^)]+\)s'),
+    'in_clause': re.compile(r'\bIN\s+(%s|\?|%\([^)]+\)s)', re.IGNORECASE),
+    'in_clause_standard': re.compile(r'\bIN\s+(%s|\(%s\)|\?|\(\?\))\b', re.IGNORECASE),
+    'in_clause_named': re.compile(r'(?i)\b(in)\s+(?:\()?(%\([^)]+\)s)(?:\))?\b', re.IGNORECASE),
+    'in_clause_parenthesized': re.compile(r'\bIN\s*\(\s*%s\s*\)', re.IGNORECASE),
+    'null_is_positional': re.compile(r'\b(IS\s+NOT|IS)\s+(%s|\?)', re.IGNORECASE),
+    'null_is_named': re.compile(r'\b(IS\s+NOT|IS)\s+(%\([^)]+\)s)\b', re.IGNORECASE),
+    'string_literal_single': re.compile(r"'((?:[^']|'')*?)'"),
+    'string_literal_double': re.compile(r'"((?:[^"]|"")*?)"'),
+    'regexp_replace': re.compile(r'(regexp_replace\s*\(\s*[^,]+\s*,\s*[\'"])(.*?)([\'"].*?\))', re.IGNORECASE),
+    'param_name_extract': re.compile(r'%\(([^)]+)\)s'),
+    'question_mark_replace': re.compile(r'(?<!\w)\?(?!\w)'),
+}
+
+# Character sets for quick pre-checks
+_PLACEHOLDER_CHARS = {'%', '?'}
+
+#
 # Public API functions
 #
 
@@ -369,14 +392,9 @@ def escape_percent_signs_in_literals(sql: str) -> str:
         # Replace single % with %%, but only if not already part of %%
         return '"' + re.sub(r'(?<!%)%(?!%)', '%%', content) + '"'
 
-    # First pass: handle single-quoted strings with '' escaping
-    # The regex pattern (?:[^']|'')*? matches content allowing for '' as escaped '
-    pattern_single = r"'((?:[^']|'')*?)'"
-    sql = re.sub(pattern_single, escape_single_quoted, sql)
-
-    # Second pass: handle double-quoted strings with "" escaping
-    pattern_double = r'"((?:[^"]|"")*?)"'
-    sql = re.sub(pattern_double, escape_double_quoted, sql)
+    # Use cached patterns for better performance
+    sql = _PLACEHOLDER_PATTERNS['string_literal_single'].sub(escape_single_quoted, sql)
+    sql = _PLACEHOLDER_PATTERNS['string_literal_double'].sub(escape_double_quoted, sql)
 
     return sql
 
@@ -456,16 +474,13 @@ def _handle_null_is_positional_params(sql: str, args: list | tuple) -> tuple[str
     Returns
         Tuple of processed SQL and processed arguments
     """
-    # Pattern to find IS or IS NOT followed by a positional placeholder
-    pattern = r'\b(IS\s+NOT|IS)\s+(%s|\?)'
-
     # Convert list/tuple args to a list for modification
     args_was_tuple = isinstance(args, tuple)
     if args_was_tuple:
         args = list(args)
 
-    # Find all matches of IS or IS NOT with placeholder
-    matches = list(re.finditer(pattern, sql, re.IGNORECASE))
+    # Find all matches of IS or IS NOT with placeholder using cached pattern
+    matches = list(_PLACEHOLDER_PATTERNS['null_is_positional'].finditer(sql))
 
     # Process matches in reverse to avoid position shifts
     for match in reversed(matches):
@@ -507,19 +522,16 @@ def _handle_null_is_named_params(sql: str, args: dict) -> tuple[str, dict]:
     Returns
         Tuple of processed SQL and processed arguments
     """
-    # Pattern to find IS or IS NOT followed by a named parameter
-    pattern = r'\b(IS\s+NOT|IS)\s+(%\([^)]+\)s)\b'
-
     # Make a copy of the args dictionary
     args = args.copy()
 
-    # Find all matches of IS or IS NOT with named parameter
-    matches = list(re.finditer(pattern, sql, re.IGNORECASE))
+    # Find all matches of IS or IS NOT with named parameter using cached pattern
+    matches = list(_PLACEHOLDER_PATTERNS['null_is_named'].finditer(sql))
 
     # Process each match
     for match in matches:
         param_placeholder = match.group(2)  # Gets "%(name)s"
-        param_name = re.search(r'%\(([^)]+)\)s', param_placeholder).group(1)
+        param_name = _PLACEHOLDER_PATTERNS['param_name_extract'].search(param_placeholder).group(1)
 
         # Check if this parameter exists and is None
         if param_name in args and args[param_name] is None:
@@ -606,6 +618,7 @@ def _count_in_clauses(sql: str) -> int:
     Returns
         Number of IN clauses
     """
+    # Use optimized string search for better performance
     return sql.lower().count(' in ')
 
 
@@ -869,11 +882,10 @@ def _handle_single_in_clause_params(sql: str, args: list | tuple) -> tuple[str, 
     # Generate placeholders
     placeholders = ', '.join(['%s'] * len(inner_seq))
 
-    # Handle "IN (%s)" format (allow arbitrary whitespace/case)
-    in_parenthesized_pattern = re.compile(r'\bIN\s*\(\s*%s\s*\)', re.IGNORECASE)
-    if in_parenthesized_pattern.search(sql):
+    # Handle "IN (%s)" format (allow arbitrary whitespace/case) using cached pattern
+    if _PLACEHOLDER_PATTERNS['in_clause_parenthesized'].search(sql):
         # Replace only the first occurrence to avoid touching subsequent clauses
-        new_sql = in_parenthesized_pattern.sub(f'IN ({placeholders})', sql, count=1)
+        new_sql = _PLACEHOLDER_PATTERNS['in_clause_parenthesized'].sub(f'IN ({placeholders})', sql, count=1)
         return new_sql, list(inner_seq)
 
     # Handle "IN %s" format
@@ -997,9 +1009,8 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
                     return modified_sql.replace('%s', '?'), tuple(modified_args)
                 return modified_sql, tuple(modified_args)
 
-    # For multiple IN clauses or more complex cases, use the original logic
-    standard_pattern = re.compile(r'\bIN\s+(%s|\(%s\)|\?|\(\?\))\b', re.IGNORECASE)
-    matches = list(standard_pattern.finditer(sql))
+    # For multiple IN clauses or more complex cases, use cached pattern
+    matches = list(_PLACEHOLDER_PATTERNS['in_clause_standard'].finditer(sql))
 
     # Handle case with no IN clauses or no args
     if not matches or not args:
@@ -1146,10 +1157,8 @@ def _handle_named_in_params(sql, args):
     # Create a new dictionary to avoid modifying the original
     args = args.copy()
 
-    # Improved regex pattern to match IN clause with named parameters
-    # This pattern matches both IN %(name)s and IN (%(name)s) patterns
-    named_pattern = re.compile(r'(?i)\b(in)\s+(?:\()?(%\([^)]+\)s)(?:\))?\b', re.IGNORECASE)
-    named_matches = list(named_pattern.finditer(sql))
+    # Use cached pattern for better performance
+    named_matches = list(_PLACEHOLDER_PATTERNS['in_clause_named'].finditer(sql))
 
     modified_sql = sql
 
@@ -1210,21 +1219,19 @@ def _preserve_regex_patterns_in_sql(sql):
 
     # Simple case: No regexp_replace in the query
     if 'regexp_replace' not in sql.lower():
-        return re.sub(r'(?<!\w)\?(?!\w)', '%s', sql)
+        return _PLACEHOLDER_PATTERNS['question_mark_replace'].sub('%s', sql)
 
     # More complex case: Need to protect regexp_replace patterns
-    # First identify all regexp_replace function calls
-    pattern = r'(regexp_replace\s*\(\s*[^,]+\s*,\s*[\'"])(.*?)([\'"].*?\))'
-
     # Split the SQL into segments: regular SQL and regexp_replace calls
     segments = []
     last_end = 0
 
-    for match in re.finditer(pattern, sql, re.IGNORECASE):
+    # Use cached pattern for better performance
+    for match in _PLACEHOLDER_PATTERNS['regexp_replace'].finditer(sql):
         # Add the text before the match with ? -> %s conversion
         prefix = sql[last_end:match.start()]
         if prefix:
-            segments.append(re.sub(r'(?<!\w)\?(?!\w)', '%s', prefix))
+            segments.append(_PLACEHOLDER_PATTERNS['question_mark_replace'].sub('%s', prefix))
 
         # Add the regexp_replace call unchanged
         segments.append(match.group(0))
@@ -1233,7 +1240,7 @@ def _preserve_regex_patterns_in_sql(sql):
     # Add any remaining text after the last match
     if last_end < len(sql):
         suffix = sql[last_end:]
-        segments.append(re.sub(r'(?<!\w)\?(?!\w)', '%s', suffix))
+        segments.append(_PLACEHOLDER_PATTERNS['question_mark_replace'].sub('%s', suffix))
 
     return ''.join(segments)
 
@@ -1248,7 +1255,7 @@ def _extract_param_name(param_placeholder):
     Returns
         str: Extracted parameter name
     """
-    return re.search(r'%\(([^)]+)\)s', param_placeholder).group(1)
+    return _PLACEHOLDER_PATTERNS['param_name_extract'].search(param_placeholder).group(1)
 
 
 def _generate_named_placeholders(base_name, param_values, args_dict):
@@ -1332,9 +1339,10 @@ def has_placeholders(sql: str | None) -> bool:
     if sql is None:
         return False
 
-    # Check for positional placeholders (%s, ?)
-    if '%s' in sql or '?' in sql:
-        return True
+    # Quick character-based check before regex - significant performance improvement
+    if not any(char in sql for char in _PLACEHOLDER_CHARS):
+        return False
 
-    # Check for named placeholders like %(name)s
-    return bool(re.search('%\\([^)]+\\)s', sql))
+    # Use pre-compiled patterns for better performance
+    return bool(_PLACEHOLDER_PATTERNS['positional'].search(sql) or
+                _PLACEHOLDER_PATTERNS['named'].search(sql))
