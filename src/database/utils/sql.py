@@ -14,7 +14,7 @@ from typing import Any
 from database.utils.connection_utils import get_dialect_name
 from more_itertools import collapse
 
-from libb.iterutils import isiterable, issequence
+from libb import isiterable, issequence
 
 logger = logging.getLogger(__name__)
 
