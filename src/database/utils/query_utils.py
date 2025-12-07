@@ -7,7 +7,6 @@ from typing import Any
 from database.adapters.column_info import columns_from_cursor_description
 from database.adapters.structure import RowStructureAdapter
 from database.utils.connection_utils import get_dialect_name
-from database.utils.sqlserver_utils import process_sqlserver_result
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +57,6 @@ def load_data(cursor: any, columns: list = None, **kwargs: dict) -> any:
     """
     if columns is None:
         columns = extract_column_info(cursor)
-
-    if get_dialect_name(cursor.connwrapper) == 'mssql':
-        adapted_data = process_sqlserver_result(cursor, columns)
-        data_loader = cursor.connwrapper.options.data_loader
-        return data_loader(adapted_data, columns, **kwargs)
 
     data = cursor.fetchall()
 

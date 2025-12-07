@@ -1,12 +1,12 @@
 import logging
-import os
 import site
 
 import pytest
+import pathlib
 
 logger = logging.getLogger(__name__)
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
 site.addsitedir(HERE)
 
 
@@ -38,6 +38,5 @@ pytest_plugins = [
     'tests.fixtures.mocks',
     'tests.fixtures.values',
     'tests.fixtures.postgres',
-    'tests.fixtures.sqlserver',
     'tests.fixtures.sqlite'
 ]

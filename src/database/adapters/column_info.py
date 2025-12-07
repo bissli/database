@@ -5,7 +5,6 @@ import logging
 from typing import Any, Self
 
 from database.adapters.type_mapping import resolve_type
-from database.utils.schema_cache import SchemaCache
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,6 @@ class Column:
     Database compatibility:
     - PostgreSQL: Uses native OIDs and type system
     - SQLite: Extracts type information from schema pragmas
-    - SQL Server: Maps SQL_* type codes and handles unnamed columns
 
     Performance considerations:
     - Efficiently extracted from cursor.description to minimize overhead
@@ -76,7 +74,7 @@ class Column:
 
         Args:
             description_item: One item from cursor.description
-            connection_type: Database type ('postgresql', 'mssql', 'sqlite')
+            connection_type: Database type ('postgresql', 'sqlite')
 
         Returns
             Column instance
@@ -86,8 +84,6 @@ class Column:
             column_info = cls._extract_postgres_column_info(description_item, table_name, connection)
         elif connection_type == 'sqlite':
             column_info = cls._extract_sqlite_column_info(description_item, table_name, connection)
-        elif connection_type == 'mssql':
-            column_info = cls._extract_sqlserver_column_info(description_item, table_name, connection)
         else:
             # Generic fallback for unknown types
             column_info = {
@@ -151,69 +147,6 @@ class Column:
                 'scale': None,
                 'nullable': None
             }
-
-    @classmethod
-    def _extract_sqlserver_column_info(cls, description_item: Any, table_name=None, connection=None) -> dict:
-        """
-        Extract column information from SQL Server cursor description
-        """
-        # Basic validation
-        if len(description_item) < 7:
-            return {
-                'name': description_item[0] if len(description_item) > 0 else None,
-                'type_code': description_item[1] if len(description_item) > 1 else None,
-                'display_size': None,
-                'internal_size': None,
-                'precision': None,
-                'scale': None,
-                'nullable': None
-            }
-
-        # Get column name directly from description (most reliable with Driver 18+)
-        name = description_item[0]
-
-        if not name:
-            logger.warning('Empty column name in cursor description')
-            # Try to generate a fallback name
-            name = f'column_{id(description_item) % 10000}'
-        else:
-            logger.debug(f"SQL Server column name from cursor: '{name}'")
-
-        # Clean up any problematic characters (especially null bytes from UTF-16LE encoding)
-        from database.utils.sqlserver_utils import clean_column_name
-        name = clean_column_name(name)
-        if not name:
-            logger.warning('Empty column name after cleaning - generating fallback name')
-            name = f'column_{id(description_item) % 10000}'
-
-        # If we have a table name and connection, check schema cache
-        if table_name and connection:
-            schema_cache = SchemaCache.get_instance()
-            table_metadata = schema_cache.get_column_metadata(connection, table_name)
-
-            if name in table_metadata:
-                col_meta = table_metadata[name]
-                # Enhance with metadata from system tables
-                return {
-                    'name': name,
-                    'type_code': col_meta['type_name'],
-                    'display_size': description_item[2],
-                    'internal_size': col_meta['max_length'],
-                    'precision': col_meta['precision'],
-                    'scale': col_meta['scale'],
-                    'nullable': bool(col_meta['is_nullable'])
-                }
-
-        # Standard extraction from description item
-        return {
-             'name': name,
-             'type_code': description_item[1],
-             'display_size': description_item[2],
-             'internal_size': description_item[3],
-             'precision': description_item[4],
-             'scale': description_item[5],
-             'nullable': bool(description_item[6])
-        }
 
     @classmethod
     def _get_python_type_for_db_type(cls, connection_type: str, type_code: Any, column_name: str = None,
@@ -283,30 +216,17 @@ def _clean_description_item(desc_item: tuple, connection_type: str) -> tuple:
     """
     Clean description item according to database-specific rules.
 
-    With ODBC Driver 18+, this is only needed for extreme edge cases.
-
     Args:
         desc_item: Tuple from cursor.description
-        connection_type: Database type ('postgresql', 'mssql', 'sqlite')
+        connection_type: Database type ('postgresql', 'sqlite')
 
     Returns
         Cleaned description item tuple
     """
-    # Return early if no cleaning needed
+    # Return early if no cleaning needed - currently no cleaning required
     if not desc_item or not isinstance(desc_item[0], str):
         return desc_item
 
-    # For SQL Server, only clean column names with null bytes
-    if connection_type == 'mssql':
-        col_name = desc_item[0]
-        if '\x00' in col_name:
-            from database.utils.sqlserver_utils import clean_column_name
-            cleaned_name = clean_column_name(col_name)
-            if cleaned_name != col_name:
-                # Create a new description item with the cleaned name
-                return (cleaned_name,) + desc_item[1:] if len(desc_item) > 1 else (cleaned_name,)
-
-    # No cleaning needed for other database types
     return desc_item
 
 
@@ -316,7 +236,7 @@ def columns_from_cursor_description(cursor: Any, connection_type: str, table_nam
 
     Args:
         cursor: Database cursor with a description attribute
-        connection_type: Database type ('postgres', 'sqlserver', 'sqlite')
+        connection_type: Database type ('postgresql', 'sqlite')
         table_name: Optional table name for metadata lookup
         connection: Optional connection for metadata lookup
 

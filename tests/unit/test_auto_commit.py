@@ -73,31 +73,6 @@ class TestAutoCommit:
         # This is what the enable_auto_commit function actually modifies
         assert conn.driver_connection.isolation_level is None
 
-    def test_enable_auto_commit_sqlserver(self, mocker):
-        """Test enabling auto-commit on SQL Server connection"""
-        # Create a mock SQL Server connection directly
-        conn = mocker.Mock()
-        conn.connection = mocker.Mock()
-        conn.connection.autocommit = False
-
-        # Add driver_connection to mimic SQLAlchemy connection structure
-        conn.driver_connection = conn.connection
-
-        # Define a simplified get_dialect_name function that will be mocked
-        def mock_get_dialect_name(obj):
-            if obj is conn or obj is conn.connection:
-                return 'mssql'
-            return None
-
-        # Mock the connection detection function
-        mocker.patch('database.utils.auto_commit.get_dialect_name', side_effect=mock_get_dialect_name)
-
-        # Enable auto-commit
-        enable_auto_commit(conn)
-
-        # Verify raw connection autocommit was set to True
-        assert conn.connection.autocommit is True
-
     def test_disable_auto_commit_postgres(self, mocker):
         """Test disabling auto-commit on PostgreSQL connection"""
         # Create a mock PostgreSQL connection directly
@@ -256,32 +231,32 @@ class TestAutoCommitIntegration:
         # Create a mock for ensure_commit to track calls
         ensure_commit_mock = mocker.Mock()
         mocker.patch('database.utils.auto_commit.ensure_commit', ensure_commit_mock)
-        
+
         # Create a mock connection
         conn = mocker.Mock()
-        
+
         # Create a mock transaction that will be returned by __enter__
         mock_tx = mocker.MagicMock()
         mock_tx.execute.return_value = 1
-        
+
         # Create a simple context manager mock for Transaction
         transaction_mock = mocker.MagicMock()
         transaction_mock.__enter__.return_value = mock_tx
-        
+
         # Patch Transaction to return our mock without calling the real constructor
         mocker.patch.object(Transaction, '__new__', return_value=transaction_mock)
-        
+
         # Now use the Transaction class with our mock
         with Transaction(conn) as tx:
-            tx.execute("INSERT INTO test VALUES (1)")
-        
+            tx.execute('INSERT INTO test VALUES (1)')
+
         # Verify our mock transaction was used
-        mock_tx.execute.assert_called_once_with("INSERT INTO test VALUES (1)")
-        
+        mock_tx.execute.assert_called_once_with('INSERT INTO test VALUES (1)')
+
         # Verify enter and exit were called
         transaction_mock.__enter__.assert_called_once()
         transaction_mock.__exit__.assert_called_once()
-        
+
         # Verify ensure_commit was not called
         ensure_commit_mock.assert_not_called()
 

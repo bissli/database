@@ -321,12 +321,11 @@ def test_multiple_direct_list_parameters():
     assert len(result_args) == 4
 
 
-def test_connection_type_detection(simple_mock_postgresql_connection, simple_mock_mssql_connection, simple_mock_sqlite_connection, simple_mock_transaction_factory):
+def test_connection_type_detection(simple_mock_postgresql_connection, simple_mock_sqlite_connection, simple_mock_transaction_factory):
     """Test that connection type detection works correctly with mocked connections"""
 
     # Test dialect name detection
     assert get_dialect_name(simple_mock_postgresql_connection) == 'postgresql'
-    assert get_dialect_name(simple_mock_mssql_connection) == 'mssql'
     assert get_dialect_name(simple_mock_sqlite_connection) == 'sqlite'
 
     # Test with connection wrappers

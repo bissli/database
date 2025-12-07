@@ -20,9 +20,8 @@ def test_circular_dependencies():
         'database.utils.connection_utils',
         'database.utils.query_utils',
         'database.utils.schema_cache',
-        'database.utils.sql',
-        'database.utils.sql_generation',
-        'database.utils.sqlserver_utils',
+        'database.sql',
+        'database.sql_generation',
 
         # Core modules
         'database.core',
@@ -49,7 +48,6 @@ def test_circular_dependencies():
         'database.strategy.decorators',
         'database.strategy.postgres',
         'database.strategy.sqlite',
-        'database.strategy.sqlserver',
 
         # Operations (most dependent)
         'database.operations',

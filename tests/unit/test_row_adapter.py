@@ -3,46 +3,10 @@ Tests for simplified row adapter behavior - verifying they only handle structure
 """
 import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from database.adapters.structure import RowStructureAdapter
 from database.adapters.structure import PostgreSQLRowAdapter
-from database.adapters.structure import SQLiteRowAdapter
-from database.adapters.structure import SQLServerRowAdapter
-
-
-def test_sqlserver_row_adapter_no_conversion():
-    """Test that SQLServerRowAdapter doesn't convert values"""
-    # Create sample data with various types
-    row_data = {
-        'int_col': 123,
-        'str_col': 'text value',
-        'date_col': datetime.date(2023, 5, 15),
-        'datetime_col': datetime.datetime(2023, 5, 15, 12, 30, 45),
-        'decimal_col': Decimal('123.45'),
-        'bool_col': True
-    }
-
-    # Mock connection for the adapter
-    mock_conn = MagicMock()
-
-    # Create adapter with the data
-    adapter = SQLServerRowAdapter(row_data, mock_conn)
-
-    # Test to_dict() doesn't modify values
-    result = adapter.to_dict()
-    assert result == row_data, 'to_dict() should return data without conversion'
-
-    # Test get_value() doesn't modify values
-    for col in row_data:
-        assert adapter.get_value(col) is row_data[col], f'get_value({col}) should return original value'
-
-    # Test specific types aren't modified
-    assert isinstance(adapter.get_value('date_col'), datetime.date), 'Date type should be preserved'
-    assert isinstance(adapter.get_value('decimal_col'), Decimal), 'Decimal type should be preserved'
-
-    # Test first value access
-    assert adapter.get_value() is row_data['int_col'], 'get_value() without key should return first value'
+from database.adapters.structure import RowStructureAdapter, SQLiteRowAdapter
 
 
 def test_postgresql_row_adapter_no_conversion():
@@ -110,7 +74,6 @@ def test_database_row_adapter_factory(create_simple_mock_connection):
 
     pg_conn = create_simple_mock_connection('postgresql')
     sqlite_conn = create_simple_mock_connection('sqlite')
-    sql_conn = create_simple_mock_connection('mssql')
 
     # Test with PostgreSQL
     with patch('database.utils.connection_utils.get_dialect_name', return_value='postgresql'):
@@ -121,11 +84,6 @@ def test_database_row_adapter_factory(create_simple_mock_connection):
     with patch('database.utils.connection_utils.get_dialect_name', return_value='sqlite'):
         adapter = RowStructureAdapter.create(sqlite_conn, row_data)
         assert isinstance(adapter, SQLiteRowAdapter)
-
-    # Test with SQL Server
-    with patch('database.utils.connection_utils.get_dialect_name', return_value='mssql'):
-        adapter = RowStructureAdapter.create(sql_conn, row_data)
-        assert isinstance(adapter, SQLServerRowAdapter)
 
 
 if __name__ == '__main__':

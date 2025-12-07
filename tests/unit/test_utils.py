@@ -5,9 +5,10 @@ Unit tests for database utility functions.
 import logging
 
 import pytest
-from database.operations.upsert import _build_insert_sql, _build_upsert_sql
+from database.operations.upsert import _build_upsert_sql
 from database.utils.connection_utils import get_dialect_name, isconnection
 from database.utils.sql import quote_identifier, standardize_placeholders
+from database.utils.sql_generation import build_insert_sql
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,6 @@ def _create_mock_connection(mocker, db_type):
         # Add dialect for SQLAlchemy compatibility
         mock_conn.dialect = mocker.MagicMock()
         mock_conn.dialect.name = 'postgresql'
-    elif db_type == 'mssql':
-        # Set SQL Server-specific attributes that the detection function checks
-        mock_conn.__class__.__module__ = 'pyodbc'
-        mock_conn.__class__.__name__ = 'Connection'
-        mock_conn.getinfo = mocker.MagicMock()
-        # Add dialect for SQLAlchemy compatibility
-        mock_conn.dialect = mocker.MagicMock()
-        mock_conn.dialect.name = 'mssql'
     elif db_type == 'sqlite':
         # Set SQLite-specific attributes that the detection function checks
         mock_conn.__class__.__module__ = 'sqlite3'
@@ -101,9 +94,6 @@ class TestDatabaseUtilities:
         # SQLite
         ('table_name', 'sqlite', '"table_name"'),
         ('table"quoted', 'sqlite', '"table""quoted"'),
-        # SQL Server
-        ('table_name', 'mssql', '[table_name]'),
-        ('table]with]brackets', 'mssql', '[table]]with]]brackets]'),
     ])
     def test_quote_identifier(self, identifier, dialect, expected):
         """Test identifier quoting for all database types"""
@@ -130,18 +120,6 @@ class TestDatabaseUtilities:
         sa_pg_conn = _create_mock_sqlalchemy_connection(mocker, 'postgresql')
         assert get_dialect_name(sa_pg_conn) == 'postgresql'
 
-    def test_connection_detection_with_sqlserver(self, mocker):
-        """Test SQL Server connection type detection"""
-        # Create connection that looks like a SQL Server connection
-        sql_conn = _create_mock_connection(mocker, 'mssql')
-
-        # Test detection with actual implementation, not mocked function
-        assert get_dialect_name(sql_conn) == 'mssql'
-
-        # Test with SQLAlchemy connection
-        sa_sql_conn = _create_mock_sqlalchemy_connection(mocker, 'mssql')
-        assert get_dialect_name(sa_sql_conn) == 'mssql'
-
     def test_connection_detection_with_sqlite(self, mocker):
         """Test SQLite connection type detection"""
         # Create connection that looks like a SQLite connection
@@ -158,7 +136,6 @@ class TestDatabaseUtilities:
         """Test isconnection function with various connection types"""
         # Create different types of connections
         pg_mock = _create_mock_connection(mocker, 'postgresql')
-        sql_mock = _create_mock_connection(mocker, 'mssql')
         sqlite_mock = _create_mock_connection(mocker, 'sqlite')
 
         # Create a non-database object for comparison
@@ -172,17 +149,14 @@ class TestDatabaseUtilities:
 
         # Test all types of connections
         assert isconnection(pg_mock)
-        assert isconnection(sql_mock)
         assert isconnection(sqlite_mock)
         assert isconnection(sqlalchemy_like)
         assert not isconnection(non_db_mock)
 
         # Test with SQLAlchemy connections
         sa_pg_conn = _create_mock_sqlalchemy_connection(mocker, 'postgresql')
-        sa_sql_conn = _create_mock_sqlalchemy_connection(mocker, 'mssql')
         sa_sqlite_conn = _create_mock_sqlalchemy_connection(mocker, 'sqlite')
         assert isconnection(sa_pg_conn)
-        assert isconnection(sa_sql_conn)
         assert isconnection(sa_sqlite_conn)
 
     def test_connection_type_detection_postgres(self, mocker):
@@ -200,22 +174,6 @@ class TestDatabaseUtilities:
         # Test with SQLAlchemy connection
         sa_pg_conn = _create_mock_sqlalchemy_connection(mocker, 'postgresql')
         assert get_dialect_name(sa_pg_conn) == 'postgresql'
-
-    def test_connection_type_detection_sqlserver(self, mocker):
-        """Test SQL Server connection type detection"""
-        # Create mock SQL Server connection with proper attributes
-        ss_conn = _create_mock_connection(mocker, 'mssql')
-
-        # Test dialect name detection
-        assert get_dialect_name(ss_conn) == 'mssql'
-
-        # Test with transaction object that wraps a connection
-        tx = _create_mock_transaction(mocker, ss_conn)
-        assert get_dialect_name(tx) == 'mssql'
-
-        # Test with SQLAlchemy connection
-        sa_ss_conn = _create_mock_sqlalchemy_connection(mocker, 'mssql')
-        assert get_dialect_name(sa_ss_conn) == 'mssql'
 
     def test_connection_type_detection_sqlite(self, mocker):
         """Test SQLite connection type detection"""
@@ -242,8 +200,8 @@ class TestDatabaseUtilities:
         assert get_dialect_name(mock_engine) == 'postgresql'
 
         # Test with SQLAlchemy connection
-        sa_conn = _create_mock_sqlalchemy_connection(mocker, 'mssql')
-        assert get_dialect_name(sa_conn) == 'mssql'
+        sa_conn = _create_mock_sqlalchemy_connection(mocker, 'sqlite')
+        assert get_dialect_name(sa_conn) == 'sqlite'
 
         # Test with invalid object
         assert get_dialect_name(mocker.MagicMock()) is None
@@ -294,7 +252,7 @@ class TestSQLOperations:
         mock_sqlite_conn = _create_mock_connection(mocker, 'sqlite')
 
         # Test PostgreSQL INSERT SQL generation
-        pg_sql = _build_insert_sql(mock_postgres_conn, 'users', ('id', 'name', 'email'))
+        pg_sql = build_insert_sql(mock_postgres_conn, 'users', ('id', 'name', 'email'))
 
         # Verify basic structure
         assert 'INSERT INTO' in pg_sql.upper()
@@ -305,7 +263,7 @@ class TestSQLOperations:
         assert 'RETURNING' in pg_sql.upper()
 
         # Test SQLite INSERT SQL generation
-        sqlite_sql = _build_insert_sql(mock_sqlite_conn, 'users', ('id', 'name', 'email'))
+        sqlite_sql = build_insert_sql(mock_sqlite_conn, 'users', ('id', 'name', 'email'))
 
         # Verify basic structure
         assert 'INSERT INTO' in sqlite_sql.upper()
@@ -337,13 +295,6 @@ class TestSQLOperations:
     def mock_sqlite_conn(self, mocker):
         """Create a mock SQLite connection for testing"""
         mock_conn = _create_mock_connection(mocker, 'sqlite')
-        mock_conn.in_transaction = False
-        return mock_conn
-
-    @pytest.fixture
-    def mock_sqlserver_conn(self, mocker):
-        """Create a mock SQL Server connection for testing"""
-        mock_conn = _create_mock_connection(mocker, 'mssql')
         mock_conn.in_transaction = False
         return mock_conn
 
@@ -393,30 +344,6 @@ class TestSQLOperations:
         assert 'COALESCE("users"."last_login", excluded."last_login")' in sql
         # SQLite doesn't have RETURNING
         assert 'RETURNING' not in sql.upper()
-
-    def test_build_upsert_sql_sqlserver(self, mock_sqlserver_conn):
-        """Test SQL Server UPSERT (MERGE) SQL generation"""
-        sql = _build_upsert_sql(
-            mock_sqlserver_conn,
-            table='users',
-            columns=('id', 'username', 'email', 'last_login'),
-            key_columns=['id'],           # conflict columns
-            update_always=['email'],      # always update these columns
-            update_if_null=['last_login'],  # update these columns when null
-            db_type='mssql'
-        )
-
-        # Verify complete structure with proper clause order and quoting for SQL Server
-        assert 'MERGE INTO' in sql.upper()
-        assert '[users]' in sql
-        assert 'USING' in sql.upper()
-        assert 'AS target' in sql.lower()
-        assert 'ON target.[id] = src.[id]' in sql
-        assert 'WHEN MATCHED THEN UPDATE SET' in sql.upper()
-        assert 'target.[email] = src.[email]' in sql
-        assert 'WHEN NOT MATCHED THEN INSERT' in sql.upper()
-        assert '([id], [username], [email], [last_login])' in sql
-        assert 'VALUES (src.[id], src.[username], src.[email], src.[last_login])' in sql
 
 
 if __name__ == '__main__':

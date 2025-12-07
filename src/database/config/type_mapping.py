@@ -3,7 +3,7 @@ Configuration for database column type mappings.
 """
 import json
 import logging
-import os
+import pathlib
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +23,6 @@ class TypeMappingConfig:
     def __init__(self, config_file=None):
         # Default mappings
         self._pattern_mappings = {
-            'mssql': {
-                # Common column name patterns telling us the type
-                'patterns': {
-                    '_id$|^id$': 'int',
-                    '(_date|^date)$': 'date',
-                    '(_datetime|_at|_timestamp|^timestamp)$': 'datetime',
-                    '(_time|^time)$': 'time',
-                    '(_flag|_indicator|_bool|^active$|^enabled$|^is_)': 'bit'
-                },
-                # Specific column overrides for known tables
-                'columns': {}
-            },
             'postgresql': {
                 'patterns': {},
                 'columns': {}
@@ -51,20 +39,20 @@ class TypeMappingConfig:
         else:
             # Try default locations
             default_locations = [
-                os.path.expanduser('~/.config/database/type_mapping.json'),
+                pathlib.Path('~/.config/database/type_mapping.json').expanduser(),
                 '/etc/database/type_mapping.json',
                 'type_mapping.json'  # Current directory
             ]
 
             for location in default_locations:
-                if os.path.exists(location):
+                if pathlib.Path(location).exists():
                     self.load_config(location)
                     break
 
     def load_config(self, config_file):
         """Load configuration from file"""
         try:
-            with open(config_file) as f:
+            with pathlib.Path(config_file).open() as f:
                 config = json.load(f)
 
             # Merge with defaults rather than replace entirely

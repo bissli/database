@@ -12,12 +12,12 @@ def build_select_sql(table, dialect, columns=None, where=None, order_by=None, li
     """Generate a SELECT statement for the specified database type.
 
     Args:
-        db_type: Database type ('postgresql', 'mssql', 'sqlite')
+        db_type: Database type ('postgresql', 'sqlite')
         table: Table name
         columns: List of columns to select (None for *)
         where: WHERE clause (without 'WHERE' keyword)
         order_by: ORDER BY clause (without 'ORDER BY' keywords)
-        limit: LIMIT/TOP value
+        limit: LIMIT value
 
     Returns
         SQL query string
@@ -31,11 +31,6 @@ def build_select_sql(table, dialect, columns=None, where=None, order_by=None, li
     else:
         select_clause = 'SELECT *'
 
-    # Handle LIMIT/TOP
-    if limit is not None and dialect == 'mssql':
-        select_clause = f'SELECT TOP {limit} ' + select_clause[7:]
-        # SQLite and PostgreSQL use LIMIT at the end
-
     # Build query
     sql = f'{select_clause} FROM {quoted_table}'
 
@@ -48,7 +43,7 @@ def build_select_sql(table, dialect, columns=None, where=None, order_by=None, li
         sql += f' ORDER BY {order_by}'
 
     # Add LIMIT for PostgreSQL and SQLite
-    if limit is not None and dialect != 'mssql':
+    if limit is not None:
         sql += f' LIMIT {limit}'
 
     return sql
@@ -58,7 +53,7 @@ def build_insert_sql(dialect, table, columns):
     """Generate an INSERT statement.
 
     Args:
-        db_type: Database type ('postgresql', 'mssql', 'sqlite')
+        db_type: Database type ('postgresql', 'sqlite')
         table: Table name
         columns: List of column names
 
@@ -71,7 +66,7 @@ def build_insert_sql(dialect, table, columns):
     # Create placeholders based on database type
     if dialect == 'postgresql':
         placeholders = ', '.join(['%s'] * len(columns))
-    else:  # mssql, sqlite
+    else:  # sqlite
         placeholders = ', '.join(['?'] * len(columns))
 
     return f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'

@@ -44,7 +44,6 @@ def mock_connection(mocker):
     mock_cursor.connwrapper = conn
 
     # Configure connection type checks
-    mocker.patch('database.utils.connection_utils.is_pyodbc_connection', return_value=False)
     mocker.patch('database.utils.connection_utils.is_sqlite3_connection', return_value=False)
     mocker.patch('database.utils.connection_utils.is_psycopg_connection', return_value=True)
 

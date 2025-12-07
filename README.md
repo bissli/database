@@ -1,6 +1,6 @@
 # Database Module
 
-A comprehensive Python database interface supporting PostgreSQL, SQLite, and SQL Server with a consistent API.
+A comprehensive Python database interface supporting PostgreSQL and SQLite with a consistent API.
 
 [![License: OSL-3.0](https://img.shields.io/badge/License-OSL--3.0-blue.svg)](https://opensource.org/licenses/OSL-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -34,7 +34,7 @@ import database as db
 
 # Connect to a database
 cn = db.connect({
-    'drivername': 'postgresql',  # or 'sqlite', 'mssql'
+    'drivername': 'postgresql',  # or 'sqlite'
     'database': 'your_database',
     'hostname': 'localhost',
     'username': 'your_username',
@@ -82,16 +82,6 @@ pg_cn = db.connect({
 sqlite_cn = db.connect({
     'drivername': 'sqlite',
     'database': 'database.db'  # or ':memory:' for in-memory database
-})
-
-# SQL Server connection
-mssql_cn = db.connect({
-    'drivername': 'mssql',
-    'database': 'your_database',
-    'hostname': 'localhost',
-    'username': 'your_username',
-    'password': 'your_password',
-    'port': 1433
 })
 ```
 

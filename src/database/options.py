@@ -100,7 +100,7 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
 class DatabaseOptions(ConfigOptions):
     """Options
 
-    supported driver names: `postgresql`, `mssql`, `sqlite`
+    supported driver names: `postgresql`, `sqlite`
 
     Connection pooling options:
     - use_pool: Whether to use connection pooling (default: False)
@@ -119,9 +119,6 @@ class DatabaseOptions(ConfigOptions):
     cleanup: bool = True
     check_connection: bool = True
     data_loader: callable = None
-    # ODBC-specific
-    driver: str = 'ODBC Driver 18 for SQL Server'
-    trust_server_certificate: str = None
     # Connection pooling parameters
     use_pool: bool = False
     pool_max_connections: int = 5
@@ -129,10 +126,10 @@ class DatabaseOptions(ConfigOptions):
     pool_wait_timeout: int = 30
 
     def __post_init__(self):
-        assert self.drivername in {'postgresql', 'mssql', 'sqlite'}, \
-            'drivername must be `postgresql`, `mssql`, or `sqlite`'
+        assert self.drivername in {'postgresql', 'sqlite'}, \
+            'drivername must be `postgresql` or `sqlite`'
         self.appname = self.appname or scriptname() or 'python_console'
-        if self.drivername in {'postgresql', 'mssql'}:
+        if self.drivername == 'postgresql':
             for field in ('hostname', 'username', 'password', 'database',
                           'port', 'timeout'):
                 assert getattr(self, field), f'field {field} cannot be None or 0'

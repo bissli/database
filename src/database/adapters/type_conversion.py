@@ -6,7 +6,7 @@ when sending parameters to the database (Python → Database direction only).
 
 It provides:
 1. A TypeConverter class for direct parameter conversion
-2. Database-specific adapters for PostgreSQL, SQLite, and SQL Server
+2. Database-specific adapters for PostgreSQL and SQLite
 3. Common handling for special string values: empty strings, 'null', 'nan', 'none'
 4. Support for NumPy, Pandas, and PyArrow data types
 
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 # Type definitions for cleaner type hinting
 SQLiteConnection = TypeVar('SQLiteConnection')
 PostgresConnection = TypeVar('PostgresConnection')
-SQLServerConnection = TypeVar('SQLServerConnection')
 
 # Constants
 SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}

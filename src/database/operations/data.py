@@ -6,38 +6,13 @@ import logging
 from database.core.query import execute
 from database.core.transaction import Transaction
 from database.utils.connection_utils import get_dialect_name
-from database.utils.sql import handle_query_params, quote_identifier
+from database.utils.sql import quote_identifier
 
 logger = logging.getLogger(__name__)
 
 
 # Alias these operations for backward compatibility
 insert = update = delete = execute
-
-
-@handle_query_params
-def insert_identity(cn, sql, *args):
-    """Inject @@identity column into query for row by row unique id"""
-    from database.utils.connection_utils import is_pyodbc_connection
-    from database.utils.sqlserver_utils import extract_identity_from_result
-
-    cursor = cn.cursor()
-
-    # For SQL Server, we need to handle the column name issue with @@identity
-    if is_pyodbc_connection(cn):
-        cursor.execute(sql + '; select @@identity AS id', args)
-    else:
-        cursor.execute(sql + '; select @@identity', args)
-
-    cursor.nextset()
-
-    # Safely extract the identity value using our helper
-    result = cursor.fetchone()
-    identity = extract_identity_from_result(result)
-
-    # must do the commit after retrieving data since commit closes cursor
-    cn.commit()
-    return identity
 
 
 def update_or_insert(cn, update_sql, insert_sql, *args):

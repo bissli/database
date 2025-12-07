@@ -20,7 +20,6 @@ def test_adapter_registry_structure():
     # Verify methods exist
     assert hasattr(registry, 'postgres')
     assert hasattr(registry, 'sqlite')
-    assert hasattr(registry, 'sqlserver')
 
     # Postgres should return an adapter map
     postgres_adapters = registry.postgres()
@@ -29,9 +28,6 @@ def test_adapter_registry_structure():
 
     # SQLite should have a function
     assert callable(registry.sqlite)
-
-    # SQL Server method exists but doesn't need to do anything (pyodbc handles conversions)
-    assert callable(registry.sqlserver)
 
 
 def test_postgres_numpy_adapters(mocker):

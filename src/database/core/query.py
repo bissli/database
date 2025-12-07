@@ -6,7 +6,6 @@ import logging
 from database.utils.connection_utils import check_connection, get_dialect_name
 from database.utils.sql import handle_query_params
 from database.utils.sql import prepare_sql_params_for_execution
-from database.utils.sqlserver_utils import prepare_sqlserver_params
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +15,7 @@ logger = logging.getLogger(__name__)
 def execute(cn: object, sql: str, *args: object) -> int:
     """Execute a SQL query with the given parameters and return affected row count.
 
-    Handles various SQL dialects and parameter styles, with special handling for
-    SQL Server connections.
+    Handles various SQL dialects and parameter styles.
 
     Args:
         cn: Database connection object
@@ -45,9 +43,6 @@ def execute(cn: object, sql: str, *args: object) -> int:
         else:
             dialect = get_dialect_name(cn)
             processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
-
-            if dialect == 'mssql':
-                processed_sql, processed_args = prepare_sqlserver_params(processed_sql, processed_args)
 
             cursor.execute(processed_sql, processed_args)
             logger.debug(f'Executed query with {len(processed_args) if processed_args else 0} parameters: {processed_sql[:60]}...')

@@ -433,11 +433,6 @@ def test_quote_identifier():
     assert quote_identifier('my_table', dialect='sqlite') == '"my_table"'
     assert quote_identifier('column"with"quotes', dialect='sqlite') == '"column""with""quotes"'
 
-    # Microsoft SQL Server (MSSQL) uses square brackets
-    assert quote_identifier('my_table', dialect='mssql') == '[my_table]'
-    assert quote_identifier('order', dialect='mssql') == '[order]'  # Reserved word safe
-    assert quote_identifier('column]with]brackets', dialect='mssql') == '[column]]with]]brackets]'  # Escapes brackets
-
     # Unknown dialects raise an error
     with pytest.raises(ValueError, match='Unknown dialect: unknown'):
         quote_identifier('my_table', dialect='unknown')

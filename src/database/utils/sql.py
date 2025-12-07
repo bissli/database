@@ -117,8 +117,8 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
         # Always preserve regex patterns in regexp_replace
         return _preserve_regex_patterns_in_sql(sql)
 
-    # Handle SQL Server and SQLite placeholders (%s -> ?)
-    elif dialect in {'mssql', 'sqlite'}:
+    # Handle SQLite placeholders (%s -> ?)
+    elif dialect == 'sqlite':
         # Use a more precise regex to avoid replacing %s inside string literals
         # This handles cases like "WHERE format LIKE '%s.jpg'" correctly
 
@@ -222,7 +222,7 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     Parameters
         identifier: Database identifier (table name, column name, etc.)
         dialect: Database dialect name (default: 'postgresql')
-                 Supported dialects: 'postgresql', 'sqlite', 'mssql'
+                 Supported dialects: 'postgresql', 'sqlite'
 
     Returns
         Properly quoted and escaped identifier string
@@ -234,9 +234,6 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
 
     if dialect in {'postgresql', 'sqlite'}:
         return '"' + identifier.replace('"', '""') + '"'
-
-    if dialect == 'mssql':
-        return '[' + identifier.replace(']', ']]') + ']'
 
     raise ValueError(f'Unknown dialect: {dialect}')
 
@@ -278,49 +275,6 @@ def prepare_parameters_for_execution(sql: str, args: tuple, param_limit: int) ->
 
     # Return list of parameter chunks
     return chunk_sql_parameters(sql, args, param_limit)
-
-
-def prepare_stored_procedure_parameters(sql: str, args: tuple) -> tuple[str, list]:
-    """Prepare parameters for SQL Server stored procedure execution.
-
-    Converts named parameters in stored procedures to positional parameters
-    and adjusts parameter counts to match placeholders.
-
-    Parameters
-        sql: SQL query string for a stored procedure
-        args: Original parameters
-
-    Returns
-        Tuple of processed SQL and list of parameter chunks (usually just one for stored procedures)
-    """
-    # This incorporates the SQL Server-specific parameter handling logic
-    from database.utils.sqlserver_utils import prepare_sqlserver_params
-
-    # Convert parameters to positional placeholders
-    processed_sql, processed_args = prepare_sqlserver_params(sql, args)
-
-    # Count placeholders in the SQL
-    placeholder_count = processed_sql.count('?')
-    param_count = len(processed_args) if processed_args else 0
-
-    if not processed_args:
-        return processed_sql, [[]]
-
-    # Adjust parameter count to match placeholders
-    if placeholder_count != param_count:
-        if placeholder_count > param_count:
-            # Add None values if we need more parameters
-            processed_args = list(processed_args)
-            processed_args.extend([None] * (placeholder_count - param_count))
-        else:
-            # Truncate if we have too many parameters
-            processed_args = processed_args[:placeholder_count]
-
-    # Handle single parameter case specially
-    if placeholder_count == 1 and len(processed_args) >= 1:
-        return processed_sql, [[processed_args[0]]]
-
-    return processed_sql, [processed_args]
 
 
 def handle_query_params(func: Any) -> Any:
@@ -580,13 +534,6 @@ def prepare_sql_params_for_execution(sql: str, args: Any, dialect: str = 'postgr
     # Convert special types
     from database.adapters.type_conversion import TypeConverter
     args = TypeConverter.convert_params(args)
-
-    # Database-specific parameter handling
-    if dialect == 'mssql':
-        from database.utils.sqlserver_utils import _handle_in_clause
-
-        # SQL Server-specific IN clause handling
-        sql, args = _handle_in_clause(sql, args)
 
     return sql, args
 
@@ -1005,7 +952,7 @@ def _handle_positional_in_params(sql, args, dialect='postgresql'):
                 # ...skipping detailed implementation for brevity
 
                 # Convert back for non-PostgreSQL if needed
-                if dialect in {'mssql', 'sqlite'}:
+                if dialect == 'sqlite':
                     return modified_sql.replace('%s', '?'), tuple(modified_args)
                 return modified_sql, tuple(modified_args)
 
@@ -1324,7 +1271,7 @@ def has_placeholders(sql: str | None) -> bool:
     """Check if SQL has any parameter placeholders.
 
     Detects the presence of common SQL parameter placeholders:
-    - Positional placeholders: %s (PostgreSQL) or ? (SQLite, SQL Server)
+    - Positional placeholders: %s (PostgreSQL) or ? (SQLite)
     - Named parameters: %(name)s (PostgreSQL)
 
     This function is used to determine if parameter processing should be applied

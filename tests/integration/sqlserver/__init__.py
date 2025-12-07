@@ -1,1 +1,0 @@
-# SQLServer integration tests

@@ -33,11 +33,6 @@ Usage examples:
         result = db.select(mock_postgres_conn, "SELECT * FROM users")
         assert len(result) > 0
 
-    # SQL Server mock example
-    def test_with_sqlserver(mock_sqlserver_conn):
-        result = db.select_row(mock_sqlserver_conn, "SELECT id, name FROM users WHERE id = ?", 1)
-        assert result.id == 'value1'
-
     # SQLite mock example
     def test_with_sqlite(mock_sqlite_conn):
         db.execute(mock_sqlite_conn, "INSERT INTO users (name) VALUES (?)", "test_user")
@@ -100,7 +95,7 @@ logger = logging.getLogger(__name__)
     # Mock dialect name detection to prevent recursion
     def mock_get_dialect_name(obj):
         if obj is my_mock_conn:
-            return 'postgresql'  # or 'mssql' or 'sqlite'
+            return 'postgresql'  # or 'sqlite'
         return None
 
     mocker.patch('database.utils.connection_utils.get_dialect_name',
@@ -117,7 +112,7 @@ def _create_simple_mock_connection(connection_type='postgresql'):
     mock_postgres_conn.
 
     Args:
-        connection_type: Database type ('postgresql', 'mssql', 'sqlite', 'unknown')
+        connection_type: Database type ('postgresql', 'sqlite', 'unknown')
 
     Returns
         Simple mock connection object that will pass type detection
@@ -133,10 +128,6 @@ def _create_simple_mock_connection(connection_type='postgresql'):
     if connection_type == 'postgresql':
         # Creates a class that shows up as 'psycopg.Connection' in str(type(obj))
         conn.__class__.__module__ = 'psycopg'
-        conn.__class__.__qualname__ = 'Connection'
-        conn.__class__.__name__ = 'Connection'
-    elif connection_type == 'mssql':
-        conn.__class__.__module__ = 'pyodbc'
         conn.__class__.__qualname__ = 'Connection'
         conn.__class__.__name__ = 'Connection'
     elif connection_type == 'sqlite':
@@ -189,20 +180,6 @@ def simple_mock_postgresql_connection():
 
 
 @pytest.fixture
-def simple_mock_mssql_connection():
-    """
-    Fixture that provides a simple SQL Server mock connection.
-
-    This fixture is designed for testing connection type detection. For more
-    comprehensive mocks, use mock_sqlserver_conn.
-
-    Returns
-        Simple mock SQL Server connection object
-    """
-    return _create_simple_mock_connection('mssql')
-
-
-@pytest.fixture
 def simple_mock_sqlite_connection():
     """
     Fixture that provides a simple SQLite mock connection.
@@ -252,7 +229,7 @@ def create_simple_mock_connection():
     Fixture that provides a factory function to create simple mock connections.
 
     This fixture is designed for testing connection type detection. For more
-    comprehensive mocks, use mock_postgres_conn, mock_sqlserver_conn, etc.
+    comprehensive mocks, use mock_postgres_conn or mock_sqlite_conn.
 
     Returns
         Factory function that creates mock connections of specified type
@@ -261,14 +238,13 @@ def create_simple_mock_connection():
         def test_connection_detection(create_simple_mock_connection):
             # Create connections of different types
             pg_conn = create_simple_mock_connection('postgresql')
-            sql_conn = create_simple_mock_connection('mssql')
+            sqlite_conn = create_simple_mock_connection('sqlite')
             unknown_conn = create_simple_mock_connection('unknown')
 
             # Test type detection functions
             assert is_psycopg_connection(pg_conn) is True
-            assert is_pyodbc_connection(sql_conn) is True
+            assert is_sqlite3_connection(sqlite_conn) is True
             assert is_psycopg_connection(unknown_conn) is False
-            assert is_pyodbc_connection(unknown_conn) is False
             assert is_sqlite3_connection(unknown_conn) is False
     """
     def factory(connection_type='postgresql'):
@@ -315,9 +291,9 @@ def _setup_mock_conn(conn_type, type_str):
     work correctly and that common operations like commit and rollback are available.
 
     Args:
-        conn_type: Database type ('postgresql', 'mssql', 'sqlite')
+        conn_type: Database type ('postgresql', 'sqlite')
         type_str: String representation of the connection type for detection
-                  (e.g., 'psycopg.Connection', 'pyodbc.Connection')
+                  (e.g., 'psycopg.Connection', 'sqlite3.Connection')
 
     Returns
         Configured mock connection object
@@ -348,7 +324,7 @@ def _setup_mock_conn(conn_type, type_str):
     mock_conn._driver_type = conn_type  # For property support (legacy code)
 
     # Set database-specific autocommit properties
-    if conn_type in {'postgresql', 'mssql'}:
+    if conn_type == 'postgresql':
         conn_mock.autocommit = False
     elif conn_type == 'sqlite':
         conn_mock.isolation_level = 'DEFERRED'
@@ -555,7 +531,7 @@ def _setup_error_simulation(mock_conn, db_type):
 
     Args:
         mock_conn: The mock connection
-        db_type: Database type ('postgresql', 'mssql', 'sqlite')
+        db_type: Database type ('postgresql', 'sqlite')
 
     Returns
         Dictionary of error classes created for this database type
@@ -569,15 +545,6 @@ def _setup_error_simulation(mock_conn, db_type):
             'connection_closed': type('InterfaceError', (Exception,), {'__str__': lambda s: 'connection already closed'}),
             'foreign_key_violation': type('IntegrityError', (Exception,), {'__str__': lambda s: 'violates foreign key constraint'}),
             'syntax_error': type('ProgrammingError', (Exception,), {'__str__': lambda s: 'syntax error at or near'}),
-        }
-    elif db_type == 'mssql':
-        error_classes = {
-            'unique_violation': type('IntegrityError', (Exception,), {'__str__': lambda s: 'Violation of UNIQUE KEY constraint'}),
-            'operation_timeout': type('OperationalError', (Exception,), {'__str__': lambda s: 'Connection Timeout Expired'}),
-            'connection_closed': type('InterfaceError', (Exception,), {'__str__': lambda s: 'Connection is closed'}),
-            'foreign_key_violation': type('IntegrityError', (Exception,), {'__str__': lambda s: 'The DELETE statement conflicted with the REFERENCE constraint'}),
-            'syntax_error': type('ProgrammingError', (Exception,), {'__str__': lambda s: 'Incorrect syntax near'}),
-            'unnamed_columns': type('ProgrammingError', (Exception,), {'__str__': lambda s: 'The query returned columns with no names'}),
         }
     elif db_type == 'sqlite':
         error_classes = {
@@ -734,7 +701,7 @@ def _setup_special_data_types(mock_conn, db_type):
 
     Args:
         mock_conn: The mock connection
-        db_type: Database type ('postgresql', 'mssql', 'sqlite')
+        db_type: Database type ('postgresql', 'sqlite')
 
     Returns
         None
@@ -759,9 +726,9 @@ def _setup_special_data_types(mock_conn, db_type):
         type_converters['json'] = (json_types, json_result_processor)
 
     # Add UUID support
-    if db_type in {'postgresql', 'mssql'}:
+    if db_type == 'postgresql':
         # UUID type (2950 for PostgreSQL)
-        uuid_types = {2950} if db_type == 'postgresql' else {36}
+        uuid_types = {2950}
 
         def uuid_result_processor(value):
             if value is None:
@@ -796,9 +763,9 @@ def _setup_special_data_types(mock_conn, db_type):
         type_converters['array'] = (set(array_types.values()), array_result_processor)
 
     # Add timestamp with time zone support
-    if db_type in {'postgresql', 'mssql'}:
-        # Timestamptz type (1184 for PostgreSQL) or datetimeoffset for SQL Server
-        timestamp_types = {1184} if db_type == 'postgresql' else {-155}
+    if db_type == 'postgresql':
+        # Timestamptz type (1184 for PostgreSQL)
+        timestamp_types = {1184}
 
         def timestamptz_result_processor(value):
             if value is None:
@@ -901,10 +868,7 @@ def _setup_schema_operations_tracking(mock_conn):
 
     # Configure quote_identifier
     def mock_quote_identifier(identifier, dialect):
-        if dialect in {'postgresql', 'sqlite'}:
-            return f'"{identifier}"'
-        else:  # sqlserver
-            return f'[{identifier}]'
+        return f'"{identifier}"'
     strategy_mock.quote_identifier.side_effect = mock_quote_identifier
 
     # Patch the strategy module
@@ -1108,7 +1072,7 @@ def _setup_data_loader(mock_conn, driver_name):
 
     Args:
         mock_conn: Mock connection to configure
-        driver_name: Database driver name for options ('postgresql', 'mssql', 'sqlite')
+        driver_name: Database driver name for options ('postgresql', 'sqlite')
 
     Notes
         - The data loader converts tuples to dictionaries using column names
@@ -1390,289 +1354,6 @@ def mock_postgres_conn_with_types():
                 obj.driver_connection is mock_conn.connection
             ))
         )
-    ))
-
-    # And isconnection
-    patchers.append(patch(
-        'database.utils.connection_utils.isconnection',
-        side_effect=lambda x: x is mock_conn or patchers[0].get_original()[0](x)
-    ))
-
-    # Start all patchers
-    for p in patchers:
-        p.start()
-
-    yield mock_conn
-
-    # Stop all patchers
-    for p in patchers:
-        p.stop()
-
-
-@pytest.fixture
-def mock_sqlserver_conn():
-    """
-    Create a mock SQL Server connection for testing.
-
-    This fixture provides a fully configured mock SQL Server connection that can be
-    used for testing database code without requiring an actual SQL Server instance.
-    The mock includes pre-configured responses for common operations and patches
-    the necessary functions to ensure type detection and SQL Server-specific
-    utilities work correctly.
-
-    Returns
-        Mock SQL Server connection object
-
-    Example usage:
-        def test_sqlserver_query(mock_sqlserver_conn):
-            # Test a SELECT query with parameters
-            result = db.select(mock_sqlserver_conn, "SELECT * FROM users WHERE id = ?", 1)
-            assert len(result) > 0
-
-            # Verify the executed SQL
-            assert "SELECT * FROM users" in mock_sqlserver_conn.cursor().last_sql
-            assert mock_sqlserver_conn.cursor().last_params == 1
-
-            # Test an identity insert with returned id
-            id = db.operations.data.insert_identity(
-                mock_sqlserver_conn,
-                "INSERT INTO users (name) VALUES (?)",
-                "test_user"
-            )
-            assert id == 42  # The mock always returns 42 as the identity
-
-        def test_sqlserver_error_handling(mock_sqlserver_conn):
-            # Test handling of SQL Server errors
-            cursor = mock_sqlserver_conn.cursor()
-
-            # Setup the cursors to raise an exception on next execution
-            cursor.execute.side_effect = mock_sqlserver_conn.connection.Error("Test error")
-
-            # Use with pytest.raises to verify error handling
-            with pytest.raises(db.DatabaseError):
-                db.execute(mock_sqlserver_conn, "SELECT * FROM non_existent_table")
-    """
-    mock_conn = _setup_mock_conn('mssql', 'pyodbc.Connection')
-
-    # Add SQL Server-specific methods and attributes
-    conn = mock_conn.connection
-    conn.add_output_converter = MagicMock()  # For datetime and other type conversions
-    conn.setdecoding = MagicMock()
-    conn.setencoding = MagicMock()
-
-    # Add SQL_* constants needed for encoding/decoding operations
-    # These match the actual pyodbc constants
-    conn.SQL_CHAR = 1
-    conn.SQL_WCHAR = -8
-    conn.SQL_WMETADATA = -10
-
-    # Setup cursor with SQL Server-specific fields
-    # Type codes match actual SQL Server type codes:
-    # -4 = SQL_LONG_VARCHAR (int), -9 = SQL_WVARCHAR (nvarchar)
-    cursor = _setup_cursor(
-        mock_conn,
-        description=[
-            ('id', -4, None, None, None, None, None),  # -4=int
-            ('name', -9, None, None, None, None, None)  # -9=nvarchar
-        ]
-    )
-
-    # Setup data loader
-    _setup_data_loader(mock_conn, 'mssql')
-
-    # Setup error simulation
-    error_classes = _setup_error_simulation(mock_conn, 'mssql')
-
-    # Setup reconnection testing
-    _setup_reconnection_testing(mock_conn, error_classes)
-
-    # Setup special data type support
-    _setup_special_data_types(mock_conn, 'mssql')
-
-    # Setup schema operations tracking
-    schema_patchers = _setup_schema_operations_tracking(mock_conn)
-
-    # Setup transaction support
-    transaction_patcher = _setup_transaction(mock_conn, cursor)
-
-    # Apply common patches to make test isolation clean
-    patchers = [transaction_patcher] + schema_patchers
-
-    # Connection type detection patches
-    # These ensure that get_dialect_name() returns 'mssql' for our mock
-    patchers.append(patch(
-        'database.utils.connection_utils.get_dialect_name',
-        side_effect=lambda obj: 'mssql' if (
-            obj is mock_conn or
-            obj is mock_conn.connection or
-            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
-            (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or
-                obj.driver_connection is mock_conn.connection
-            ))
-        ) else None
-    ))
-    patchers.append(patch(
-        'database.utils.connection_utils.isconnection',
-        side_effect=lambda x: x is mock_conn or patchers[0].get_original()[0](x)
-    ))
-
-    # SQL handling patches
-    patchers.append(patch(
-        'database.utils.sql.quote_identifier',
-        side_effect=lambda ident, dialect: f"[{ident.replace(']', ']]')}]"
-    ))
-    patchers.append(patch(
-        'database.utils.sql.standardize_placeholders',
-        side_effect=lambda db_type, sql: sql.replace('%s', '?') if db_type == 'mssql' else sql
-    ))
-    patchers.append(patch(
-        'database.operations.query.load_data',
-        side_effect=lambda cursor, **kwargs: mock_conn.options.data_loader(
-            cursor.fetchall(),
-            [c[0] for c in cursor.description],
-            **kwargs
-        )
-    ))
-    patchers.append(patch(
-        'database.operations.query.extract_column_info',
-        return_value=[
-            MagicMock(name='id', python_type=int, to_dict=lambda: {'name': 'id', 'python_type': 'int'}),
-            MagicMock(name='name', python_type=str, to_dict=lambda: {'name': 'name', 'python_type': 'str'})
-        ]
-    ))
-
-    # SQL Server specific patches
-    # These handle SQL Server-specific behaviors
-    patchers.append(patch(
-        'database.utils.sqlserver_utils.extract_identity_from_result',
-        side_effect=lambda result: 42 if result else None  # Always return 42 as identity
-    ))
-    patchers.append(patch(
-        'database.utils.sqlserver_utils.ensure_identity_column_named',
-        side_effect=lambda sql: sql  # Pass through SQL unmodified
-    ))
-    patchers.append(patch(
-        'database.utils.sqlserver_utils.handle_unnamed_columns_error',
-        return_value=('MODIFIED SQL', False)  # Simulate error handler response
-    ))
-    patchers.append(patch(
-        'database.utils.sqlserver_utils.ensure_timezone_naive_datetime',
-        side_effect=lambda dt: dt  # Pass through datetime unmodified
-    ))
-    patchers.append(patch(
-        'database.utils.sqlserver_utils.register_datetimeoffset_converter'
-    ))
-
-    # Start all patchers
-    for p in patchers:
-        p.start()
-
-    yield mock_conn
-
-    # Stop all patchers
-    for p in patchers:
-        p.stop()
-
-
-@pytest.fixture
-def mock_sqlserver_proc_conn():
-    """
-    Create a mock SQL Server connection with stored procedure support.
-
-    This fixture extends the basic SQL Server mock with support for multiple
-    result sets, making it ideal for testing stored procedure calls that return
-    multiple result sets.
-
-    Returns
-        Mock SQL Server connection object with multiple result set support
-
-    Example usage:
-        def test_stored_procedure(mock_sqlserver_proc_conn):
-            # Configure result sets for a stored procedure
-            mock_sqlserver_proc_conn.set_result_sets([
-                {
-                    'description': [('id', -4, None, None, None, None, None),
-                                   ('name', -9, None, None, None, None, None)],
-                    'data': [{'id': 1, 'name': 'User 1'}, {'id': 2, 'name': 'User 2'}]
-                },
-                {
-                    'description': [('count', -4, None, None, None, None, None)],
-                    'data': [{'count': 42}]
-                }
-            ])
-
-            # Call stored procedure and get all result sets
-            results = db.select(mock_sqlserver_proc_conn,
-                                 "EXEC my_proc @param = ?",
-                                 123,
-                                 return_all=True)
-
-            # Verify results
-            assert len(results) == 2
-            assert len(results[0]) == 2  # First result set has 2 rows
-            assert results[1][0]['count'] == 42  # Second result set has count value
-    """
-    mock_conn = _setup_mock_conn('mssql', 'pyodbc.Connection')
-
-    # Add SQL Server-specific methods
-    conn = mock_conn.connection
-    conn.add_output_converter = MagicMock()
-    conn.setdecoding = MagicMock()
-    conn.setencoding = MagicMock()
-
-    # Define multiple result sets
-    result_sets = [
-        {
-            'description': [
-                ('id', -4, None, None, None, None, None),
-                ('name', -9, None, None, None, None, None)
-            ],
-            'data': [
-                {'id': 1, 'name': 'User 1'},
-                {'id': 2, 'name': 'User 2'}
-            ]
-        },
-        {
-            'description': [
-                ('count', -4, None, None, None, None, None)
-            ],
-            'data': [
-                {'count': 42}
-            ]
-        }
-    ]
-
-    # Setup cursor with initial description from first result set
-    cursor = _setup_cursor(mock_conn, result_sets[0]['description'], result_sets[0]['data'])
-
-    # Configure multiple result sets
-    set_result_sets = _setup_multiple_resultsets(cursor, result_sets)
-
-    # Store the function to allow tests to change result sets
-    mock_conn.set_result_sets = set_result_sets
-
-    # Setup data loader
-    _setup_data_loader(mock_conn, 'mssql')
-
-    # Setup transaction support
-    transaction_patcher = _setup_transaction(mock_conn, cursor)
-
-    # Apply common patches
-    patchers = [transaction_patcher]
-
-    # Connection type detection
-    patchers.append(patch(
-        'database.utils.connection_utils.get_dialect_name',
-        side_effect=lambda obj: 'mssql' if (
-            obj is mock_conn or
-            obj is mock_conn.connection or
-            (hasattr(obj, 'connection') and obj.connection is mock_conn.connection) or
-            (hasattr(obj, 'driver_connection') and (
-                obj.driver_connection is mock_conn or
-                obj.driver_connection is mock_conn.connection
-            ))
-        ) else None
     ))
 
     # And isconnection

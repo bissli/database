@@ -13,7 +13,6 @@ The module maintains the same API as before while using SQLAlchemy under the hoo
 
 """
 import logging
-import re
 from dataclasses import fields
 from typing import Any, Self
 
@@ -232,13 +231,6 @@ def connect(options: DatabaseOptions | dict[str, Any] | str,
                                     pool_size=options.pool_max_connections,
                                     pool_recycle=options.pool_max_idle_time,
                                     pool_timeout=options.pool_wait_timeout)
-
-    if options.drivername == 'mssql':
-        version_match = re.search(r'ODBC\s+Driver\s+(\d+)', options.driver or '', re.IGNORECASE)
-        if not version_match or int(version_match.group(1)) < 18:
-            engine.dispose()
-            raise RuntimeError(f'ODBC Driver 18 or newer is required. Configured driver: {options.driver}. '
-                               f'Please upgrade your driver: https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server')
 
     sa_connection = engine.connect()
     configure_connection(sa_connection)

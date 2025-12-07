@@ -178,13 +178,6 @@ class Transaction:
 
         Raises an assertion error if more than one row is returned.
         """
-        if get_dialect_name(self.connection) == 'mssql' and ('COUNT(' in sql.upper() or 'SELECT 1 ' in sql):
-            cursor = self.cursor
-            cursor.execute(sql, *args)
-            result = cursor.fetchone()
-            if result:
-                return result[0]
-            return None
         data = self.select(sql, *args)
         assert len(data) == 1, f'Expected one row, got {len(data)}'
         return RowStructureAdapter.create(self.connection, data[0]).get_value()

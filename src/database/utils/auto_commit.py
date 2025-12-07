@@ -17,7 +17,6 @@ def enable_auto_commit(connection: Any) -> None:
     - SQLAlchemy connections
     - psycopg (PostgreSQL)
     - sqlite3
-    - pyodbc (SQL Server)
     - Raw DBAPI connections
 
     Args:
@@ -51,19 +50,6 @@ def enable_auto_commit(connection: Any) -> None:
             raw_conn.isolation_level = None
         except Exception as e:
             logger.debug(f'Could not set SQLite isolation_level: {e}')
-
-    # SQL Server via ODBC
-    elif dialect == 'mssql':
-        try:
-            # First try the standard way
-            if hasattr(raw_conn, 'autocommit'):
-                raw_conn.autocommit = True
-            # Then try ODBC-specific method
-            elif hasattr(raw_conn, 'set_attr'):
-                import pyodbc
-                raw_conn.set_attr(pyodbc.SQL_ATTR_AUTOCOMMIT, pyodbc.SQL_AUTOCOMMIT_ON)
-        except Exception as e:
-            logger.debug(f'Could not set SQL Server autocommit: {e}')
 
     # Generic DBAPI
     elif hasattr(raw_conn, 'autocommit'):
@@ -105,18 +91,6 @@ def disable_auto_commit(connection: Any) -> None:
             raw_conn.isolation_level = 'DEFERRED'
         except Exception as e:
             logger.debug(f'Could not set SQLite isolation_level: {e}')
-
-    elif dialect == 'mssql':
-        try:
-            # First try the standard way
-            if hasattr(raw_conn, 'autocommit'):
-                raw_conn.autocommit = False
-            # Then try ODBC-specific method
-            elif hasattr(raw_conn, 'set_attr'):
-                import pyodbc
-                raw_conn.set_attr(pyodbc.SQL_ATTR_AUTOCOMMIT, pyodbc.SQL_AUTOCOMMIT_OFF)
-        except Exception as e:
-            logger.debug(f'Could not set SQL Server autocommit: {e}')
 
     # Generic DBAPI
     elif hasattr(raw_conn, 'autocommit'):
@@ -174,8 +148,6 @@ def diagnose_connection(conn):
         info['type'] = 'postgresql'
     elif dialect == 'sqlite':
         info['type'] = 'sqlite'
-    elif dialect == 'mssql':
-        info['type'] = 'sqlserver'
 
     # Get SQLAlchemy/raw status
     info['is_sqlalchemy'] = hasattr(conn, 'sa_connection')

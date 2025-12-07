@@ -39,7 +39,6 @@ def vacuum_table(cn, table):
     This operation varies by database type:
     - PostgreSQL: VACUUM (FULL, ANALYZE)
     - SQLite: VACUUM (entire database)
-    - SQL Server: Rebuilds all indexes
     """
     strategy = get_db_strategy(cn)
     strategy.vacuum_table(cn, table)
@@ -51,7 +50,6 @@ def reindex_table(cn, table):
     This operation varies by database type:
     - PostgreSQL: REINDEX TABLE
     - SQLite: REINDEX
-    - SQL Server: ALTER INDEX ALL ... REBUILD
     """
     strategy = get_db_strategy(cn)
     strategy.reindex_table(cn, table)

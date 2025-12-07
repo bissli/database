@@ -2,7 +2,7 @@
 Database connection type utilities with SQLAlchemy integration.
 
 This module provides:
-1. Functions for detecting connection types (SQLite, PostgreSQL, SQL Server)
+1. Functions for detecting connection types (SQLite, PostgreSQL)
 2. SQLAlchemy URL generation from DatabaseOptions
 3. Engine creation and management through a thread-safe registry
 4. Connection management utilities for SQLAlchemy
@@ -84,30 +84,6 @@ def create_url_from_options(options, url_creator=sa.URL.create):
             port=options.port,
             database=options.database,
             query=query
-        )
-
-    elif options.drivername == 'mssql':
-        # SQL Server connection with pyodbc driver
-        query_params = {
-            'driver': options.driver,
-            'TrustServerCertificate': 'yes' if options.trust_server_certificate else 'no',
-            'MARS_Connection': 'yes'
-        }
-
-        if options.timeout:
-            query_params['connect_timeout'] = str(options.timeout)
-
-        if options.appname:
-            query_params['APP'] = options.appname
-
-        return url_creator(
-            drivername='mssql+pyodbc',
-            username=options.username,
-            password=options.password,
-            host=options.hostname,
-            port=options.port,
-            database=options.database,
-            query=query_params
         )
 
     raise ValueError(f'Unsupported database type: {options.drivername}')
@@ -250,14 +226,14 @@ def get_dialect_name(obj):
     Works with:
     - SQLAlchemy engines
     - SQLAlchemy connections
-    - DBAPI connections (psycopg, pyodbc, sqlite3)
+    - DBAPI connections (psycopg, sqlite3)
     - Connection wrappers
 
     Args:
         obj: Connection object or engine
 
     Returns
-        str: Dialect name ('postgresql', 'mssql', 'sqlite') or None if not recognized
+        str: Dialect name ('postgresql', 'sqlite') or None if not recognized
     """
     # Track seen objects to prevent cycles
     seen = set()
@@ -296,8 +272,6 @@ def get_dialect_name(obj):
         obj_type = str(type(obj))
         if 'psycopg.Connection' in obj_type:
             return 'postgresql'
-        if 'pyodbc.Connection' in obj_type:
-            return 'mssql'
         if 'sqlite3.Connection' in obj_type:
             return 'sqlite'
 

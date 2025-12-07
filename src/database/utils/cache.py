@@ -225,7 +225,7 @@ class CacheManager:
         strategy_caches = {}
         strategy_prefixes = ['primary_keys_', 'table_columns_',
                              'sequence_columns_', 'sequence_column_finder_']
-        strategy_classes = ['PostgresStrategy', 'SQLiteStrategy', 'SQLServerStrategy']
+        strategy_classes = ['PostgresStrategy', 'SQLiteStrategy']
 
         for name, cache in self._caches.items():
             # Check for known prefixes
@@ -262,11 +262,8 @@ class CacheManager:
         table_name_lower = table_name.lower()
         with self._lock:
             for cache_name, cache in self.get_strategy_caches().items():
-                keys_to_clear = []
-                for key in list(cache.keys()):
-                    # Strategy cache keys start with the table name
-                    if key.lower().startswith(table_name_lower):
-                        keys_to_clear.append(key)
+                # Strategy cache keys start with the table name
+                keys_to_clear = [key for key in list(cache.keys()) if key.lower().startswith(table_name_lower)]
 
                 for key in keys_to_clear:
                     if key in cache:
@@ -291,10 +288,7 @@ class CacheManager:
         with self._lock:
             for conn_id in self.get_schema_cache_ids():
                 conn_cache = self.get_schema_cache(conn_id)
-                keys_to_clear = []
-                for key in list(conn_cache.keys()):
-                    if table_name_lower in key.lower():
-                        keys_to_clear.append(key)
+                keys_to_clear = [key for key in list(conn_cache.keys()) if table_name_lower in key.lower()]
 
                 for key in keys_to_clear:
                     if key in conn_cache:

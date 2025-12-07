@@ -54,7 +54,6 @@ This document provides detailed API documentation and advanced usage information
 - [Database-Specific Features](#database-specific-features)
   - [PostgreSQL Features](#postgresql-features)
   - [SQLite Features](#sqlite-features)
-  - [SQL Server Features](#sql-server-features)
 - [API Reference](#api-reference)
   - [Core Functions](#core-functions)
   - [Query Operations](#query-operations-1)
@@ -73,7 +72,6 @@ pip install git+https://github.com/bissli/database
 
 - PostgreSQL: `psycopg`
 - SQLite: Included in Python standard library
-- SQL Server: `pymssql`
 - Data handling: `pandas`, `numpy`
 - Utilities: `pyarrow` (optional)
 
@@ -86,7 +84,7 @@ import database as db
 
 # Connect to a database with a dictionary config
 cn = db.connect({
-    'drivername': 'postgresql',  # or 'sqlite', 'mssql'
+    'drivername': 'postgresql',  # or 'sqlite'
     'database': 'your_database',
     'hostname': 'localhost',
     'username': 'your_username',
@@ -182,18 +180,6 @@ sqlite.database = 'database.db'
 sqlite.data_loader = iterdict_data_loader
 sqlite.use_pool = False
 
-# SQL Server configuration
-mssql = Setting()
-mssql.drivername = 'mssql'
-mssql.hostname = 'localhost'
-mssql.username = 'sa'
-mssql.password = 'StrongPassword123!'
-mssql.database = 'master'
-mssql.port = 1433
-mssql.timeout = 30
-mssql.driver = 'ODBC Driver 18 for SQL Server'
-mssql.data_loader = iterdict_data_loader
-
 Setting.lock()
 ```
 
@@ -201,16 +187,13 @@ Then import these settings to connect to different environments:
 
 ```python
 # Import from config file
-from config import postgresql, sqlite, mssql
+from config import postgresql, sqlite
 
 # Connect to PostgreSQL
 pg_cn = db.connect(postgresql)
 
 # Connect to SQLite
 lite_cn = db.connect(sqlite)
-
-# Connect to SQL Server
-ms_cn = db.connect(mssql)
 
 # You can also override settings temporarily
 from copy import copy
@@ -461,20 +444,12 @@ for name, type_info in result['column_types'].items():
 Type information is mapped consistently across all database backends:
 - PostgreSQL: Uses the native type system with OIDs
 - SQLite: Maps type strings to Python types
-- SQL Server: Maps SQL Server type names to Python types
 
 ### Stored Procedures and Multiple Result Sets
 
 The `select` function handles stored procedures and multiple result sets:
 
 ```python
-# Basic stored procedure call
-result = db.select(cn, 'EXEC get_users_by_status @status=?', 'active')
-
-# SQL Server stored procedure with named parameters
-result = db.select(cn, 'EXEC calculate_stats @start_date=?, @end_date=?',
-                  '2023-01-01', '2023-12-31')
-
 # PostgreSQL stored procedure
 result = db.select(cn, 'CALL get_users_by_status(%s)', 'active')
 
@@ -496,7 +471,6 @@ all_results = db.select(cn, multi_statement_sql, return_all=True)
 
 The enhanced `select` function is particularly useful for:
 - Stored procedures that return multiple result sets
-- SQL Server procedures with both NOCOUNT ON and OFF
 - Multiple SQL statements that each return different data
 - Any scenario where you need to handle sequential result sets from a single query
 
@@ -515,7 +489,7 @@ db.insert(cn, 'INSERT INTO users (name, email) VALUES (%s, %s)',
 
 #### insert_identity
 
-Insert a row and return the auto-generated identity/sequence value (SQL Server):
+Insert a row and return the auto-generated identity/sequence value:
 
 ```python
 user_id = db.insert_identity(cn, 'INSERT INTO users (name, email) VALUES (%s, %s)',
@@ -607,7 +581,6 @@ db.upsert_rows(cn, 'users', rows, reset_sequence=True)
 Database-specific behavior:
 - **PostgreSQL**: Uses `INSERT ... ON CONFLICT DO UPDATE`
 - **SQLite**: Uses `INSERT ... ON CONFLICT DO UPDATE`
-- **SQL Server**: Uses `MERGE INTO` statement with specialized handling for NULL values
 
 ### Delete Operations
 
@@ -725,9 +698,9 @@ with db.transaction(cn, isolation_level='SERIALIZABLE') as tx:
 ```
 
 Available isolation levels:
-- **READ UNCOMMITTED**: Lowest isolation, allows dirty reads (SQL Server, PostgreSQL)
-- **READ COMMITTED**: Prevents dirty reads (Default for PostgreSQL, SQL Server)
-- **REPEATABLE READ**: Prevents non-repeatable reads (PostgreSQL, SQL Server)
+- **READ UNCOMMITTED**: Lowest isolation, allows dirty reads (PostgreSQL)
+- **READ COMMITTED**: Prevents dirty reads (Default for PostgreSQL)
+- **REPEATABLE READ**: Prevents non-repeatable reads (PostgreSQL)
 - **SERIALIZABLE**: Highest isolation, prevents all concurrency issues (All databases)
 
 ### Database-Specific Transaction Behavior
@@ -752,16 +725,6 @@ Isolation levels and transaction behavior vary by database type:
   ```python
   with db.transaction(cn) as tx:  # Uses SQLite defaults
       # SQLite transaction
-  ```
-
-#### SQL Server
-- Supports full ACID transactions with multiple isolation levels
-- Uses READ COMMITTED as the default isolation level
-- Supports snapshot isolation via SNAPSHOT isolation level
-- Example:
-  ```python
-  with db.transaction(cn, isolation_level='SNAPSHOT') as tx:
-      # SQL Server snapshot isolation
   ```
 
 ## Type System
@@ -889,25 +852,6 @@ db.execute(cn, "INSERT INTO settings (config) VALUES (?)",
           json.dumps({"theme": "light"}))  # Manual JSON serialization
 ```
 
-#### SQL Server
-
-SQL Server has comprehensive type mapping:
-
-```python
-# SQL Server date/time handling
-db.execute(cn, "INSERT INTO appointments (title, scheduled_at) VALUES (?, ?)",
-          "Doctor", datetime.datetime(2023, 2, 15, 14, 30))
-
-# Decimal precision handling
-from decimal import Decimal
-db.execute(cn, "INSERT INTO finances (amount) VALUES (?)",
-          Decimal('1234.56'))
-
-# Binary data
-db.execute(cn, "INSERT INTO files (filename, data) VALUES (?, ?)",
-          "document.pdf", b'binary data here')
-```
-
 ### Empty Result Type Handling
 
 All query operations maintain type information even with empty results:
@@ -970,7 +914,7 @@ This function:
 1. Identifies the identity/sequence column for the table
 2. Determines the next available ID value by finding the maximum existing value
 3. Resets the sequence to the correct next value
-4. Works across PostgreSQL, SQLite, and SQL Server with database-specific implementations
+4. Works across PostgreSQL and SQLite with database-specific implementations
 
 ### Table Maintenance Operations
 
@@ -985,7 +929,6 @@ db.vacuum_table(cn, 'users')
 Different behavior by database:
 - **PostgreSQL**: Executes `VACUUM users`
 - **SQLite**: Executes `VACUUM` on the entire database if supported
-- **SQL Server**: Reorganizes table indexes
 
 #### reindex_table
 
@@ -998,7 +941,6 @@ db.reindex_table(cn, 'users')
 Different behavior by database:
 - **PostgreSQL**: Executes `REINDEX TABLE users`
 - **SQLite**: Rebuilds all indexes on the table
-- **SQL Server**: Rebuilds all indexes using `ALTER INDEX ... REBUILD`
 
 #### cluster_table
 
@@ -1042,22 +984,6 @@ columns = db.get_table_columns(cn, 'users')
 db.reset_table_sequence(cn, 'users')
 ```
 
-#### SQL Server Schema Operations
-
-```python
-# Reset IDENTITY column
-db.reset_table_sequence(cn, 'users')
-
-# Table reorganization
-db.reindex_table(cn, 'users')  # Rebuilds all indexes
-
-# Get table columns with types
-columns = db.get_table_columns(cn, 'users')  # {'id': 'int', 'name': 'nvarchar', ...}
-
-# Get identity columns
-identity_columns = db.get_sequence_columns(cn, 'users')  # ['id']
-```
-
 ## Advanced Features
 
 ### SQL Query Helpers
@@ -1065,11 +991,11 @@ identity_columns = db.get_sequence_columns(cn, 'users')  # ['id']
 The module provides several utilities to handle SQL formatting and parameter handling:
 
 ```python
-from database.utils.sql import quote_identifier, handle_in_clause_params
+from database.sql import quote_identifier, handle_in_clause_params
 
 # Quote identifiers for different databases
-table_name = quote_identifier('postgres', 'my_table')  # Returns "my_table"
-column_name = quote_identifier('sqlserver', 'user_id')  # Returns [user_id]
+table_name = quote_identifier('postgresql', 'my_table')  # Returns "my_table"
+column_name = quote_identifier('sqlite', 'user_id')  # Returns "user_id"
 
 # Handle IN clauses with list parameters
 sql = "SELECT * FROM users WHERE status IN %s"
@@ -1267,7 +1193,7 @@ result = db.select(cn, """
     ORDER BY total_spent DESC, name
 """, '2023-01-01')
 
-# Recursive CTE (SQL Server and PostgreSQL)
+# Recursive CTE (PostgreSQL)
 result = db.select(cn, """
     WITH RECURSIVE org_hierarchy AS (
         -- Base case: top-level employees (no manager)
@@ -1369,66 +1295,6 @@ db.execute(cn, "INSERT INTO article_fts VALUES(?, ?)",
 result = db.select(cn, "SELECT * FROM article_fts WHERE article_fts MATCH ?", "tutorial")
 ```
 
-### SQL Server Features
-
-SQL Server provides enterprise features with specialized support:
-
-```python
-# Identity insert
-user_id = db.insert_identity(cn,
-    'INSERT INTO users (name, email) VALUES (%s, %s)',
-    'John Smith', 'john@example.com')
-
-# Table reorganization
-db.reindex_table(cn, 'users')  # Rebuilds all indexes
-
-# Stored procedure execution with SQL Server syntax
-result = db.select(cn, 'EXEC get_user_data @user_id=?, @include_inactive=?',
-                  42, False)
-
-# Multiple result sets from stored procedure
-results = db.select(cn, 'EXEC get_sales_report @region=?, @year=?',
-                  'Northeast', 2023, return_all=True)
-
-# Enhanced ODBC Driver 18+ support
-# - Full column name preservation (no truncation)
-# - Improved handling of expressions and unnamed columns
-# - Automatic type conversion for date/time values
-
-# Table-Valued Parameters (TVPs)
-# (Requires pyodbc with proper TVP support)
-import pyodbc
-
-# First create a SQL Server table type
-# CREATE TYPE UserTableType AS TABLE (
-#    name NVARCHAR(100),
-#    email NVARCHAR(100)
-# )
-
-# Then create a stored procedure that uses it
-# CREATE PROCEDURE bulk_insert_users @users UserTableType READONLY
-# AS
-# BEGIN
-#    INSERT INTO users (name, email)
-#    SELECT name, email FROM @users
-# END
-
-# Create a driver connection with pyodbc for TVP support
-odbc_cn = pyodbc.connect(connection_string)
-
-# Create a TVP
-tvp = pyodbc.TVP("UserTableType")
-tvp.add_column("name", str)
-tvp.add_column("email", str)
-for user in users_to_insert:
-    tvp.add_row(user["name"], user["email"])
-
-# Execute the stored procedure with the TVP
-cursor = odbc_cn.cursor()
-cursor.execute("{CALL bulk_insert_users(?)}", tvp)
-odbc_cn.commit()
-```
-
 ## API Reference
 
 The following is a complete reference of the public API functions and types.
@@ -1486,7 +1352,6 @@ The following is a complete reference of the public API functions and types.
 |----------|-------------|------------|---------|
 | `isconnection(obj)` | Check if object is a database connection | `obj`: Object to check | Boolean |
 | `is_psycopg_connection(obj)` | Check if PostgreSQL connection | `obj`: Object to check | Boolean |
-| `is_pymssql_connection(obj)` | Check if SQL Server connection | `obj`: Object to check | Boolean |
 | `is_sqlite3_connection(obj)` | Check if SQLite connection | `obj`: Object to check | Boolean |
 
 ### Exception Types

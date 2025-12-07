@@ -14,10 +14,7 @@ from database.adapters.type_conversion import TypeConverter
 from database.adapters.type_mapping import postgres_types
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name, isconnection
-from database.utils.sql import has_placeholders, standardize_placeholders
-from database.utils.sqlserver_utils import ensure_identity_column_named
-from database.utils.sqlserver_utils import handle_unnamed_columns_error
-from database.utils.sqlserver_utils import prepare_sqlserver_params
+from database.utils.sql import has_placeholders
 
 from libb import collapse
 
@@ -317,7 +314,7 @@ class PostgresqlCursor(AbstractCursor):
     @batch_execute
     @convert_params
     @dumpsql
-    def executemany(self, sql: str, seq_of_parameters: Sequence, batch_size: int = 500, 
+    def executemany(self, sql: str, seq_of_parameters: Sequence, batch_size: int = 500,
                     **kwargs: Any) -> int:
         """Execute the SQL statement against all parameter sequences for PostgreSQL."""
         start = time.time()
@@ -330,143 +327,6 @@ class PostgresqlCursor(AbstractCursor):
         try:
             self.dbapi_cursor.executemany(sql, seq_of_parameters)
             logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
-        finally:
-            end = time.time()
-            self.connwrapper.addcall(end - start)
-            logger.debug('Executemany time: %f' % (end - start))
-
-        if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
-            ensure_commit(self.connwrapper)
-
-        return self.dbapi_cursor.rowcount
-
-
-class MssqlCursor(AbstractCursor):
-    """Microsoft SQL Server cursor implementation."""
-
-    @convert_params
-    @dumpsql
-    def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
-        """Execute a database operation for SQL Server."""
-        start = time.time()
-        auto_commit = kwargs.pop('auto_commit', True)
-
-        try:
-            self._execute_query(operation, args)
-        except Exception as e:
-            self._handle_sqlserver_error(e, operation, args)
-        finally:
-            end = time.time()
-            self.connwrapper.addcall(end - start)
-            logger.debug('Query time: %f' % (end - start))
-
-        if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
-            ensure_commit(self.connwrapper)
-
-        return self.dbapi_cursor.rowcount
-
-    def _execute_query(self, sql: str, args: tuple) -> None:
-        """Execute a query specifically for SQL Server with appropriate handling.
-
-        Processes SQL queries for SQL Server, handling placeholder conversion,
-        stored procedures, and parameter passing.
-        """
-        sql = ensure_identity_column_named(sql)
-
-        self._sql = sql
-        self._original_sql = sql
-
-        dialect = get_dialect_name(self.connwrapper)
-        sql = standardize_placeholders(sql, dialect=dialect)
-
-        if args and 'EXEC ' in sql.upper() and '@' in sql:
-            self._execute_stored_procedure(sql, args)
-        else:
-            if args:
-                if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                    self.dbapi_cursor.execute(sql, args[0])
-                else:
-                    self.dbapi_cursor.execute(sql, args)
-            else:
-                self.dbapi_cursor.execute(sql)
-
-    def _execute_stored_procedure(self, sql: str, args: tuple) -> None:
-        """Handle execution of SQL Server stored procedures with parameters.
-
-        Prepares and executes stored procedure calls with appropriate parameter
-        handling for SQL Server's specific requirements.
-        """
-        processed_sql, processed_args = prepare_sqlserver_params(sql, args)
-
-        placeholder_count = processed_sql.count('?')
-        param_count = len(processed_args) if processed_args else 0
-
-        if not processed_args:
-            self.dbapi_cursor.execute(processed_sql)
-            return
-
-        processed_args = self._adjust_parameter_count(placeholder_count, param_count, processed_args)
-        self._execute_with_parameters(processed_sql, processed_args, placeholder_count)
-
-    def _adjust_parameter_count(self, placeholder_count: int, param_count: int, processed_args: Sequence) -> Sequence:
-        """Adjust parameter count to match placeholders.
-
-        Ensures that the number of parameters matches the number of placeholders
-        by either adding None values or truncating excess parameters.
-        """
-        if placeholder_count != param_count:
-            logger.warning(f'Parameter count mismatch: {placeholder_count} placeholders, '
-                           f'{param_count} parameters. Adjusting...')
-
-            if placeholder_count > param_count:
-                processed_args = list(processed_args)
-                processed_args.extend([None] * (placeholder_count - param_count))
-            else:
-                processed_args = processed_args[:placeholder_count]
-
-        return processed_args
-
-    def _execute_with_parameters(self, sql: str, params: Sequence, placeholder_count: int) -> None:
-        """Execute SQL with parameters, handling single parameter case specially.
-
-        Handles the execution of SQL statements with parameters, accounting for
-        SQL Server's special handling of single parameters vs. parameter lists.
-        """
-        if placeholder_count == 1 and len(params) >= 1:
-            self.dbapi_cursor.execute(sql, params[0])
-        else:
-            self.dbapi_cursor.execute(sql, params)
-
-    def _handle_sqlserver_error(self, error: Exception, sql: str, args: tuple) -> None:
-        """Handle SQL Server specific errors with automatic fixes.
-
-        Attempts to recover from common SQL Server errors such as
-        unnamed columns by applying fixes and retrying the query.
-        """
-        modified_sql, should_retry = handle_unnamed_columns_error(error, sql, args)
-        if should_retry:
-            self.dbapi_cursor.execute(modified_sql, *args)
-        else:
-            raise error
-
-    @batch_execute
-    @convert_params
-    @dumpsql
-    def executemany(self, sql: str, seq_of_parameters: Sequence, batch_size: int = 500, 
-                    **kwargs: Any) -> int:
-        """Execute the SQL statement against all parameter sequences for SQL Server."""
-        start = time.time()
-        auto_commit = kwargs.pop('auto_commit', True)
-
-        if not seq_of_parameters:
-            logger.warning('executemany called with no parameter sequences, skipping')
-            return 0
-
-        try:
-            dialect = get_dialect_name(self.connwrapper)
-            modified_sql = standardize_placeholders(sql, dialect=dialect)
-            modified_sql = ensure_identity_column_named(modified_sql)
-            self.dbapi_cursor.executemany(modified_sql, seq_of_parameters)
         finally:
             end = time.time()
             self.connwrapper.addcall(end - start)
@@ -675,9 +535,6 @@ def get_dict_cursor(cn: Any) -> AbstractCursor:
     if dialect_name == 'postgresql':
         cursor = raw_conn.cursor(row_factory=DictRowFactory)
         return PostgresqlCursor(cursor, cn)
-    if dialect_name == 'mssql':
-        cursor = raw_conn.cursor()
-        return MssqlCursor(cursor, cn)
     if dialect_name == 'sqlite':
         cursor = raw_conn.cursor()
         return SqliteCursor(cursor, cn)

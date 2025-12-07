@@ -17,7 +17,6 @@ from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import quote_identifier
 from database.utils.sql_generation import build_insert_sql
 
-from libb import is_null
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ def upsert_rows(
 
     This function handles the "upsert" pattern: INSERT new rows or UPDATE existing ones based on
     a unique constraint violation. The exact implementation varies by database type and is optimized
-    for each supported database (PostgreSQL, SQLite, and SQL Server).
+    for each supported database (PostgreSQL and SQLite).
 
     Parameters
         cn: Database connection
@@ -58,9 +57,7 @@ def upsert_rows(
 
         update_cols_ifnull: Columns that should only be updated if target value is null (preserves
             non-null values). If omitted, no conditional updates will be performed.
-            Implemented differently by database:
-            - PostgreSQL/SQLite: Uses SQL COALESCE function
-            - SQL Server: Uses a specialized implementation to preserve existing non-null values
+            Uses SQL COALESCE function.
 
         reset_sequence: Whether to reset the table's auto-increment sequence after operation.
             Useful after bulk loads to ensure next generated ID is correct.
@@ -69,8 +66,7 @@ def upsert_rows(
 
     Returns
         Number of rows affected by the operation.
-        For PostgreSQL/SQLite, this should match the input row count.
-        For SQL Server, may return -1 for some operations.
+        This should match the input row count.
 
     Raises
         ValueError: If constraint name provided for non-PostgreSQL database
@@ -169,11 +165,6 @@ def upsert_rows(
                                   update_cols_ifnull if should_update else None,
                                   reset_sequence,
                                   batch_size)
-        case 'mssql':
-            if not should_update:
-                return insert_rows(cn, table, rows)
-            return _upsert_mssql(cn, table, rows, columns, key_cols, update_cols_always,
-                                 update_cols_ifnull, reset_sequence)
 
 
 def _fetch_existing_rows(
@@ -217,7 +208,7 @@ def _fetch_existing_rows(
         logger.warning('No key columns specified for fetching existing rows')
         return {}
 
-    placeholder = '?' if dialect == 'mssql' else '%s'
+    placeholder = '%s'
     for batch_idx in range(0, len(keys_list), batch_size):
         batch_keys = keys_list[batch_idx: batch_idx + batch_size]
         where_conditions = []
@@ -394,112 +385,6 @@ def _upsert_sqlite(
         logger.debug(f'{len(rows) - rc} rows skipped')
     elif not isinstance(rc, int):
         # Some drivers don't return row count
-        logger.debug('Unknown count affected')
-
-    if reset_sequence:
-        reset_table_sequence(cn, table)
-
-    return total_affected
-
-
-def _upsert_mssql(
-    cn: Any,
-    table: str,
-    rows: tuple[dict[str, Any], ...],
-    columns: tuple[str, ...],
-    key_cols: list[str],
-    update_cols_always: list[str] | None,
-    update_cols_ifnull: list[str] | None,
-    reset_sequence: bool,
-    batch_size: int = 500,
-) -> int:
-    """Perform an UPSERT operation using SQL Server-specific syntax.
-
-    Uses MERGE INTO syntax for SQL Server, with special handling for NULL values.
-
-    Parameters
-        cn: Database connection
-            Active connection to the SQL Server database
-        table: Target table name
-            Name of the table to upsert rows into
-        rows: Prepared rows to upsert
-            Collection of row dictionaries with correct column cases
-        columns: Table columns in correct case
-            Column names matching database schema case
-        key_cols: Key columns for matching
-            List of column names that form the unique key
-        update_cols_always: Columns to always update on match
-            Column names to update when a match occurs
-        update_cols_ifnull: Columns to update only if target is null
-            Column names to update only when target value is NULL
-        reset_sequence: Whether to reset table sequence after upsert
-            Flag to determine if identity columns should be reset
-
-    Returns
-        Number of rows affected by the operation
-    """
-    dialect = 'mssql'
-    logger.warning('SQL Server MERGE implementation is experimental and may have limitations')
-
-    if update_cols_ifnull:
-        logger.warning('SQL Server MERGE with NULL preservation uses a specialized approach')
-
-        existing_rows = _fetch_existing_rows(cn, table, rows, key_cols)
-
-        for row in rows:
-            row_key = tuple(row[key] for key in key_cols)
-            existing_row = existing_rows.get(row_key)
-
-            if existing_row:
-                for col in update_cols_ifnull:
-                    if col in existing_row and not is_null(existing_row.get(col)):
-                        row[col] = existing_row.get(col)
-
-        update_cols = update_cols_always or []
-    else:
-        update_cols = []
-        if update_cols_always:
-            update_cols.extend(update_cols_always)
-
-    quoted_table = quote_identifier(table, dialect)
-    quoted_columns = [quote_identifier(col, dialect) for col in columns]
-
-    temp_alias = 'src'
-
-    match_conditions = ' AND '.join(
-        f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}'
-        for col in key_cols
-    )
-
-    source_values = ', '.join(f'? as {quote_identifier(col, dialect)}' for col in columns)
-
-    if update_cols:
-        update_statements = ', '.join(
-            f'target.{quote_identifier(col, dialect)} = {temp_alias}.{quote_identifier(col, dialect)}'
-            for col in update_cols
-        )
-        update_clause = f'WHEN MATCHED THEN UPDATE SET {update_statements}'
-    else:
-        update_clause = 'WHEN MATCHED THEN DO NOTHING'
-
-    quoted_all_columns = ', '.join(quoted_columns)
-    source_columns = ', '.join(f'{temp_alias}.{quote_identifier(col, dialect)}' for col in columns)
-
-    sql = f"""
-    MERGE INTO {quoted_table} AS target
-    USING (SELECT {source_values}) AS {temp_alias}
-    ON {match_conditions}
-    {update_clause}
-    WHEN NOT MATCHED THEN INSERT ({quoted_all_columns}) VALUES ({source_columns});
-    """
-
-    params = [[row[col] for col in columns] for row in rows]
-
-    cursor = cn.cursor()
-    rc = cursor.executemany(sql, params, batch_size)
-
-    total_affected = rc if isinstance(rc, int) else 0
-    if not isinstance(rc, int):
         logger.debug('Unknown count affected')
 
     if reset_sequence:

@@ -90,98 +90,11 @@ class SchemaCache:
             dict: Dictionary of column metadata indexed by column name
         """
         dialect = get_dialect_name(connection)
-        if dialect == 'mssql':
-            return self._query_sqlserver_metadata(connection, table_name)
-        elif dialect == 'postgresql':
+        if dialect == 'postgresql':
             return self._query_postgresql_metadata(connection, table_name)
         elif dialect == 'sqlite':
             return self._query_sqlite_metadata(connection, table_name)
         else:
-            return {}
-
-    def _query_sqlserver_metadata(self, connection: Any, table_name: str) -> dict[str, dict[str, Any]]:
-        """Query SQL Server system catalog for column metadata.
-
-        Args:
-            connection: SQL Server database connection
-            table_name: Table name to query metadata for
-
-        Returns
-            dict: Dictionary of column metadata indexed by column name
-        """
-        from database.operations.query import select
-
-        # Extract schema and table names
-        parts = table_name.split('.')
-        if len(parts) == 1:
-            schema, table = 'dbo', parts[0].strip('[]"')
-        else:
-            schema, table = parts[0].strip('[]"'), parts[1].strip('[]"')
-
-        # Construct the query based on table type (temp vs regular)
-        if table.startswith('#'):
-            sql = """
-            SELECT
-                c.name AS column_name_col,
-                t.name AS type_name_col,
-                c.max_length,
-                c.precision,
-                c.scale,
-                c.is_nullable
-            FROM tempdb.sys.columns c
-            JOIN tempdb.sys.types t ON c.user_type_id = t.user_type_id
-            JOIN tempdb.sys.tables tbl ON c.object_id = tbl.object_id
-            WHERE tbl.name LIKE ?
-            ORDER BY c.column_id
-            """
-            # SQL Server temp tables have random suffixes sometimes
-            param = f'{table}%'
-        else:
-            sql = """
-            SELECT
-                c.name AS column_name_col,
-                t.name AS type_name_col,
-                c.max_length,
-                c.precision,
-                c.scale,
-                c.is_nullable
-            FROM sys.columns c
-            JOIN sys.types t ON c.user_type_id = t.user_type_id
-            JOIN sys.tables tbl ON c.object_id = tbl.object_id
-            JOIN sys.schemas s ON tbl.schema_id = s.schema_id
-            WHERE tbl.name = ? AND s.name = ?
-            ORDER BY c.column_id
-            """
-            param = [table, schema]
-
-        try:
-            @use_iterdict_data_loader
-            def get_metadata(cn, query, param):
-                return select(cn, query, *param) if not isinstance(param, str) else select(cn, query, param)
-
-            # Use the decorator to handle data loader switching
-            result = get_metadata(connection, sql, param)
-
-            # Log the raw results for debugging
-            if result and len(result) > 0:
-                logger.debug(f'Raw result from SQL Server metadata query - first row keys: {list(result[0].keys())}')
-                logger.debug(f'Raw result from SQL Server metadata query - first row values: {list(result[0].values())}')
-
-            # Convert to dictionary by column name
-            metadata = {}
-            for row in result:
-                col_name = row['column_name_col']
-                metadata[col_name] = {
-                    'name': col_name,
-                    'type_name': row['type_name_col'],
-                    'max_length': row['max_length'],
-                    'precision': row['precision'],
-                    'scale': row['scale'],
-                    'is_nullable': row['is_nullable']
-                }
-            return metadata
-        except Exception as e:
-            logger.debug(f'Error querying SQL Server meta: {e}')
             return {}
 
     def _query_postgresql_metadata(self, connection: Any, table_name: str) -> dict[str, dict[str, Any]]:
