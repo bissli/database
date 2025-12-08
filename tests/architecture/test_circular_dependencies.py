@@ -66,11 +66,7 @@ def test_circular_dependencies():
     for module in modules:
         print(f'Checking {module}... ', end='')
         try:
-            # Clear module from cache if it was already imported
-            if module in sys.modules:
-                del sys.modules[module]
-
-            # Try to import the module
+            # Try to import the module (don't delete from cache to avoid corrupting state)
             importlib.import_module(module)
             print('✓ Success')
             results[module] = True

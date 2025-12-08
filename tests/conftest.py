@@ -1,13 +1,22 @@
 import logging
+import pathlib
 import site
 
 import pytest
-import pathlib
+from database.utils.cache import CacheManager
 
 logger = logging.getLogger(__name__)
 
 HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
 site.addsitedir(HERE)
+
+
+@pytest.fixture(autouse=True)
+def clear_caches():
+    """Clear all caches before and after each test to ensure test isolation."""
+    CacheManager.get_instance().clear_all()
+    yield
+    CacheManager.get_instance().clear_all()
 
 
 def pytest_addoption(parser):

@@ -92,7 +92,8 @@ class SQLiteRowAdapter(RowStructureAdapter):
         """Convert SQLite Row to a dictionary without type conversion"""
         if hasattr(self.row, 'keys') and callable(self.row.keys):
             # sqlite3.Row has keys() method - use it to get column names
-            return {key: self.row[key] for key in self.row}
+            # Note: iterating over Row yields values, not keys
+            return {key: self.row[key] for key in self.row.keys()}  # noqa: SIM118
         elif isinstance(self.row, dict):
             return self.row
         elif hasattr(self.row, '__getitem__') and isinstance(self.row, list | tuple):
