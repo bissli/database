@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 from database.core.transaction import Transaction
 from database.query import execute, select, select_column
 from database.strategy.base import DatabaseStrategy
-from database.utils.auto_commit import enable_auto_commit
 
 if TYPE_CHECKING:
     from database.core.connection import ConnectionWrapper
@@ -126,7 +125,20 @@ select skeys(hstore(null::{table})) as column
     def configure_connection(self, conn: Any) -> None:
         """Configure connection settings for PostgreSQL.
         """
-        enable_auto_commit(conn)
+        raw_conn = conn
+        if hasattr(conn, 'driver_connection'):
+            raw_conn = conn.driver_connection
+        self.enable_autocommit(raw_conn)
+
+    def enable_autocommit(self, raw_conn: Any) -> None:
+        """Enable auto-commit mode for PostgreSQL.
+        """
+        raw_conn.autocommit = True
+
+    def disable_autocommit(self, raw_conn: Any) -> None:
+        """Disable auto-commit mode for PostgreSQL.
+        """
+        raw_conn.autocommit = False
 
     def quote_identifier(self, identifier: str) -> str:
         """Quote an identifier for PostgreSQL.
@@ -227,6 +239,52 @@ t.ordinal_position
         """Find the best column to reset sequence for.
         """
         return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
+
+    def build_upsert_sql(
+        self,
+        table: str,
+        columns: list[str],
+        key_columns: list[str],
+        constraint_expr: str | None = None,
+        update_cols_always: list[str] | None = None,
+        update_cols_ifnull: list[str] | None = None,
+    ) -> str:
+        """Generate PostgreSQL upsert SQL using INSERT ... ON CONFLICT.
+
+        Args:
+            table: Target table name
+            columns: All columns to insert
+            key_columns: Columns for conflict detection (used if constraint_expr is None)
+            constraint_expr: Pre-resolved constraint expression from get_constraint_definition()
+            update_cols_always: Columns to always update on conflict
+            update_cols_ifnull: Columns to update only if target is NULL
+        """
+        quoted_table = self.quote_identifier(table)
+        quoted_columns = [self.quote_identifier(col) for col in columns]
+        placeholders = ', '.join(['%s'] * len(columns))
+
+        insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
+
+        if constraint_expr:
+            conflict_sql = f'ON CONFLICT {constraint_expr}'
+        else:
+            quoted_keys = [self.quote_identifier(k) for k in key_columns]
+            conflict_sql = f"ON CONFLICT ({', '.join(quoted_keys)})"
+
+        if not (update_cols_always or update_cols_ifnull):
+            return f'{insert_sql} {conflict_sql} DO NOTHING RETURNING *'
+
+        update_exprs = []
+        if update_cols_always:
+            for col in update_cols_always:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = excluded.{qc}')
+        if update_cols_ifnull:
+            for col in update_cols_ifnull:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
+
+        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)} RETURNING *"
 
 
 def extract_index_definition(definition: str) -> str:

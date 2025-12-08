@@ -177,10 +177,6 @@ def cacheable_strategy(cache_name: str, ttl: int = 300, maxsize: int = 50):
     return decorator
 
 
-# Backwards compatibility aliases
-CacheManager = Cache
-
-
 def get_schema_cache(connection_id: int | None = None) -> cachetools.TTLCache:
     """Get schema cache for a connection.
 

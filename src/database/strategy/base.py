@@ -115,6 +115,22 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
+    def enable_autocommit(self, raw_conn: Any) -> None:
+        """Enable auto-commit mode on a raw database connection.
+
+        Args:
+            raw_conn: The raw DBAPI connection (not wrapped)
+        """
+
+    @abstractmethod
+    def disable_autocommit(self, raw_conn: Any) -> None:
+        """Disable auto-commit mode on a raw database connection.
+
+        Args:
+            raw_conn: The raw DBAPI connection (not wrapped)
+        """
+
+    @abstractmethod
     def quote_identifier(self, identifier: str) -> str:
         """Quote a database identifier.
 
@@ -180,6 +196,52 @@ class DatabaseStrategy(ABC):
         Returns
             str: Column name best suited for sequence resetting
         """
+
+    @abstractmethod
+    def build_upsert_sql(
+        self,
+        table: str,
+        columns: list[str],
+        key_columns: list[str],
+        constraint_expr: str | None = None,
+        update_cols_always: list[str] | None = None,
+        update_cols_ifnull: list[str] | None = None,
+    ) -> str:
+        """Generate dialect-specific upsert SQL.
+
+        Args:
+            table: Target table name
+            columns: All columns to insert
+            key_columns: Columns for conflict detection
+            constraint_expr: Pre-resolved constraint expression (PostgreSQL only)
+            update_cols_always: Columns to always update on conflict
+            update_cols_ifnull: Columns to update only if target is NULL
+
+        Returns
+            str: Complete upsert SQL statement
+        """
+
+    def get_placeholder_style(self) -> str:
+        """Return the placeholder marker for this database.
+
+        Returns
+            str: '%s' for PostgreSQL-style, '?' for SQLite-style
+        """
+        return '%s'
+
+    def standardize_sql(self, sql: str) -> str:
+        """Convert placeholders to this dialect's style.
+
+        Default implementation is a no-op. Override in strategies that need
+        placeholder conversion (e.g., SQLite converts %s to ?).
+
+        Args:
+            sql: SQL string potentially containing placeholders
+
+        Returns
+            str: SQL string with placeholders converted to this dialect's style
+        """
+        return sql
 
     @cacheable_strategy('sequence_column_finder', ttl=300, maxsize=50)
     def _find_sequence_column_impl(self, cn: 'ConnectionWrapper', table: str,

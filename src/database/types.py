@@ -499,12 +499,6 @@ class RowAdapter:
         return attrdict(RowAdapter.create_empty_dict(cols))
 
 
-# Backwards compatibility aliases
-RowStructureAdapter = RowAdapter
-PostgreSQLRowAdapter = RowAdapter
-SQLiteRowAdapter = RowAdapter
-
-
 # SQLite Adapters - Database value converters
 
 def convert_date(val: bytes) -> datetime.date:

@@ -1,11 +1,9 @@
 """
 Database access module with support for PostgreSQL, SQLite, and SQL Server.
 """
-from database.adapters.type_conversion import get_adapter_registry
+from database.types import Column, get_adapter_registry
 
 adapter_registry = get_adapter_registry()
-
-from database.adapters.column_info import Column
 from database.core.connection import connect
 from database.core.exceptions import ConnectionError, DatabaseError
 from database.core.exceptions import DbConnectionError, IntegrityError

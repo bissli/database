@@ -14,8 +14,8 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 from database.query import execute, select, select_column
+from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy
-from database.utils.auto_commit import enable_auto_commit
 
 if TYPE_CHECKING:
     from database.core.connection import ConnectionWrapper
@@ -85,12 +85,32 @@ select name as column from pragma_table_info('{table}')
 
         sqlite_conn.execute('PRAGMA foreign_keys = ON')
         sqlite_conn.row_factory = sqlite3.Row
-        enable_auto_commit(conn)
+        self.enable_autocommit(sqlite_conn)
+
+    def enable_autocommit(self, raw_conn: Any) -> None:
+        """Enable auto-commit mode for SQLite.
+        """
+        raw_conn.isolation_level = None
+
+    def disable_autocommit(self, raw_conn: Any) -> None:
+        """Disable auto-commit mode for SQLite.
+        """
+        raw_conn.isolation_level = 'DEFERRED'
 
     def quote_identifier(self, identifier: str) -> str:
         """Quote an identifier for SQLite.
         """
         return '"' + identifier.replace('"', '""') + '"'
+
+    def get_placeholder_style(self) -> str:
+        """Return SQLite's placeholder marker.
+        """
+        return '?'
+
+    def standardize_sql(self, sql: str) -> str:
+        """Convert PostgreSQL-style placeholders (%s) to SQLite-style (?).
+        """
+        return standardize_placeholders(sql, dialect='sqlite')
 
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
@@ -154,3 +174,40 @@ ORDER BY cid
                 unique_columns.append(cols)
 
         return unique_columns
+
+    def build_upsert_sql(
+        self,
+        table: str,
+        columns: list[str],
+        key_columns: list[str],
+        constraint_expr: str | None = None,
+        update_cols_always: list[str] | None = None,
+        update_cols_ifnull: list[str] | None = None,
+    ) -> str:
+        """Generate SQLite upsert SQL using INSERT ... ON CONFLICT.
+
+        Note: constraint_expr is ignored for SQLite (only PostgreSQL supports named constraints).
+        """
+        quoted_table = self.quote_identifier(table)
+        quoted_columns = [self.quote_identifier(col) for col in columns]
+        placeholders = ', '.join(['?'] * len(columns))
+
+        insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
+
+        quoted_keys = [self.quote_identifier(k) for k in key_columns]
+        conflict_sql = f"ON CONFLICT ({', '.join(quoted_keys)})"
+
+        if not (update_cols_always or update_cols_ifnull):
+            return f'{insert_sql} {conflict_sql} DO NOTHING'
+
+        update_exprs = []
+        if update_cols_always:
+            for col in update_cols_always:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = excluded.{qc}')
+        if update_cols_ifnull:
+            for col in update_cols_ifnull:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
+
+        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)}"

@@ -9,9 +9,7 @@ from typing import Any
 from database.data import insert_rows
 from database.schema import get_table_columns, get_table_primary_keys
 from database.schema import reset_table_sequence
-from database.sql import quote_identifier
 from database.strategy import get_db_strategy
-from database.utils.sql_generation import build_insert_sql
 
 logger = logging.getLogger(__name__)
 
@@ -164,168 +162,20 @@ def upsert_rows(
         logger.debug(f'No usable constraint or key columns for {dialect} upsert, falling back to INSERT')
         return insert_rows(cn, table, rows)
 
-    match dialect:
-        case 'postgresql':
-            return _upsert_postgresql(cn, table, rows, columns, constraint_name or key_cols,
-                                      update_cols_always if should_update else None,
-                                      update_cols_ifnull if should_update else None,
-                                      reset_sequence,
-                                      batch_size)
-        case 'sqlite':
-            return _upsert_sqlite(cn, table, rows, columns, key_cols,
-                                  update_cols_always if should_update else None,
-                                  update_cols_ifnull if should_update else None,
-                                  reset_sequence,
-                                  batch_size)
+    strategy = get_db_strategy(cn)
 
+    constraint_expr = None
+    if constraint_name and dialect == 'postgresql':
+        constraint_expr = strategy.get_constraint_definition(cn, table, constraint_name)
 
-def _upsert_postgresql(
-    cn: Any,
-    table: str,
-    rows: tuple[dict[str, Any], ...],
-    columns: tuple[str, ...],
-    key_cols_or_constraint: list[str] | str,
-    update_cols_always: list[str] | None,
-    update_cols_ifnull: list[str] | None,
-    reset_sequence: bool,
-    batch_size: int
-) -> int:
-    """Perform an UPSERT operation using PostgreSQL-specific syntax.
-
-    Uses INSERT ... ON CONFLICT ... DO UPDATE syntax for PostgreSQL.
-
-    Parameters
-        cn: Database connection
-            Active connection to the PostgreSQL database
-        table: Target table name
-            Name of the table to upsert rows into
-        rows: Prepared rows to upsert
-            Collection of row dictionaries with correct column cases
-        columns: Table columns in correct case
-            Column names matching database schema case
-        key_cols_or_constraint: Key columns or constraint name
-            Either a list of key column names or a constraint name string
-        update_cols_always: Columns to always update on conflict
-            Column names to update when a conflict occurs
-        update_cols_ifnull: Columns to update only if target is null
-            Column names to update only when target value is NULL
-        reset_sequence: Whether to reset table sequence after upsert
-            Flag to determine if auto-increment sequences should be reset
-
-    Returns
-        Number of rows affected by the operation
-    """
-    dialect = 'postgresql'
-
-    constraint_name = None
-    key_columns = None
-
-    if isinstance(key_cols_or_constraint, str):
-        constraint_name = key_cols_or_constraint
-    else:
-        key_columns = key_cols_or_constraint
-
-    quoted_table = quote_identifier(table, dialect)
-    quoted_columns = [quote_identifier(col, dialect) for col in columns]
-    quoted_key_columns = [quote_identifier(col, dialect) for col in key_columns] if key_columns else []
-
-    insert_sql = build_insert_sql(dialect, table, columns)
-
-    if constraint_name:
-        expressions = get_db_strategy(cn).get_constraint_definition(cn, table, constraint_name)
-        conflict_sql = f'on conflict {expressions}'
-    else:
-        conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
-
-    if not (update_cols_always or update_cols_ifnull):
-        sql = f'{insert_sql} {conflict_sql} do nothing RETURNING *'
-    else:
-        update_exprs = []
-        if update_cols_always:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
-                                for col in update_cols_always)
-        if update_cols_ifnull:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = coalesce({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
-                                for col in update_cols_ifnull)
-
-        update_sql = f"do update set {', '.join(update_exprs)}"
-        sql = f'{insert_sql} {conflict_sql} {update_sql} RETURNING *'
-
-    params = [[row[col] for col in columns] for row in rows]
-
-    cursor = cn.cursor()
-    rc = cursor.executemany(sql, params, batch_size)
-
-    total_affected = rc if isinstance(rc, int) else 0
-    if isinstance(rc, int) and rc != len(rows):
-        logger.debug(f'{len(rows) - rc} rows skipped')
-    elif not isinstance(rc, int):
-        logger.debug('Unknown count affected')
-
-    if reset_sequence:
-        reset_table_sequence(cn, table)
-
-    return total_affected
-
-
-def _upsert_sqlite(
-    cn: Any,
-    table: str,
-    rows: tuple[dict[str, Any], ...],
-    columns: tuple[str, ...],
-    key_cols: list[str],
-    update_cols_always: list[str] | None,
-    update_cols_ifnull: list[str] | None,
-    reset_sequence: bool,
-    batch_size: int
-) -> int:
-    """Perform an UPSERT operation using SQLite-specific syntax.
-
-    Uses INSERT ... ON CONFLICT ... DO UPDATE syntax for SQLite.
-
-    Parameters
-        cn: Database connection
-            Active connection to the SQLite database
-        table: Target table name
-            Name of the table to upsert rows into
-        rows: Prepared rows to upsert
-            Collection of row dictionaries with correct column cases
-        columns: Table columns in correct case
-            Column names matching database schema case
-        key_cols: Key columns for conflict detection
-            List of column names that form the unique key
-        update_cols_always: Columns to always update on conflict
-            Column names to update when a conflict occurs
-        update_cols_ifnull: Columns to update only if target is null
-            Column names to update only when target value is NULL
-        reset_sequence: Whether to reset table sequence after upsert
-            Flag to determine if auto-increment sequences should be reset
-
-    Returns
-        Number of rows affected by the operation
-    """
-    dialect = 'sqlite'
-    quoted_table = quote_identifier(table, dialect)
-    quoted_columns = [quote_identifier(col, dialect) for col in columns]
-    quoted_key_columns = [quote_identifier(col, dialect) for col in key_cols]
-
-    insert_sql = build_insert_sql(dialect, table, columns)
-
-    conflict_sql = f"on conflict ({','.join(quoted_key_columns)})"
-
-    if not (update_cols_always or update_cols_ifnull):
-        sql = f'{insert_sql} {conflict_sql} do nothing'
-    else:
-        update_exprs = []
-        if update_cols_always:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = excluded.{quote_identifier(col, dialect)}'
-                                for col in update_cols_always)
-        if update_cols_ifnull:
-            update_exprs.extend(f'{quote_identifier(col, dialect)} = COALESCE({quoted_table}.{quote_identifier(col, dialect)}, excluded.{quote_identifier(col, dialect)})'
-                                for col in update_cols_ifnull)
-
-        update_sql = f"do update set {', '.join(update_exprs)}"
-        sql = f'{insert_sql} {conflict_sql} {update_sql}'
+    sql = strategy.build_upsert_sql(
+        table=table,
+        columns=list(columns),
+        key_columns=key_cols,
+        constraint_expr=constraint_expr,
+        update_cols_always=update_cols_always if should_update else None,
+        update_cols_ifnull=update_cols_ifnull if should_update else None,
+    )
 
     params = [[row[col] for col in columns] for row in rows]
 

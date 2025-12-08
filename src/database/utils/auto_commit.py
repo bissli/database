@@ -4,9 +4,32 @@ Helper functions for managing auto-commit across different database drivers.
 import logging
 from typing import Any
 
-from database.utils.connection_utils import get_dialect_name
-
 logger = logging.getLogger(__name__)
+
+
+def _get_raw_connection(connection: Any) -> Any:
+    """Extract the raw DBAPI connection from a wrapper."""
+    raw_conn = connection
+    if hasattr(connection, 'driver_connection'):
+        raw_conn = connection.driver_connection
+    return raw_conn
+
+
+def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
+    """Try to use strategy for autocommit. Returns True if successful."""
+    try:
+        from database.strategy import get_db_strategy
+        if hasattr(connection, 'dialect'):
+            strategy = get_db_strategy(connection)
+            raw_conn = _get_raw_connection(connection)
+            if enable:
+                strategy.enable_autocommit(raw_conn)
+            else:
+                strategy.disable_autocommit(raw_conn)
+            return True
+    except Exception as e:
+        logger.debug(f'Could not use strategy for autocommit: {e}')
+    return False
 
 
 def enable_auto_commit(connection: Any) -> None:
@@ -24,29 +47,23 @@ def enable_auto_commit(connection: Any) -> None:
         except Exception as e:
             logger.debug(f'Could not set SQLAlchemy execution_options: {e}')
 
-    raw_conn = connection
-    if hasattr(connection, 'driver_connection'):
-        raw_conn = connection.driver_connection
+    if _try_strategy_autocommit(connection, enable=True):
+        return
 
-    dialect = get_dialect_name(connection)
+    raw_conn = _get_raw_connection(connection)
 
-    if dialect == 'postgresql' or hasattr(raw_conn, 'autocommit'):
+    if hasattr(raw_conn, 'autocommit'):
         try:
             raw_conn.autocommit = True
+            return
         except Exception as e:
-            logger.debug(f'Could not set PostgreSQL autocommit: {e}')
+            logger.debug(f'Could not set autocommit: {e}')
 
-    elif dialect == 'sqlite' or hasattr(raw_conn, 'isolation_level'):
+    if hasattr(raw_conn, 'isolation_level'):
         try:
             raw_conn.isolation_level = None
         except Exception as e:
-            logger.debug(f'Could not set SQLite isolation_level: {e}')
-
-    elif hasattr(raw_conn, 'autocommit'):
-        try:
-            raw_conn.autocommit = True
-        except Exception as e:
-            logger.debug(f'Could not set generic autocommit: {e}')
+            logger.debug(f'Could not set isolation_level: {e}')
 
 
 def disable_auto_commit(connection: Any) -> None:
@@ -58,29 +75,23 @@ def disable_auto_commit(connection: Any) -> None:
         except Exception as e:
             logger.debug(f'Could not reset SQLAlchemy execution_options: {e}')
 
-    raw_conn = connection
-    if hasattr(connection, 'driver_connection'):
-        raw_conn = connection.driver_connection
+    if _try_strategy_autocommit(connection, enable=False):
+        return
 
-    dialect = get_dialect_name(connection)
+    raw_conn = _get_raw_connection(connection)
 
-    if dialect == 'postgresql' or hasattr(raw_conn, 'autocommit'):
+    if hasattr(raw_conn, 'autocommit'):
         try:
             raw_conn.autocommit = False
+            return
         except Exception as e:
-            logger.debug(f'Could not set PostgreSQL autocommit: {e}')
+            logger.debug(f'Could not set autocommit: {e}')
 
-    elif dialect == 'sqlite' or hasattr(raw_conn, 'isolation_level'):
+    if hasattr(raw_conn, 'isolation_level'):
         try:
             raw_conn.isolation_level = 'DEFERRED'
         except Exception as e:
-            logger.debug(f'Could not set SQLite isolation_level: {e}')
-
-    elif hasattr(raw_conn, 'autocommit'):
-        try:
-            raw_conn.autocommit = False
-        except Exception as e:
-            logger.debug(f'Could not set generic autocommit: {e}')
+            logger.debug(f'Could not set isolation_level: {e}')
 
 
 def ensure_commit(connection: Any) -> None:
@@ -93,7 +104,7 @@ def ensure_commit(connection: Any) -> None:
             connection.commit()
             return
         except Exception as e:
-            logger.debug(f'Could not commit SQLAlchemy transaction: {e}')
+            logger.debug(f'Could not commit transaction: {e}')
 
     if hasattr(connection, 'driver_connection') and hasattr(connection.driver_connection, 'commit'):
         try:
@@ -113,17 +124,12 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
         'closed': False,
     }
 
-    dialect = get_dialect_name(conn)
-    if dialect == 'postgresql':
-        info['type'] = 'postgresql'
-    elif dialect == 'sqlite':
-        info['type'] = 'sqlite'
+    if hasattr(conn, 'dialect'):
+        info['type'] = conn.dialect
 
     info['is_sqlalchemy'] = hasattr(conn, 'sa_connection')
 
-    raw_conn = conn
-    if hasattr(conn, 'driver_connection'):
-        raw_conn = conn.driver_connection
+    raw_conn = _get_raw_connection(conn)
 
     info['closed'] = getattr(conn, 'closed', False)
 

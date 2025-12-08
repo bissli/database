@@ -11,7 +11,7 @@ import pandas as pd
 from database.core.connection import ConnectionWrapper
 from database.options import use_iterdict_data_loader
 from database.sql import prepare_query
-from database.types import RowStructureAdapter
+from database.types import RowAdapter
 from database.utils.connection_utils import check_connection
 from database.utils.query_utils import extract_column_info, load_data
 from database.utils.query_utils import process_multiple_result_sets
@@ -102,7 +102,7 @@ def select_column(cn: ConnectionWrapper, sql: str, *args: Any) -> list[Any]:
         List containing values from the first column of each row
     """
     data = select(cn, sql, *args)
-    return [RowStructureAdapter.create(cn, row).get_value() for row in data]
+    return [RowAdapter.create(cn, row).get_value() for row in data]
 
 
 @use_iterdict_data_loader
@@ -124,7 +124,7 @@ def select_row(cn: ConnectionWrapper, sql: str, *args: Any) -> attrdict:
     """
     data = select(cn, sql, *args)
     assert len(data) == 1, f'Expected one row, got {len(data)}'
-    return RowStructureAdapter.create(cn, data[0]).to_attrdict()
+    return RowAdapter.create(cn, data[0]).to_attrdict()
 
 
 @use_iterdict_data_loader
@@ -144,7 +144,7 @@ def select_row_or_none(cn: ConnectionWrapper, sql: str, *args: Any) -> attrdict 
     """
     data = select(cn, sql, *args)
     if len(data) == 1:
-        return RowStructureAdapter.create(cn, data[0]).to_attrdict()
+        return RowAdapter.create(cn, data[0]).to_attrdict()
     return None
 
 
@@ -167,7 +167,7 @@ def select_scalar(cn: ConnectionWrapper, sql: str, *args: Any) -> Any:
     """
     data = select(cn, sql, *args)
     assert len(data) == 1, f'Expected one row, got {len(data)}'
-    result = RowStructureAdapter.create(cn, data[0]).get_value()
+    result = RowAdapter.create(cn, data[0]).get_value()
     logger.debug(f'Scalar query returned value of type {type(result).__name__}')
     return result
 

@@ -4,16 +4,16 @@ Common query utilities used by both transaction and query operations.
 import logging
 from typing import TYPE_CHECKING, Any
 
-from database.types import RowStructureAdapter, columns_from_cursor_description
+from database.types import RowAdapter, columns_from_cursor_description
 
 if TYPE_CHECKING:
-    from database.adapters.column_info import Column
-    from database.core.cursor import AbstractCursor
+    from database.cursor import Cursor
+    from database.types import Column
 
 logger = logging.getLogger(__name__)
 
 
-def extract_column_info(cursor: 'AbstractCursor',
+def extract_column_info(cursor: 'Cursor',
                         table_name: str | None = None) -> list['Column']:
     """Extract column information from cursor description based on database type.
     """
@@ -35,7 +35,7 @@ def extract_column_info(cursor: 'AbstractCursor',
     return columns
 
 
-def load_data(cursor: 'AbstractCursor', columns: list['Column'] | None = None,
+def load_data(cursor: 'Cursor', columns: list['Column'] | None = None,
               **kwargs: Any) -> Any:
     """Data loader callable that processes cursor results into the configured format.
 
@@ -53,7 +53,7 @@ def load_data(cursor: 'AbstractCursor', columns: list['Column'] | None = None,
 
     adapted_data = []
     for row in data:
-        adapter = RowStructureAdapter.create(cursor.connwrapper, row)
+        adapter = RowAdapter.create(cursor.connwrapper, row)
         if hasattr(adapter, 'cursor'):
             adapter.cursor = cursor
         adapted_data.append(adapter.to_dict())
@@ -63,7 +63,7 @@ def load_data(cursor: 'AbstractCursor', columns: list['Column'] | None = None,
     return data_loader(data, columns, **kwargs)
 
 
-def process_multiple_result_sets(cursor: 'AbstractCursor', return_all: bool = False,
+def process_multiple_result_sets(cursor: 'Cursor', return_all: bool = False,
                                  prefer_first: bool = False, **kwargs: Any) -> list[Any] | Any:
     """Process multiple result sets from a query or stored procedure.
 

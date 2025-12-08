@@ -9,7 +9,7 @@ import pandas as pd
 from database.cursor import get_dict_cursor
 from database.options import use_iterdict_data_loader
 from database.sql import prepare_query
-from database.types import RowStructureAdapter
+from database.types import RowAdapter
 from database.utils.auto_commit import disable_auto_commit, enable_auto_commit
 from database.utils.connection_utils import check_connection
 from database.utils.query_utils import extract_column_info, load_data
@@ -142,7 +142,7 @@ class Transaction:
         Extracts the first column from each row.
         """
         data = self.select(sql, *args)
-        return [RowStructureAdapter.create(self.connection, row).get_value() for row in data]
+        return [RowAdapter.create(self.connection, row).get_value() for row in data]
 
     @use_iterdict_data_loader
     def select_row(self, sql: str, *args) -> attrdict:
@@ -152,7 +152,7 @@ class Transaction:
         """
         data = self.select(sql, *args)
         assert len(data) == 1, f'Expected one row, got {len(data)}'
-        return RowStructureAdapter.create(self.connection, data[0]).to_attrdict()
+        return RowAdapter.create(self.connection, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
     def select_row_or_none(self, sql: str, *args) -> attrdict | None:
@@ -161,7 +161,7 @@ class Transaction:
         if not data or len(data) == 0:
             return None
 
-        return RowStructureAdapter.create(self.connection, data[0]).to_attrdict()
+        return RowAdapter.create(self.connection, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
     def select_scalar(self, sql: str, *args) -> Any:
@@ -171,4 +171,4 @@ class Transaction:
         """
         data = self.select(sql, *args)
         assert len(data) == 1, f'Expected one row, got {len(data)}'
-        return RowStructureAdapter.create(self.connection, data[0]).get_value()
+        return RowAdapter.create(self.connection, data[0]).get_value()
