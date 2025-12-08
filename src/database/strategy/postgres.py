@@ -13,6 +13,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from database.sql import make_placeholders
 from database.strategy.base import DatabaseStrategy
 
 if TYPE_CHECKING:
@@ -137,11 +138,6 @@ select skeys(hstore(null::{table})) as column
         """
         raw_conn.autocommit = False
 
-    def quote_identifier(self, identifier: str) -> str:
-        """Quote an identifier for PostgreSQL.
-        """
-        return '"' + identifier.replace('"', '""') + '"'
-
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
         """Get the definition of a constraint or unique index by name.
@@ -258,7 +254,7 @@ t.ordinal_position
         """
         quoted_table = self.quote_identifier(table)
         quoted_columns = [self.quote_identifier(col) for col in columns]
-        placeholders = ', '.join(['%s'] * len(columns))
+        placeholders = make_placeholders(len(columns), 'postgresql')
 
         insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
 
@@ -271,16 +267,7 @@ t.ordinal_position
         if not (update_cols_always or update_cols_ifnull):
             return f'{insert_sql} {conflict_sql} DO NOTHING RETURNING *'
 
-        update_exprs = []
-        if update_cols_always:
-            for col in update_cols_always:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = excluded.{qc}')
-        if update_cols_ifnull:
-            for col in update_cols_ifnull:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
-
+        update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
         return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)} RETURNING *"
 
 

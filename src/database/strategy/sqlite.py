@@ -13,7 +13,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from database.sql import standardize_placeholders
+from database.sql import make_placeholders, standardize_placeholders
 from database.strategy.base import DatabaseStrategy
 
 if TYPE_CHECKING:
@@ -95,11 +95,6 @@ select name as column from pragma_table_info('{table}')
         """Disable auto-commit mode for SQLite.
         """
         raw_conn.isolation_level = 'DEFERRED'
-
-    def quote_identifier(self, identifier: str) -> str:
-        """Quote an identifier for SQLite.
-        """
-        return '"' + identifier.replace('"', '""') + '"'
 
     def get_placeholder_style(self) -> str:
         """Return SQLite's placeholder marker.
@@ -189,7 +184,7 @@ ORDER BY cid
         """
         quoted_table = self.quote_identifier(table)
         quoted_columns = [self.quote_identifier(col) for col in columns]
-        placeholders = ', '.join(['?'] * len(columns))
+        placeholders = make_placeholders(len(columns), 'sqlite')
 
         insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
 
@@ -199,14 +194,5 @@ ORDER BY cid
         if not (update_cols_always or update_cols_ifnull):
             return f'{insert_sql} {conflict_sql} DO NOTHING'
 
-        update_exprs = []
-        if update_cols_always:
-            for col in update_cols_always:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = excluded.{qc}')
-        if update_cols_ifnull:
-            for col in update_cols_ifnull:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
-
+        update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
         return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)}"
