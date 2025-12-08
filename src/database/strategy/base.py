@@ -10,7 +10,7 @@ but clients can work with any database through this consistent interface.
 """
 from abc import ABC, abstractmethod
 
-from database.strategy.decorators import cacheable_strategy
+from database.cache import cacheable_strategy
 
 
 class DatabaseStrategy(ABC):

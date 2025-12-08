@@ -17,7 +17,7 @@ from dataclasses import fields
 from typing import Any, Self
 
 import sqlalchemy as sa
-from database.core.cursor import AbstractCursor, get_dict_cursor
+from database.cursor import Cursor, get_dict_cursor
 from database.options import DatabaseOptions
 from database.utils.auto_commit import ensure_commit
 from database.utils.connection_utils import get_dialect_name
@@ -104,7 +104,7 @@ class ConnectionWrapper:
 
         return getattr(self.dbapi_connection, name)
 
-    def cursor(self) -> AbstractCursor:
+    def cursor(self) -> Cursor:
         """Get a wrapped cursor for this connection
 
         Returns a database-specific cursor implementation (PgCursor, MsCursor,

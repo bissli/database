@@ -11,8 +11,7 @@ It handles SQLite's unique features and limitations such as:
 """
 import logging
 
-from database.core.query import execute
-from database.operations.query import select, select_column
+from database.query import execute, select, select_column
 from database.strategy.base import DatabaseStrategy
 from database.utils.auto_commit import enable_auto_commit
 

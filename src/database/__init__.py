@@ -25,22 +25,21 @@ from database.core.exceptions import DbConnectionError, IntegrityError
 from database.core.exceptions import IntegrityViolationError, OperationalError
 from database.core.exceptions import ProgrammingError, QueryError
 from database.core.exceptions import TypeConversionError, UniqueViolation
-from database.core.query import execute
 from database.core.transaction import Transaction as transaction
-# Data operations
-from database.operations.data import delete, insert, insert_row, insert_rows
-from database.operations.data import update, update_or_insert, update_row
-# Query operations
-from database.operations.query import select, select_column, select_row
-from database.operations.query import select_row_or_none, select_scalar
-from database.operations.query import select_scalar_or_none
-# Schema operations
-from database.operations.schema import cluster_table, reindex_table
-from database.operations.schema import reset_table_sequence, vacuum_table
-# Upsert operations
-from database.operations.upsert import upsert_rows
+# Data operations (from new top-level module)
+from database.data import delete, insert, insert_row, insert_rows, update
+from database.data import update_or_insert, update_row
 # Options
 from database.options import DatabaseOptions
+# Query operations (from new top-level module)
+from database.query import execute, select, select_column, select_row
+from database.query import select_row_or_none, select_scalar
+from database.query import select_scalar_or_none
+# Schema operations (from new top-level module)
+from database.schema import cluster_table, reindex_table, reset_table_sequence
+from database.schema import vacuum_table
+# Upsert operations (from new top-level module)
+from database.upsert import upsert_rows
 # Connection utilities
 from database.utils.connection_utils import is_sqlite3_connection, isconnection
 

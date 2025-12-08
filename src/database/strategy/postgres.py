@@ -12,9 +12,8 @@ It handles PostgreSQL's unique features such as:
 import logging
 import re
 
-from database.core.query import execute
 from database.core.transaction import Transaction
-from database.operations.query import select, select_column
+from database.query import execute, select, select_column
 from database.strategy.base import DatabaseStrategy
 from database.utils.auto_commit import enable_auto_commit
 

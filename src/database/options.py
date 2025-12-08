@@ -57,7 +57,7 @@ def pandas_numpy_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     Always returns a DataFrame, never None, with columns preserved for empty results.
     Includes type information in the DataFrame.attrs attribute.
     """
-    from database.adapters.column_info import Column
+    from database.types import Column
 
     if not data:
         df = pd.DataFrame(columns=Column.get_names(columns))
@@ -78,7 +78,7 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
 
     Always returns a DataFrame, never None, with columns preserved for empty results.
     """
-    from database.adapters.column_info import Column
+    from database.types import Column
 
     if not data:
         df = pd.DataFrame(columns=Column.get_names(columns))

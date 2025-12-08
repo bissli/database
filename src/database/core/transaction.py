@@ -6,15 +6,14 @@ import threading
 from typing import Any
 
 import pandas as pd
-from database.adapters.structure import RowStructureAdapter
-from database.core.cursor import get_dict_cursor
+from database.cursor import get_dict_cursor
 from database.options import use_iterdict_data_loader
+from database.sql import prepare_query
+from database.types import RowStructureAdapter
 from database.utils.auto_commit import disable_auto_commit, enable_auto_commit
-from database.utils.connection_utils import check_connection, get_dialect_name
+from database.utils.connection_utils import check_connection
 from database.utils.query_utils import extract_column_info, load_data
 from database.utils.query_utils import process_multiple_result_sets
-from database.utils.sql import handle_query_params
-from database.utils.sql import prepare_sql_params_for_execution
 
 from libb import attrdict, isiterable
 
@@ -88,13 +87,12 @@ class Transaction:
             logger.debug(f'Transaction cleanup complete for connection {id(self.connection)}')
 
     @check_connection
-    @handle_query_params
     def execute(self, sql: str, *args, returnid: str | list[str] | None = None) -> Any:
         """Execute SQL within transaction context with connection retry"""
         cursor = self.cursor
 
-        dialect = get_dialect_name(self.connection)
-        processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
+        # Single parameter processing point
+        processed_sql, processed_args = prepare_query(self.connection, sql, args)
 
         cursor.execute(processed_sql, processed_args)
         rc = cursor.rowcount
@@ -123,13 +121,12 @@ class Transaction:
             else:
                 return [row[returnid] for row in results]
 
-    @handle_query_params
     def select(self, sql: str, *args, **kwargs) -> pd.DataFrame:
         """Execute SELECT query or procedure within transaction context"""
         cursor = self.cursor
 
-        dialect = get_dialect_name(self.connection)
-        processed_sql, processed_args = prepare_sql_params_for_execution(sql, args, dialect)
+        # Single parameter processing point
+        processed_sql, processed_args = prepare_query(self.connection, sql, args)
 
         cursor.execute(processed_sql, processed_args)
         logger.debug(f'Executed query with {cursor.rowcount} rows affected')

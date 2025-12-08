@@ -3,7 +3,7 @@ Utilities for SQL statement generation across different database backends.
 """
 import logging
 
-from database.utils.sql import quote_identifier
+from database.sql import quote_identifier
 
 logger = logging.getLogger(__name__)
 

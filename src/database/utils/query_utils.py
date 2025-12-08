@@ -4,8 +4,7 @@ Common query utilities used by both transaction and query operations.
 import logging
 from typing import Any
 
-from database.adapters.column_info import columns_from_cursor_description
-from database.adapters.structure import RowStructureAdapter
+from database.types import RowStructureAdapter, columns_from_cursor_description
 from database.utils.connection_utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
