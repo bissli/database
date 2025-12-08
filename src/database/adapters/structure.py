@@ -7,8 +7,6 @@ handled exclusively by the database drivers and their registered adapters.
 """
 from typing import Any
 
-from database.utils.connection_utils import get_dialect_name
-
 from libb import attrdict
 
 
@@ -33,10 +31,9 @@ class RowStructureAdapter:
     @staticmethod
     def create(connection, row):
         """Factory method to create the appropriate adapter for the connection type"""
-        dialect = get_dialect_name(connection)
-        if dialect == 'postgresql':
+        if connection.dialect == 'postgresql':
             return PostgreSQLRowAdapter(row)
-        if dialect == 'sqlite':
+        if connection.dialect == 'sqlite':
             return SQLiteRowAdapter(row)
         return GenericRowAdapter(row)
 

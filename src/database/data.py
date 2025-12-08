@@ -31,7 +31,7 @@ def insert_row(cn, table, fields, values):
     """Insert a row into a table using the supplied list of fields and values."""
     assert len(fields) == len(values), 'fields must be same length as values'
     from database.utils.sql_generation import build_insert_sql
-    sql = build_insert_sql(cn.driver_type, table, fields)
+    sql = build_insert_sql(cn.dialect, table, fields)
     return insert(cn, sql, *values)
 
 

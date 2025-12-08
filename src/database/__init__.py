@@ -40,8 +40,6 @@ from database.schema import cluster_table, reindex_table, reset_table_sequence
 from database.schema import vacuum_table
 # Upsert operations (from new top-level module)
 from database.upsert import upsert_rows
-# Connection utilities
-from database.utils.connection_utils import is_sqlite3_connection, isconnection
 
 # Define public exports
 __all__ = [
@@ -70,9 +68,6 @@ __all__ = [
     'vacuum_table',
     'reindex_table',
     'cluster_table',
-    # Connection utilities
-    'isconnection',
-    'is_sqlite3_connection',
     # Options
     'DatabaseOptions',
     # Column information

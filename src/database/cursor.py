@@ -13,7 +13,6 @@ from typing import Any
 from database.sql import has_placeholders, standardize_placeholders
 from database.types import TypeConverter, postgres_types
 from database.utils.auto_commit import ensure_commit
-from database.utils.connection_utils import get_dialect_name
 
 from libb import collapse
 
@@ -416,13 +415,12 @@ def get_dict_cursor(cn: Any) -> Cursor:
     import sqlite3
 
     raw_conn = cn.connection if hasattr(cn, 'connection') else cn
-    dialect_name = get_dialect_name(cn)
 
-    if dialect_name == 'postgresql':
+    if cn.dialect == 'postgresql':
         cursor = raw_conn.cursor(row_factory=DictRowFactory)
         return PostgresqlCursor(cursor, cn)
 
-    if dialect_name == 'sqlite':
+    if cn.dialect == 'sqlite':
         sqlite_conn = raw_conn
         if hasattr(raw_conn, 'dbapi_connection'):
             sqlite_conn = raw_conn.dbapi_connection
@@ -430,7 +428,7 @@ def get_dict_cursor(cn: Any) -> Cursor:
         cursor = sqlite_conn.cursor()
         return SqliteCursor(cursor, cn)
 
-    raise ValueError(f'Unknown connection type: {dialect_name}')
+    raise ValueError(f'Unknown connection type: {cn.dialect}')
 
 
 # Backwards compatibility

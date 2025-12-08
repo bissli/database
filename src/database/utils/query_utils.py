@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from database.types import RowStructureAdapter, columns_from_cursor_description
-from database.utils.connection_utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ def extract_column_info(cursor: any, table_name: str = None) -> list:
     if cursor.description is None:
         return []
 
-    connection_type = get_dialect_name(cursor.connwrapper) or 'unknown'
+    connection_type = cursor.connwrapper.dialect
     connection = cursor.connwrapper
 
     columns = columns_from_cursor_description(
