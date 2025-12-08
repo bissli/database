@@ -72,6 +72,43 @@ def make_placeholders(count: int, dialect: str = 'postgresql') -> str:
     return ', '.join([marker] * count)
 
 
+def build_select_sql(table: str, dialect: str, columns: list[str] | None = None,
+                     where: str | None = None, order_by: str | None = None,
+                     limit: int | None = None) -> str:
+    """Generate a SELECT statement for the specified database type.
+    """
+    quoted_table = quote_identifier(table, dialect)
+
+    if columns:
+        quoted_cols = ', '.join(quote_identifier(col, dialect) for col in columns)
+        select_clause = f'SELECT {quoted_cols}'
+    else:
+        select_clause = 'SELECT *'
+
+    sql = f'{select_clause} FROM {quoted_table}'
+
+    if where:
+        sql += f' WHERE {where}'
+
+    if order_by:
+        sql += f' ORDER BY {order_by}'
+
+    if limit is not None:
+        sql += f' LIMIT {limit}'
+
+    return sql
+
+
+def build_insert_sql(dialect: str, table: str, columns: list[str]) -> str:
+    """Generate an INSERT statement.
+    """
+    quoted_table = quote_identifier(table, dialect)
+    quoted_columns = ', '.join(quote_identifier(col, dialect) for col in columns)
+    placeholders = make_placeholders(len(columns), dialect)
+
+    return f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'
+
+
 def has_placeholders(sql: str | None) -> bool:
     """Check if SQL contains parameter placeholders."""
     return bool(sql and _PH_RE.search(sql))
