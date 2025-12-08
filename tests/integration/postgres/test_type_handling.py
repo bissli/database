@@ -7,11 +7,11 @@ import decimal
 import database as db
 
 
-def test_postgres_type_consistency(psql_docker, conn, value_dict):
+def test_postgres_type_consistency(psql_docker, pg_conn, value_dict):
     """Test type consistency with PostgreSQL"""
 
     # Create a test table with various types
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         # Drop table if it exists
         tx.execute('DROP TABLE IF EXISTS type_test')
 
@@ -160,7 +160,7 @@ def test_postgres_type_consistency(psql_docker, conn, value_dict):
             assert date_scalar.date() == value_dict['date_value']
 
 
-def test_postgres_nan_nat_handling(psql_docker, conn):
+def test_postgres_nan_nat_handling(psql_docker, pg_conn):
     """Test handling of NaN, NaT and similar special values with PostgreSQL.
 
     Verifies that Python's float('nan'), NumPy NaN, Pandas NaT, and similar
@@ -171,7 +171,7 @@ def test_postgres_nan_nat_handling(psql_docker, conn):
     import pandas as pd
 
     # Create a test table with integer column (to ensure NaN/NaT gets converted to NULL)
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         # Drop table if it exists
         tx.execute('DROP TABLE IF EXISTS nan_test')
 
@@ -224,7 +224,7 @@ def test_postgres_nan_nat_handling(psql_docker, conn):
         assert result is None, 'Explicitly cast NaN should be NULL'
 
 
-def test_postgres_cursor_executemany(psql_docker, conn):
+def test_postgres_cursor_executemany(psql_docker, pg_conn):
     """Test using connection cursor directly to call executemany with special values.
 
     Tests how multiple insertions of NaN, NaT and similar special values are handled
@@ -234,7 +234,7 @@ def test_postgres_cursor_executemany(psql_docker, conn):
     import pandas as pd
     from database.core.cursor import get_dict_cursor
 
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         tx.execute('DROP TABLE IF EXISTS executemany_test')
 
         tx.execute("""
@@ -260,14 +260,14 @@ def test_postgres_cursor_executemany(psql_docker, conn):
         ('Regular integer', 42)
     ]
 
-    cursor = get_dict_cursor(conn)
+    cursor = get_dict_cursor(pg_conn)
     try:
         params = [(value, label) for label, value in test_values]
         cursor.executemany(
             'INSERT INTO executemany_test (int_col, label) VALUES (%s, %s)',
             params
         )
-        conn.commit()
+        pg_conn.commit()
     finally:
         cursor.close()
 

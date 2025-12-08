@@ -1,31 +1,31 @@
 import database as db
 
 
-def test_empty_results_handling(psql_docker, conn):
+def test_empty_results_handling(psql_docker, pg_conn):
     """Test that empty query results are handled properly"""
 
     # Test select with no results
-    result = db.select(conn, 'SELECT * FROM test_table WHERE 1=0')
+    result = db.select(pg_conn, 'SELECT * FROM test_table WHERE 1=0')
     assert result is not None
     assert isinstance(result, list)
     assert len(result) == 0
 
     # Test select_column with no results
-    result = db.select_column(conn, 'SELECT name FROM test_table WHERE 1=0')
+    result = db.select_column(pg_conn, 'SELECT name FROM test_table WHERE 1=0')
     assert result is not None
     assert isinstance(result, list)
     assert len(result) == 0
 
     # Test select_row_or_none with no results
-    result = db.select_row_or_none(conn, 'SELECT * FROM test_table WHERE 1=0')
+    result = db.select_row_or_none(pg_conn, 'SELECT * FROM test_table WHERE 1=0')
     assert result is None  # This should still be None by design
 
     # Test select_scalar_or_none with no results
-    result = db.select_scalar_or_none(conn, 'SELECT COUNT(*) FROM test_table WHERE 1=0')
+    result = db.select_scalar_or_none(pg_conn, 'SELECT COUNT(*) FROM test_table WHERE 1=0')
     assert result == 0  # This should not be None
 
     # Test transaction select with no results
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         result = tx.select('SELECT * FROM test_table WHERE 1=0')
         assert result is not None
         assert isinstance(result, list)
@@ -38,11 +38,11 @@ def test_empty_results_handling(psql_docker, conn):
         assert len(column) == 0
 
 
-def test_empty_results_key_preservation(psql_docker, conn):
+def test_empty_results_key_preservation(psql_docker, pg_conn):
     """Test that empty query results preserve dictionary keys"""
 
     # Create a temporary table with specific columns
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         tx.execute("""
             CREATE TEMPORARY TABLE empty_test (
                 id INTEGER PRIMARY KEY,

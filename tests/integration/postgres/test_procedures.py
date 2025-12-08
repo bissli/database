@@ -1,18 +1,18 @@
 import database as db
 
 
-def test_procedure_basic(psql_docker, conn):
+def test_procedure_basic(psql_docker, pg_conn):
     """Test basic stored procedure functionality with a simple query"""
     # Create a function that returns a result set
     # First check the type of the name column
-    column_type = db.select_scalar(conn, """
+    column_type = db.select_scalar(pg_conn, """
     SELECT data_type FROM information_schema.columns
     WHERE table_name = 'test_table' AND column_name = 'name'
     """)
 
     # Create function with matching data types
     if column_type == 'character varying':
-        db.execute(conn, """
+        db.execute(pg_conn, """
         CREATE OR REPLACE FUNCTION get_test_data() RETURNS TABLE(name VARCHAR, value INTEGER) AS $$
         BEGIN
             RETURN QUERY SELECT t.name, t.value FROM test_table t ORDER BY t.name LIMIT 3;
@@ -20,7 +20,7 @@ def test_procedure_basic(psql_docker, conn):
         $$ LANGUAGE plpgsql;
         """)
     else:
-        db.execute(conn, """
+        db.execute(pg_conn, """
         CREATE OR REPLACE FUNCTION get_test_data() RETURNS TABLE(name TEXT, value INTEGER) AS $$
         BEGIN
             RETURN QUERY SELECT t.name, t.value FROM test_table t ORDER BY t.name LIMIT 3;
@@ -29,7 +29,7 @@ def test_procedure_basic(psql_docker, conn):
         """)
 
     # Call using select
-    result = db.select(conn, 'SELECT * FROM get_test_data()')
+    result = db.select(pg_conn, 'SELECT * FROM get_test_data()')
 
     # Verify results
     assert isinstance(result, list)
@@ -38,10 +38,10 @@ def test_procedure_basic(psql_docker, conn):
     assert 'value' in result[0]
 
 
-def test_procedure_multiple_resultsets(psql_docker, conn):
+def test_procedure_multiple_resultsets(psql_docker, pg_conn):
     """Test stored procedure with a function returning multiple result sets"""
     # Create a function that returns multiple result sets
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE OR REPLACE FUNCTION multi_results() RETURNS SETOF RECORD AS $$
     DECLARE
         all_rows RECORD;
@@ -66,7 +66,7 @@ def test_procedure_multiple_resultsets(psql_docker, conn):
     """
 
     # Call with return_all to get all result sets
-    all_results = db.select(conn, sql, return_all=True)
+    all_results = db.select(pg_conn, sql, return_all=True)
 
     # Verify we got multiple result sets
     assert isinstance(all_results, list)
@@ -80,16 +80,16 @@ def test_procedure_multiple_resultsets(psql_docker, conn):
     assert all_results[1][0]['name'] == 'Summary'
 
     # Default behavior should return largest result set
-    default_result = db.select(conn, sql)
+    default_result = db.select(pg_conn, sql)
     assert len(default_result) == len(all_results[0])
 
     # prefer_first should return first result set
-    first_result = db.select(conn, sql, prefer_first=True)
+    first_result = db.select(pg_conn, sql, prefer_first=True)
     assert len(first_result) == len(all_results[0])
     assert first_result == all_results[0]
 
 
-def test_procedure_empty_resultset(psql_docker, conn):
+def test_procedure_empty_resultset(psql_docker, pg_conn):
     """Test stored procedur with empty result sets"""
     # SQL that returns empty result sets
     sql = """
@@ -98,12 +98,12 @@ def test_procedure_empty_resultset(psql_docker, conn):
     """
 
     # Should return empty list
-    result = db.select(conn, sql)
+    result = db.select(pg_conn, sql)
     assert isinstance(result, list)
     assert len(result) == 0
 
     # With return_all, should return list of empty lists
-    all_results = db.select(conn, sql, return_all=True)
+    all_results = db.select(pg_conn, sql, return_all=True)
     assert isinstance(all_results, list)
     assert len(all_results) == 2
     assert len(all_results[0]) == 0

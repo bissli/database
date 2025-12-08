@@ -6,7 +6,7 @@ import logging
 
 import database as db
 import pandas as pd
-from database.adapters.column_info import Column
+from database.types import Column
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,17 @@ def debug_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     return iterdict_data_loader(data, columns, **kwargs)
 
 
-def test_postgres_date_string_positional(psql_docker, conn):
+def test_postgres_date_string_positional(psql_docker, pg_conn):
     """Test PostgreSQL properly handles date columns that are named 'date'
     and date values cast to strings using positional parameters
     """
     # Set custom data loader
-    original_data_loader = conn.options.data_loader
-    conn.options.data_loader = debug_data_loader
+    original_data_loader = pg_conn.options.data_loader
+    pg_conn.options.data_loader = debug_data_loader
 
     try:
         # Create a test table for date operations
-        with db.transaction(conn) as tx:
+        with db.transaction(pg_conn) as tx:
             # Drop table if it exists
             tx.execute('DROP TABLE IF EXISTS date_test')
 
@@ -120,20 +120,20 @@ def test_postgres_date_string_positional(psql_docker, conn):
                 assert len(row['date']) == 10  # YYYY-MM-DD format is 10 chars
     finally:
         # Restore original data loader
-        conn.options.data_loader = original_data_loader
+        pg_conn.options.data_loader = original_data_loader
 
 
-def test_postgres_date_string_named(psql_docker, conn):
+def test_postgres_date_string_named(psql_docker, pg_conn):
     """Test PostgreSQL properly handles date columns that are named 'date'
     and date values cast to strings using named parameters
     """
     # Set custom data loader
-    original_data_loader = conn.options.data_loader
-    conn.options.data_loader = debug_data_loader
+    original_data_loader = pg_conn.options.data_loader
+    pg_conn.options.data_loader = debug_data_loader
 
     try:
         # Create a test table for date operations
-        with db.transaction(conn) as tx:
+        with db.transaction(pg_conn) as tx:
             # Drop table if it exists
             tx.execute('DROP TABLE IF EXISTS date_test')
 
@@ -194,7 +194,7 @@ def test_postgres_date_string_named(psql_docker, conn):
                 assert isinstance(row['actual_date'], datetime.date)  # This column should be a date object
     finally:
         # Restore original data loader
-        conn.options.data_loader = original_data_loader
+        pg_conn.options.data_loader = original_data_loader
 
 
 if __name__ == '__main__':

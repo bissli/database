@@ -5,7 +5,7 @@ import sqlalchemy.exc
 from database.utils.connection_utils import check_connection
 
 
-def test_check_connection_decorator(psql_docker, conn):
+def test_check_connection_decorator(psql_docker, pg_conn):
     """Test the check_connection decorator's retry behavior"""
     # Count how many times we retry
     retry_count = [0]
@@ -19,7 +19,7 @@ def test_check_connection_decorator(psql_docker, conn):
         return 'Success'
 
     # Call the function - should retry twice then succeed
-    result = failing_function(conn, fail_count=2)
+    result = failing_function(pg_conn, fail_count=2)
     assert result == 'Success'
     assert retry_count[0] == 2
 
@@ -33,7 +33,7 @@ def test_check_connection_decorator(psql_docker, conn):
             raise psycopg.OperationalError('Simulated connection error')
         return 'Success'
     with pytest.raises(psycopg.OperationalError):
-        failing_function_2(conn, fail_count=5)
+        failing_function_2(pg_conn, fail_count=5)
 
     # Should have stopped after max_retries
     assert retry_count[0] == 3

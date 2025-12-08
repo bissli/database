@@ -3,10 +3,10 @@ import datetime
 import database as db
 
 
-def test_date_parameter_handling(psql_docker, conn):
+def test_date_parameter_handling(psql_docker, pg_conn):
     """Test handling of datetime.date objects as parameters."""
     # Setup - insert test data with date field
-    db.execute(conn, """
+    db.execute(pg_conn, """
 create temporary table test_date_table (
     id serial primary key,
     date date,
@@ -19,7 +19,7 @@ create temporary table test_date_table (
     test_date = datetime.date(2025, 3, 3)
     test_identifier = 'TEST123'
 
-    db.insert(conn, """
+    db.insert(pg_conn, """
 insert into test_date_table (date, identifier, value)
 values (%s, %s, %s)
 """, test_date, test_identifier, 100)
@@ -34,22 +34,22 @@ where date = %s
 """
 
     # This should work without error
-    result = db.select(conn, query, test_date, test_identifier)
+    result = db.select(pg_conn, query, test_date, test_identifier)
     assert len(result) == 1
     assert result[0]['identifier'] == test_identifier
     assert result[0]['date'] == test_date
 
     # Test 2: Using the same query in a transaction
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         result = tx.select(query, test_date, test_identifier)
         assert len(result) == 1
         assert result[0]['identifier'] == test_identifier
 
 
-def test_named_parameter_handling(psql_docker, conn):
+def test_named_parameter_handling(psql_docker, pg_conn):
     """Test handling of named parameters using a dictionary."""
     # Setup - create a temporary table for testing
-    db.execute(conn, """
+    db.execute(pg_conn, """
 create temporary table test_named_params (
     id serial primary key,
     col varchar(20),
@@ -58,7 +58,7 @@ create temporary table test_named_params (
 )
 """)
 
-    db.execute(conn, """
+    db.execute(pg_conn, """
 create temporary table test_named_params_join (
     id serial primary key,
     id_bb_unique varchar(20),
@@ -68,12 +68,12 @@ create temporary table test_named_params_join (
 """)
 
     # Insert test data
-    db.insert(conn, """
+    db.insert(pg_conn, """
 insert into test_named_params (col, time, value)
 values (%s, %s, %s)
 """, 'TEST123', '2025-03-04 10:00:00', 200)
 
-    db.insert(conn, """
+    db.insert(pg_conn, """
 insert into test_named_params_join (id_bb_unique, date, data)
 values (%s, %s, %s)
 """, 'TEST123', '2025-03-03', 'test data')
@@ -93,24 +93,24 @@ where q.time::date = %(bdate)s
     }
 
     # This should work without error
-    result = db.select(conn, query, params)
+    result = db.select(pg_conn, query, params)
     assert len(result) == 1
     assert result[0]['col'] == 'TEST123'
     assert result[0]['data'] == 'test data'
 
     # Test 2: Using the same query in a transaction
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         result = tx.select(query, params)
         assert len(result) == 1
         assert result[0]['col'] == 'TEST123'
         assert result[0]['data'] == 'test data'
 
 
-def test_named_params_in_clause(psql_docker, conn):
+def test_named_params_in_clause(psql_docker, pg_conn):
     """Test handling of IN clause with named parameters, including single-item tuples.
     """
     # Setup - create a temporary table for testing
-    db.execute(conn, """
+    db.execute(pg_conn, """
 create temporary table test_in_clause (
     id serial primary key,
     category varchar(20),
@@ -127,7 +127,7 @@ create temporary table test_in_clause (
     ]
 
     for category, vendor, desc in test_data:
-        db.insert(conn, """
+        db.insert(pg_conn, """
 insert into test_in_clause (category, vendor, description)
 values (%s, %s, %s)
 """, category, vendor, desc)
@@ -147,78 +147,78 @@ and
 """
     params = {'categories': ('Electronics',), 'vendor': 'Apple'}
 
-    result = db.select(conn, query, params)
+    result = db.select(pg_conn, query, params)
     assert len(result) == 1
     assert result[0]['category'] == 'Electronics'
     assert result[0]['description'] == 'Smartphone'
 
     # Test 2: Multiple items in IN clause
     params = {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'}
-    result = db.select(conn, query, params)
+    result = db.select(pg_conn, query, params)
     assert len(result) == 1
     assert result[0]['category'] == 'Clothing'
 
     # Test 3: IN clause with a different vendor
     params = {'categories': ('Electronics',), 'vendor': 'Samsung'}
-    result = db.select(conn, query, params)
+    result = db.select(pg_conn, query, params)
     assert len(result) == 1
     assert result[0]['category'] == 'Electronics'
     assert result[0]['description'] == 'Tablet'
 
     # Test 4: No matching data
     params = {'categories': ('Books',), 'vendor': 'Apple'}
-    result = db.select(conn, query, params)
+    result = db.select(pg_conn, query, params)
     assert len(result) == 0
 
 
-def test_none_parameter(psql_docker, conn):
+def test_none_parameter(psql_docker, pg_conn):
     """Test handling of None parameters in queries."""
-    result = db.select(conn, 'select %s::text as null_value', None)
+    result = db.select(pg_conn, 'select %s::text as null_value', None)
     assert result[0]['null_value'] is None
 
 
-def test_list_parameters(psql_docker, conn):
+def test_list_parameters(psql_docker, pg_conn):
     """Test handling of list parameters for IN clauses."""
     # Insert test data
     names = ['InTest1', 'InTest2', 'InTest3']
     for i, name in enumerate(names):
-        db.insert(conn, 'insert into test_table (name, value) values (%s, %s)',
+        db.insert(pg_conn, 'insert into test_table (name, value) values (%s, %s)',
                   name, (i+1)*10)
 
     # Query with IN clause using string formatting (not ideal but common)
     placeholders = ','.join(['%s'] * len(names))
     query = f'select name, value from test_table where name in ({placeholders}) order by value'
 
-    result = db.select(conn, query, *names)
+    result = db.select(pg_conn, query, *names)
     assert len(result) == 3
     assert [row['name'] for row in result] == names
 
 
-def test_numeric_parameters(psql_docker, conn):
+def test_numeric_parameters(psql_docker, pg_conn):
     """Test handling of numeric parameters."""
     # Test integers
-    result = db.select(conn, 'select %s::int as int_val', 42)
+    result = db.select(pg_conn, 'select %s::int as int_val', 42)
     assert result[0]['int_val'] == 42
 
     # Test floats
-    result = db.select(conn, 'select %s::float as float_val', 42.5)
+    result = db.select(pg_conn, 'select %s::float as float_val', 42.5)
     assert result[0]['float_val'] == 42.5
 
     # Test with computation
-    result = db.select(conn, 'select %s + %s as sum_val', 10, 20)
+    result = db.select(pg_conn, 'select %s + %s as sum_val', 10, 20)
     assert result[0]['sum_val'] == 30
 
 
-def test_direct_list_parameters(psql_docker, conn):
+def test_direct_list_parameters(psql_docker, pg_conn):
     """Test the direct list parameter format for IN clauses."""
     # Insert test data
     test_ids = [101, 102, 103]
     for i, test_id in enumerate(test_ids):
-        db.insert(conn, 'insert into test_table (name, value) values (%s, %s)',
+        db.insert(pg_conn, 'insert into test_table (name, value) values (%s, %s)',
                   f'DirectTest{i}', test_id)
 
     # Test direct list parameter syntax for IN clause
-    result = db.select(conn, 'select name, value from test_table where value IN %s order by value',
+    result = db.select(pg_conn, 'select name, value from test_table where value IN %s order by value',
                        test_ids)
 
     # Verify results
@@ -226,7 +226,7 @@ def test_direct_list_parameters(psql_docker, conn):
     assert [row['value'] for row in result] == test_ids
 
     # Test with a single-item list
-    result = db.select(conn, 'select name, value from test_table where value IN %s',
+    result = db.select(pg_conn, 'select name, value from test_table where value IN %s',
                        [101])
 
     assert len(result) == 1
@@ -234,7 +234,7 @@ def test_direct_list_parameters(psql_docker, conn):
     assert not isinstance(result[0]['value'], str)
 
     # Compare with traditional format
-    result_traditional = db.select(conn, 'select name, value from test_table where value IN %s',
+    result_traditional = db.select(pg_conn, 'select name, value from test_table where value IN %s',
                                    ([101],))
 
     assert len(result) == len(result_traditional)
@@ -242,14 +242,14 @@ def test_direct_list_parameters(psql_docker, conn):
     assert not isinstance(result_traditional[0]['value'], str)
 
 
-def test_direct_lists_for_multiple_in_clauses(psql_docker, conn):
+def test_direct_lists_for_multiple_in_clauses(psql_docker, pg_conn):
     """Test using direct lists for multiple IN clauses."""
     # Insert test data for multiple categories and statuses
     categories = ['cat1', 'cat2', 'cat3']
     statuses = ['active', 'pending']
 
     # Create a temp table to test with
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE multi_in_test (
         id SERIAL PRIMARY KEY,
         category TEXT,
@@ -259,11 +259,11 @@ def test_direct_lists_for_multiple_in_clauses(psql_docker, conn):
 
     # Insert test data with different combinations
     for i, (cat, status) in enumerate([(c, s) for c in categories for s in statuses]):
-        db.insert(conn, 'INSERT INTO multi_in_test (category, status) VALUES (%s, %s)',
+        db.insert(pg_conn, 'INSERT INTO multi_in_test (category, status) VALUES (%s, %s)',
                   cat, status)
 
     # Now test direct lists for multiple IN clauses
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT category, status
     FROM multi_in_test
     WHERE category IN %s AND status IN %s
@@ -278,10 +278,10 @@ def test_direct_lists_for_multiple_in_clauses(psql_docker, conn):
     assert statuses == {'active', 'pending'}
 
 
-def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
+def test_like_clause_with_pre_escaped_percent(psql_docker, pg_conn):
     """Test LIKE clause with already-escaped percent signs works correctly with real DB."""
     # Create a temp table for testing LIKE patterns
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE like_pattern_test (
         id SERIAL PRIMARY KEY,
         status TEXT,
@@ -300,7 +300,7 @@ def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
     ]
 
     for status, description in test_data:
-        db.insert(conn, """
+        db.insert(pg_conn, """
         INSERT INTO like_pattern_test (status, description)
         VALUES (%s, %s)
         """, status, description)
@@ -309,7 +309,7 @@ def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
     # Note: When we insert '%%Saved', it's stored as '%Saved' in PostgreSQL
     # because %% is the escape sequence for a literal % in SQL
     query1 = "SELECT * FROM like_pattern_test WHERE status = '%Saved'"
-    result1 = db.select(conn, query1)
+    result1 = db.select(pg_conn, query1)
     assert len(result1) == 1
     # The status might be returned as %%Saved in some database drivers
     # because of how they handle % characters in strings
@@ -319,13 +319,13 @@ def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
     # This tests the scenario from the unit test that was failing
     author_id = 1
     query2 = "SELECT * FROM like_pattern_test WHERE status LIKE '%S%' AND id > %s"
-    result2 = db.select(conn, query2, author_id)
+    result2 = db.select(pg_conn, query2, author_id)
     assert len(result2) >= 2
     # Note: In the database, '%%S' is stored as '%S'
     assert '%S' in result2[0]['status']
 
     # Test 3: Using an escaped pattern in a transaction
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         # This query looks for rows containing '%S%'
         # In SQL, '%%' escapes to a literal '%', so we're looking for %S% in the data
         query3 = "SELECT * FROM like_pattern_test WHERE status LIKE '%%S%%'"
@@ -351,7 +351,7 @@ def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
     # Test 4: Pattern with both escaped and unescaped percents
     # This should match a literal %S followed by anything
     query4 = "SELECT * FROM like_pattern_test WHERE status LIKE '%%S%'"
-    result4 = db.select(conn, query4)
+    result4 = db.select(pg_conn, query4)
 
     # Rather than checking exact count (which depends on database specifics),
     # ensure the right values are included
@@ -365,10 +365,10 @@ def test_like_clause_with_pre_escaped_percent(psql_docker, conn):
     assert len(rows_with_s_pattern) > 0, "No rows with '%S' pattern found in results"
 
 
-def test_combined_in_clause_named_params_with_returnid(psql_docker, conn):
+def test_combined_in_clause_named_params_with_returnid(psql_docker, pg_conn):
     """Test combining IN clause with named parameters and the RETURNING clause."""
     # Create a table with an auto-incrementing ID and category-related columns
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE combined_test (
         id SERIAL PRIMARY KEY,
         category TEXT NOT NULL,
@@ -380,13 +380,13 @@ def test_combined_in_clause_named_params_with_returnid(psql_docker, conn):
     # Insert some initial data
     categories = ['electronics', 'clothing', 'food']
     for i, category in enumerate(categories):
-        db.execute(conn, """
+        db.execute(pg_conn, """
         INSERT INTO combined_test (category, name, value)
         VALUES (%s, %s, %s)
         """, category, f'Item_{i}', i*10)
 
     # Now test the combined features using a transaction
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         # Prepare named parameters with an IN clause
         params = {
             'categories': ('electronics', 'clothing'),  # IN clause with tuple
@@ -432,10 +432,10 @@ def test_combined_in_clause_named_params_with_returnid(psql_docker, conn):
             assert row.category in {'electronics', 'clothing'}
 
 
-def test_is_null_parameter_handling(psql_docker, conn):
+def test_is_null_parameter_handling(psql_docker, pg_conn):
     """Test correct handling of NULL values with IS NULL/IS NOT NULL operators."""
     # Create a test table
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_null_handling (
         id SERIAL PRIMARY KEY,
         name TEXT,
@@ -444,7 +444,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     """)
 
     # Insert test data with NULL and non-NULL values
-    db.execute(conn, """
+    db.execute(pg_conn, """
     INSERT INTO test_null_handling (name, value) VALUES
     ('item1', 100),
     ('item2', NULL),
@@ -452,7 +452,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     """)
 
     # Test 1: Correct usage with IS NULL (no parameter needed)
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT name, value FROM test_null_handling
     WHERE value IS NULL
     """)
@@ -460,7 +460,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     assert result[0]['name'] == 'item2'
 
     # Test 2: Correct usage with IS NOT NULL (no parameter needed)
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT name, value FROM test_null_handling
     WHERE value IS NOT NULL
     ORDER BY name
@@ -475,7 +475,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     end_date = datetime.date(2025, 3, 11)
 
     # Create a table with dates for testing
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_date_null (
         id SERIAL PRIMARY KEY,
         date DATE,
@@ -485,7 +485,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     """)
 
     # Insert test data
-    db.execute(conn, """
+    db.execute(pg_conn, """
     INSERT INTO test_date_null (date, value, strategy) VALUES
     ('2025-01-15', 100, 'A'),
     ('2025-02-01', NULL, 'B'),
@@ -494,7 +494,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
 
     # This is the CORRECT way to handle NULL checks with parameters:
     # Use IS NULL or IS NOT NULL directly in the SQL, not with parameters
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT date, value, strategy
     FROM test_date_null
     WHERE date BETWEEN %s AND %s
@@ -506,7 +506,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
 
     # Test 4: Testing for a specific value OR NULL using parameters
     # For cases where you want to find rows where value = X OR value IS NULL
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT name, value
     FROM test_null_handling
     WHERE value = %s OR value IS NULL
@@ -517,7 +517,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
 
     # Test 5: Test handling of None parameter with IS NOT operator
     # This should be correctly handled by converting None to NULL
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT date, value, strategy
     FROM test_date_null
     WHERE date BETWEEN %s AND %s
@@ -529,7 +529,7 @@ def test_is_null_parameter_handling(psql_docker, conn):
     assert {r['strategy'] for r in result} == {'A'}
 
     # Test 6: Test handling of None parameter with IS operator
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
     SELECT date, value, strategy
     FROM test_date_null
     WHERE date BETWEEN %s AND %s
@@ -541,12 +541,12 @@ def test_is_null_parameter_handling(psql_docker, conn):
     assert result[0]['strategy'] == 'B'
 
 
-def test_no_placeholders_with_parameters(psql_docker, conn):
+def test_no_placeholders_with_parameters(psql_docker, pg_conn):
     """Test that when a query has no placeholders but parameters are provided,
     those parameters are ignored and the query executes without errors.
     """
     # Create a test table
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_no_placeholders (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL
@@ -554,13 +554,13 @@ def test_no_placeholders_with_parameters(psql_docker, conn):
     """)
 
     # Insert test data
-    db.execute(conn, """
+    db.execute(pg_conn, """
     INSERT INTO test_no_placeholders (name) VALUES ('test1'), ('test2')
     """)
 
     # Test 1: Query with no placeholders but with parameters
     # This should ignore the parameters and execute successfully
-    result = db.select(conn, 'SELECT * FROM test_no_placeholders ORDER BY id',
+    result = db.select(pg_conn, 'SELECT * FROM test_no_placeholders ORDER BY id',
                        'ignored_param', 123, True)
 
     # Verify the query executed correctly
@@ -569,14 +569,14 @@ def test_no_placeholders_with_parameters(psql_docker, conn):
     assert result[1]['name'] == 'test2'
 
     # Test 2: In a transaction
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         result = tx.select('SELECT COUNT(*) AS count FROM test_no_placeholders',
                            'ignored_param')
         assert result[0]['count'] == 2
 
     # Test 3: With different types of parameters that would normally cause errors
     # if they were actually used in the query
-    result = db.select(conn, "SELECT 'static_value' AS value",
+    result = db.select(pg_conn, "SELECT 'static_value' AS value",
                        {'complex': 'object'}, [1, 2, 3], None)
     assert len(result) == 1
     assert result[0]['value'] == 'static_value'

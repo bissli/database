@@ -4,13 +4,13 @@ import database as db
 import pytest
 
 
-def test_upsert_basic(psql_docker, conn):
+def test_upsert_basic(psql_docker, pg_conn):
     """Test basic upsert functionality"""
     rows = [{'name': 'Barry', 'value': 50}, {'name': 'Wallace', 'value': 92}]
-    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should return 2 for new rows'
 
-    result = db.select(conn, 'select name, value from test_table where name in (%s, %s) order by name',
+    result = db.select(pg_conn, 'select name, value from test_table where name in (%s, %s) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
     assert result[0]['name'] == 'Barry'
@@ -19,47 +19,47 @@ def test_upsert_basic(psql_docker, conn):
     assert result[1]['value'] == 92
 
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
-    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, update_cols_always=['value'])
 
-    result = db.select(conn, 'select name, value from test_table where name in (%s, %s) order by name',
+    result = db.select(pg_conn, 'select name, value from test_table where name in (%s, %s) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
     assert result[0]['value'] == 51
     assert result[1]['value'] == 93
 
 
-def test_upsert_ifnull(psql_docker, conn):
+def test_upsert_ifnull(psql_docker, pg_conn):
     """Test upsert with update_cols_ifnull option"""
-    db.insert(conn, 'insert into test_table (name, value) values (%s, %s)', 'UpsertNull', 100)
+    db.insert(pg_conn, 'insert into test_table (name, value) values (%s, %s)', 'UpsertNull', 100)
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(conn, 'test_table', rows, update_cols_ifnull=['value'])
+    db.upsert_rows(pg_conn, 'test_table', rows, update_cols_ifnull=['value'])
 
-    result = db.select_scalar(conn, 'select value from test_table where name = %s', 'UpsertNull')
+    result = db.select_scalar(pg_conn, 'select value from test_table where name = %s', 'UpsertNull')
     assert result == 100, 'Value should not be updated when using update_cols_ifnull'
 
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_nullable (
         name VARCHAR(50) PRIMARY KEY,
         value INTEGER NULL
     )
     """)
 
-    db.insert(conn, 'INSERT INTO test_nullable (name, value) VALUES (%s, %s)', 'UpsertNull', 100)
+    db.insert(pg_conn, 'INSERT INTO test_nullable (name, value) VALUES (%s, %s)', 'UpsertNull', 100)
 
-    db.execute(conn, 'UPDATE test_nullable SET value = NULL WHERE name = %s', 'UpsertNull')
+    db.execute(pg_conn, 'UPDATE test_nullable SET value = NULL WHERE name = %s', 'UpsertNull')
 
     rows = [{'name': 'UpsertNull', 'value': 200}]
-    db.upsert_rows(conn, 'test_nullable', rows, update_cols_ifnull=['value'])
+    db.upsert_rows(pg_conn, 'test_nullable', rows, update_cols_ifnull=['value'])
 
-    result = db.select_scalar(conn, 'SELECT value FROM test_nullable WHERE name = %s', 'UpsertNull')
+    result = db.select_scalar(pg_conn, 'SELECT value FROM test_nullable WHERE name = %s', 'UpsertNull')
     assert result == 200, 'Value should be updated when target is NULL'
 
 
-def test_upsert_mixed_operations(psql_docker, conn):
+def test_upsert_mixed_operations(psql_docker, pg_conn):
     """Test upsert with mix of inserts and updates"""
     try:
-        conn.rollback()
+        pg_conn.rollback()
     except:
         pass
 
@@ -69,10 +69,10 @@ def test_upsert_mixed_operations(psql_docker, conn):
         {'name': 'NewPerson2', 'value': 600}
     ]
 
-    row_count = db.upsert_rows(conn, 'test_table', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, update_cols_always=['value'])
     assert row_count == 3
 
-    result = db.select(conn, """
+    result = db.select(pg_conn, """
         select name, value from test_table
         where name in (%s, %s, %s)
         order by name
@@ -87,16 +87,16 @@ def test_upsert_mixed_operations(psql_docker, conn):
     assert result[2]['value'] == 600
 
 
-def test_upsert_reset_sequence(psql_docker, conn):
+def test_upsert_reset_sequence(psql_docker, pg_conn):
     """Test sequence reset during upsert"""
     # Make sure we have a clean connection state
     try:
-        conn.rollback()
+        pg_conn.rollback()
     except:
         pass
 
     # Create a new table specifically for this test to avoid modifying the shared test_table
-    db.execute(conn, """
+    db.execute(pg_conn, """
 CREATE TEMPORARY TABLE test_sequence_table (
     test_id SERIAL PRIMARY KEY,
     name VARCHAR(50) UNIQUE NOT NULL,
@@ -105,51 +105,51 @@ CREATE TEMPORARY TABLE test_sequence_table (
 """)
 
     # Copy data from the test_table to our new table
-    db.execute(conn, """
+    db.execute(pg_conn, """
 INSERT INTO test_sequence_table (name, value)
 SELECT name, value FROM test_table
 """)
 
     # Get the current max sequence value
-    current_max_id = db.select_scalar(conn, 'SELECT max(test_id) FROM test_sequence_table')
+    current_max_id = db.select_scalar(pg_conn, 'SELECT max(test_id) FROM test_sequence_table')
 
     # Insert a new row with reset_sequence=False (default)
     new_rows = [{'name': 'Zack', 'value': 150}]
-    db.upsert_rows(conn, 'test_sequence_table', new_rows)
+    db.upsert_rows(pg_conn, 'test_sequence_table', new_rows)
 
     # Now get the next sequence value by inserting a row directly
-    db.execute(conn, "INSERT INTO test_sequence_table (name, value) VALUES ('SequenceTest1', 200)")
-    seq_test1_id = db.select_scalar(conn, "SELECT test_id FROM test_sequence_table WHERE name = 'SequenceTest1'")
+    db.execute(pg_conn, "INSERT INTO test_sequence_table (name, value) VALUES ('SequenceTest1', 200)")
+    seq_test1_id = db.select_scalar(pg_conn, "SELECT test_id FROM test_sequence_table WHERE name = 'SequenceTest1'")
 
     # Insert another row but with reset_sequence=True
     new_rows = [{'name': 'Yvonne', 'value': 175}]
-    db.upsert_rows(conn, 'test_sequence_table', new_rows, reset_sequence=True)
+    db.upsert_rows(pg_conn, 'test_sequence_table', new_rows, reset_sequence=True)
 
     # Now the sequence should be set to the max id + 1
     # Insert another row to check
-    db.execute(conn, "INSERT INTO test_sequence_table (name, value) VALUES ('SequenceTest2', 225)")
-    seq_test2_id = db.select_scalar(conn, "SELECT test_id FROM test_sequence_table WHERE name = 'SequenceTest2'")
+    db.execute(pg_conn, "INSERT INTO test_sequence_table (name, value) VALUES ('SequenceTest2', 225)")
+    seq_test2_id = db.select_scalar(pg_conn, "SELECT test_id FROM test_sequence_table WHERE name = 'SequenceTest2'")
 
     # The new ID should be exactly max_id + 1
-    max_id_after_reset = db.select_scalar(conn, "SELECT max(test_id) FROM test_sequence_table WHERE name != 'SequenceTest2'")
+    max_id_after_reset = db.select_scalar(pg_conn, "SELECT max(test_id) FROM test_sequence_table WHERE name != 'SequenceTest2'")
     assert seq_test2_id == max_id_after_reset + 1, f'Sequence was not properly reset. Expected {max_id_after_reset+1}, got {seq_test2_id}'
 
     # Temporary tables are automatically cleaned up
 
 
-def test_upsert_empty_rows(psql_docker, conn):
+def test_upsert_empty_rows(psql_docker, pg_conn):
     """Test upsert with empty rows list"""
     # Should not error and return 0
-    result = db.upsert_rows(conn, 'test_table', [])
+    result = db.upsert_rows(pg_conn, 'test_table', [])
     assert result == 0
 
 
-def test_upsert_large_batch(psql_docker, conn):
+def test_upsert_large_batch(psql_docker, pg_conn):
     """Test upsert with a large number of rows that exceeds parameter limits"""
     import time
 
     # Create a temporary table for this test with a simple structure
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_large_batch (
         id INTEGER PRIMARY KEY,
         value TEXT NOT NULL
@@ -160,7 +160,7 @@ def test_upsert_large_batch(psql_docker, conn):
     rows = [{'id': i, 'value': f'value-{i}'} for i in range(1, 35001)]
 
     batch_insert_time = time.time()
-    row_count = db.upsert_rows(conn, 'test_large_batch', rows)
+    row_count = db.upsert_rows(pg_conn, 'test_large_batch', rows)
     insert_end_time = time.time()
 
     # Verify correct number of rows inserted
@@ -169,7 +169,7 @@ def test_upsert_large_batch(psql_docker, conn):
     # Verify data was inserted correctly (check a few values)
     sample_ids = [1, 1000, 10000, 19999]
     for id_val in sample_ids:
-        result = db.select_scalar(conn, 'SELECT value FROM test_large_batch WHERE id = %s', id_val)
+        result = db.select_scalar(pg_conn, 'SELECT value FROM test_large_batch WHERE id = %s', id_val)
         assert result == f'value-{id_val}', f'Wrong value for id {id_val}: {result}'
 
     # Now modify the rows and upsert again to test updates with large batch
@@ -180,7 +180,7 @@ def test_upsert_large_batch(psql_docker, conn):
 
     # Update the rows (this will use UPSERT with batching)
     update_start_time = time.time()
-    update_count = db.upsert_rows(conn, 'test_large_batch', update_rows,
+    update_count = db.upsert_rows(pg_conn, 'test_large_batch', update_rows,
                                   update_cols_always=['value'])
     update_end_time = time.time()
 
@@ -189,11 +189,11 @@ def test_upsert_large_batch(psql_docker, conn):
 
     # Verify data was updated correctly (check same sample)
     for id_val in sample_ids:
-        result = db.select_scalar(conn, 'SELECT value FROM test_large_batch WHERE id = %s', id_val)
+        result = db.select_scalar(pg_conn, 'SELECT value FROM test_large_batch WHERE id = %s', id_val)
         assert result == f'updated-{id_val}', f'Wrong value after update for id {id_val}: {result}'
 
     # Verify total row count in the table
-    total_rows = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_large_batch')
+    total_rows = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_large_batch')
     assert total_rows == 35000, f'Expected 35000 total rows, found {total_rows}'
 
     # Optional: Print performance metrics
@@ -210,27 +210,27 @@ def test_upsert_large_batch(psql_docker, conn):
     assert update_time < 60, f'Update too slow: {update_time:.2f}s'
 
 
-def test_upsert_invalid_columns(psql_docker, conn):
+def test_upsert_invalid_columns(psql_docker, pg_conn):
     """Test upsert with invalid columns"""
     # Make sure we have a clean connection state
     try:
-        conn.rollback()
+        pg_conn.rollback()
     except:
         pass
 
     rows = [{'name': 'InvalidTest', 'value': 100, 'nonexistent': 'should be filtered'}]
-    db.upsert_rows(conn, 'test_table', rows)
+    db.upsert_rows(pg_conn, 'test_table', rows)
 
     # Verify the row was inserted without error
-    result = db.select_row(conn, 'select name, value from test_table where name = %s', 'InvalidTest')
+    result = db.select_row(pg_conn, 'select name, value from test_table where name = %s', 'InvalidTest')
     assert result.name == 'InvalidTest'
     assert result.value == 100
 
 
-def test_upsert_no_primary_keys(psql_docker, conn):
+def test_upsert_no_primary_keys(psql_docker, pg_conn):
     """Test upsert with a table that has no primary keys"""
     # Create a table without primary keys
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_no_pk (
         name VARCHAR(50) NOT NULL,
         value INTEGER NOT NULL
@@ -244,11 +244,11 @@ def test_upsert_no_primary_keys(psql_docker, conn):
     ]
 
     # Without primary keys, all rows should be inserted
-    row_count = db.upsert_rows(conn, 'test_no_pk', rows)
+    row_count = db.upsert_rows(pg_conn, 'test_no_pk', rows)
     assert row_count == 2, 'upsert should insert 2 rows'
 
     # Verify rows were inserted
-    result = db.select(conn, 'select name, value from test_no_pk order by name')
+    result = db.select(pg_conn, 'select name, value from test_no_pk order by name')
     assert len(result) == 2
     assert result[0]['name'] == 'NoPK1'
     assert result[0]['value'] == 100
@@ -261,11 +261,11 @@ def test_upsert_no_primary_keys(psql_docker, conn):
         {'name': 'NoPK2', 'value': 201}
     ]
 
-    row_count = db.upsert_rows(conn, 'test_no_pk', rows, update_cols_always=['value'])
+    row_count = db.upsert_rows(pg_conn, 'test_no_pk', rows, update_cols_always=['value'])
     assert row_count == 2, 'upsert should insert 2 new rows'
 
     # We should now have 4 rows
-    result = db.select(conn, 'select name, value from test_no_pk order by name, value')
+    result = db.select(pg_conn, 'select name, value from test_no_pk order by name, value')
     assert len(result) == 4, 'table should have 4 rows total'
 
     # Verify both old and new rows exist
@@ -279,12 +279,12 @@ def test_upsert_no_primary_keys(psql_docker, conn):
     assert result[3]['value'] == 201
 
 
-def test_upsert_invalid_column_filtering(psql_docker, conn):
+def test_upsert_invalid_column_filtering(psql_docker, pg_conn):
     """Test that invalid columns are properly filtered in upsert_rows"""
 
     # Make sure we have a clean connection state
     try:
-        conn.rollback()
+        pg_conn.rollback()
     except:
         pass
 
@@ -303,13 +303,13 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
     ]
 
     # Insert with mixed valid/invalid columns
-    row_count = db.upsert_rows(conn, 'test_table', rows)
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows)
 
     # Verify the correct number of rows were inserted
     assert row_count == 2, 'Expected 2 rows to be inserted'
 
     # Verify the rows were inserted correctly with only valid data
-    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+    result = db.select(pg_conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
                        'ValidationTest%')
 
     assert len(result) == 2, 'Expected 2 rows to be returned'
@@ -320,10 +320,10 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
 
     # Verify the invalid columns don't exist in the table
     with pytest.raises(Exception):
-        db.select(conn, 'SELECT nonexistent_column FROM test_table')
+        db.select(pg_conn, 'SELECT nonexistent_column FROM test_table')
 
     with pytest.raises(Exception):
-        db.select(conn, 'SELECT another_bad_column FROM test_table')
+        db.select(pg_conn, 'SELECT another_bad_column FROM test_table')
 
     # Test case-insensitive column filtering - mixed case with invalid columns
     rows_mixed_case = [
@@ -340,13 +340,13 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
     ]
 
     # Insert with mixed case and invalid columns
-    row_count = db.upsert_rows(conn, 'test_table', rows_mixed_case)
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows_mixed_case)
 
     # Verify the correct number of rows were inserted
     assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive column filtering'
 
     # Verify the rows were inserted correctly with only valid data
-    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name IN (%s, %s) ORDER BY name',
+    result = db.select(pg_conn, 'SELECT name, value FROM test_table WHERE name IN (%s, %s) ORDER BY name',
                        'ValidationTest3', 'ValidationTest4')
 
     assert len(result) == 2, 'Expected 2 rows to be returned with case-insensitive column filtering'
@@ -356,11 +356,11 @@ def test_upsert_invalid_column_filtering(psql_docker, conn):
     assert result[1]['value'] == 400
 
 
-def test_upsert_column_order_independence(psql_docker, conn):
+def test_upsert_column_order_independence(psql_docker, pg_conn):
     """Test that upsert works correctly regardless of column order in dictionaries"""
 
     # Clean up any existing test data
-    db.execute(conn, "DELETE FROM test_table WHERE name LIKE 'OrderTest%'")
+    db.execute(pg_conn, "DELETE FROM test_table WHERE name LIKE 'OrderTest%'")
 
     # Create test data with different column orders
     rows = [
@@ -375,11 +375,11 @@ def test_upsert_column_order_independence(psql_docker, conn):
     ]
 
     # Insert the rows with different column orders
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True)
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, use_primary_key=True)
     assert row_count == 2, 'Expected 2 rows to be inserted'
 
     # Verify all data was inserted correctly
-    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+    result = db.select(pg_conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
                        'OrderTest%')
 
     assert len(result) == 2, 'Expected 2 rows to be returned'
@@ -389,7 +389,7 @@ def test_upsert_column_order_independence(psql_docker, conn):
     assert result[1]['value'] == 400
 
 
-def test_upsert_all_invalid_columns(psql_docker, conn):
+def test_upsert_all_invalid_columns(psql_docker, pg_conn):
     """Test that upsert properly handles the case where all columns are invalid"""
 
     # Create test data with only invalid columns
@@ -401,15 +401,15 @@ def test_upsert_all_invalid_columns(psql_docker, conn):
     ]
 
     # This should return 0 rows affected and log a warning
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True)
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, use_primary_key=True)
     assert row_count == 0, 'Expected 0 rows to be inserted when all columns are invalid'
 
 
-def test_upsert_case_insensitive_columns(psql_docker, conn):
+def test_upsert_case_insensitive_columns(psql_docker, pg_conn):
     """Test that upsert works with case-insensitive column matching"""
 
     # Clean up any existing test data
-    db.execute(conn, "DELETE FROM test_table WHERE name LIKE 'CaseTest%'")
+    db.execute(pg_conn, "DELETE FROM test_table WHERE name LIKE 'CaseTest%'")
 
     # Assuming the table has columns 'name' and 'value' with that exact case
     # Insert with different column cases
@@ -425,11 +425,11 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
     ]
 
     # Insert should work despite case differences
-    row_count = db.upsert_rows(conn, 'test_table', rows, use_primary_key=True)
+    row_count = db.upsert_rows(pg_conn, 'test_table', rows, use_primary_key=True)
     assert row_count == 2, 'Expected 2 rows to be inserted with case-insensitive columns'
 
     # Verify rows were inserted with correct values
-    result = db.select(conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+    result = db.select(pg_conn, 'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
                        'CaseTest%')
 
     assert len(result) == 2, 'Expected 2 rows with case-insensitive column matching'
@@ -447,12 +447,12 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
     ]
 
     # Update should work despite case differences
-    db.upsert_rows(conn, 'test_table', update_rows,
+    db.upsert_rows(pg_conn, 'test_table', update_rows,
                    use_primary_key=True,
                    update_cols_always=['value'])  # Using exact case as in database
 
     # Verify update worked
-    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest1')
+    result = db.select_row(pg_conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest1')
     assert result['value'] == 201, 'Expected value to be updated with case-insensitive column matching'
 
     # Test with extreme case variations
@@ -464,35 +464,35 @@ def test_upsert_case_insensitive_columns(psql_docker, conn):
     ]
 
     # Should handle even unusual case variations
-    row_count = db.upsert_rows(conn, 'test_table', extreme_case_rows, use_primary_key=True)
+    row_count = db.upsert_rows(pg_conn, 'test_table', extreme_case_rows, use_primary_key=True)
     assert row_count == 1, 'Expected 1 row to be inserted with extreme case variations'
 
     # Verify row inserted correctly
-    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest3')
+    result = db.select_row(pg_conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest3')
     assert result['value'] == 303, 'Expected correct value with extreme case variation'
 
     # Test case-insensitive query parameter columns
-    db.upsert_rows(conn, 'test_table',
+    db.upsert_rows(pg_conn, 'test_table',
                    [{'name': 'CaseTest4', 'value': 404}],
                    update_cols_always=['value'])  # Must use exact case for update columns
 
     # Insert another row with the same primary key but different case to test update
-    db.upsert_rows(conn, 'test_table',
+    db.upsert_rows(pg_conn, 'test_table',
                    [{'name': 'CaseTest4', 'value': 444}],
                    update_cols_always=['value'])
 
     # Verify the update worked with case-insensitive key & update columns
-    result = db.select_row(conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest4')
+    result = db.select_row(pg_conn, 'SELECT value FROM test_table WHERE name = %s', 'CaseTest4')
     assert result['value'] == 444, 'Expected value to be updated with case-insensitive parameter columns'
 
 
-def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
+def test_upsert_comprehensive_case_sensitivity(psql_docker, pg_conn):
     """Comprehensive test for case sensitivity in column operations"""
 
     # Create a test table with mixed case column names if possible
     # PostgreSQL folds unquoted identifiers to lowercase, so this is just
     # to make our test logic clearer - column names are still lowercase in PostgreSQL
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE case_test_table (
         "Id" SERIAL PRIMARY KEY,        -- Mixed case with quotes
         "UserName" VARCHAR(50) NOT NULL, -- Mixed case with quotes
@@ -564,11 +564,11 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
 
     # Insert all test cases
     for test_case in test_cases:
-        row_count = db.upsert_rows(conn, 'case_test_table', [test_case['row_data']], use_primary_key=True)
+        row_count = db.upsert_rows(pg_conn, 'case_test_table', [test_case['row_data']], use_primary_key=True)
         assert row_count == 1, f"Expected 1 row to be inserted for test case with {test_case['expected_name']}"
 
     # Verify all rows were inserted correctly
-    result = db.select(conn, 'SELECT "Id", "UserName", "email", "PHONE" FROM case_test_table ORDER BY "Id"')
+    result = db.select(pg_conn, 'SELECT "Id", "UserName", "email", "PHONE" FROM case_test_table ORDER BY "Id"')
     assert len(result) == 5, 'Expected 5 rows to be inserted'
 
     # Check specific values
@@ -584,19 +584,19 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
     }
 
     # Get column names with exact case from the database
-    column_info = db.select(conn, """
+    column_info = db.select(pg_conn, """
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'case_test_table'
     """)
     db_columns = [row['column_name'] for row in column_info]
 
     # Important: Use exact case from the database for update columns
-    db.upsert_rows(conn, 'case_test_table', [update_row],
+    db.upsert_rows(pg_conn, 'case_test_table', [update_row],
                    use_primary_key=True,
                    update_cols_always=['UserName', 'email'])
 
     # Verify update worked
-    result = db.select_row(conn, 'SELECT "UserName", "email" FROM case_test_table WHERE "Id" = 1')
+    result = db.select_row(pg_conn, 'SELECT "UserName", "email" FROM case_test_table WHERE "Id" = 1')
     assert result['UserName'] == 'user1-updated', 'Update failed with case-insensitive key'
     assert result['email'] == 'updated1@example.com', 'Update failed with case-insensitive column'
 
@@ -614,25 +614,25 @@ def test_upsert_comprehensive_case_sensitivity(psql_docker, conn):
         }
     ]
 
-    db.upsert_rows(conn, 'case_test_table', batch_updates,
+    db.upsert_rows(pg_conn, 'case_test_table', batch_updates,
                    use_primary_key=True,
                    update_cols_always=['UserName', 'email'])  # Exact case to match database
 
     # Verify batch updates
-    result = db.select(conn, 'SELECT "Id", "UserName", "email" FROM case_test_table WHERE "Id" IN (2, 3) ORDER BY "Id"')
+    result = db.select(pg_conn, 'SELECT "Id", "UserName", "email" FROM case_test_table WHERE "Id" IN (2, 3) ORDER BY "Id"')
     assert len(result) == 2, 'Expected 2 rows to be updated'
     assert result[0]['UserName'] == 'user2-updated', 'Batch update 1 failed'
     assert result[1]['UserName'] == 'user3-updated', 'Batch update 2 failed'
 
     # Final verification: all rows should still be present with correct updates
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM case_test_table')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM case_test_table')
     assert count == 5, 'Expected all 5 rows to be present after updates'
 
 
-def test_upsert_error_handling(psql_docker, conn):
+def test_upsert_error_handling(psql_docker, pg_conn):
     """Test that upsert properly handles different types of updates and conflicts"""
     # Create a test table with a unique constraint
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_error_handling (
         id INTEGER PRIMARY KEY,
         name VARCHAR(50) UNIQUE NOT NULL,
@@ -641,21 +641,21 @@ def test_upsert_error_handling(psql_docker, conn):
     """)
 
     # Insert initial data
-    db.execute(conn, 'INSERT INTO test_error_handling VALUES (1, %s, %s)', 'Item1', 100)
-    db.execute(conn, 'INSERT INTO test_error_handling VALUES (2, %s, %s)', 'Item2', 200)
+    db.execute(pg_conn, 'INSERT INTO test_error_handling VALUES (1, %s, %s)', 'Item1', 100)
+    db.execute(pg_conn, 'INSERT INTO test_error_handling VALUES (2, %s, %s)', 'Item2', 200)
 
     # Test updating via PRIMARY KEY constraint
     pk_update = [{'id': 1, 'name': 'UpdatedItem1', 'value': 150}]
 
     row_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_error_handling',
         pk_update,
         update_cols_always=['name', 'value']
     )
 
     # Verify the row was updated via PRIMARY KEY
-    result = db.select_row(conn, 'SELECT name, value FROM test_error_handling WHERE id = 1')
+    result = db.select_row(pg_conn, 'SELECT name, value FROM test_error_handling WHERE id = 1')
     assert result.name == 'UpdatedItem1', 'Row should be updated by ID'
     assert result.value == 150, 'Value should be updated'
 
@@ -663,7 +663,7 @@ def test_upsert_error_handling(psql_docker, conn):
     unique_update = [{'id': 3, 'name': 'Item2', 'value': 250}]
 
     row_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_error_handling',
         unique_update,
         constraint_name='test_error_handling_name_key',
@@ -671,7 +671,7 @@ def test_upsert_error_handling(psql_docker, conn):
     )
 
     # Verify the row was updated via UNIQUE constraint
-    result = db.select_row(conn, 'SELECT id, value FROM test_error_handling WHERE name = %s', 'Item2')
+    result = db.select_row(pg_conn, 'SELECT id, value FROM test_error_handling WHERE name = %s', 'Item2')
     assert result.id == 3, 'ID should be updated when using name as conflict key'
     assert result.value == 250, 'Value should be updated'
 
@@ -679,14 +679,14 @@ def test_upsert_error_handling(psql_docker, conn):
     new_row = [{'id': 4, 'name': 'Item4', 'value': 400}]
 
     row_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_error_handling',
         new_row,
         update_cols_always=['name', 'value']
     )
 
     # Verify the new row was inserted
-    result = db.select_row(conn, 'SELECT name, value FROM test_error_handling WHERE id = 4')
+    result = db.select_row(pg_conn, 'SELECT name, value FROM test_error_handling WHERE id = 4')
     assert result.name == 'Item4', 'New row should be inserted'
     assert result.value == 400, 'New row should have correct value'
 
@@ -696,7 +696,7 @@ def test_upsert_error_handling(psql_docker, conn):
 
     with pytest.raises(Exception) as excinfo:
         db.upsert_rows(
-            conn,
+            pg_conn,
             'test_error_handling',
             conflict_row,
             update_cols_always=['name', 'value']
@@ -718,7 +718,7 @@ def test_upsert_error_handling(psql_docker, conn):
     for row in rows_with_mixed_conflicts:
         try:
             db.upsert_rows(
-                conn,
+                pg_conn,
                 'test_error_handling',
                 [row],  # Single row at a time
                 update_cols_always=['name', 'value']
@@ -729,20 +729,20 @@ def test_upsert_error_handling(psql_docker, conn):
                 f'Unexpected error: {e}'
 
     # Verify the non-conflicting rows were inserted
-    result = db.select(conn, 'SELECT id, name, value FROM test_error_handling WHERE id IN (6, 8) ORDER BY id')
+    result = db.select(pg_conn, 'SELECT id, name, value FROM test_error_handling WHERE id IN (6, 8) ORDER BY id')
     assert len(result) == 2, 'Two new rows should be inserted'
     assert result[0]['name'] == 'Item6', 'Row with id=6 should be inserted'
     assert result[1]['name'] == 'Item8', 'Row with id=8 should be inserted'
 
     # Finally, verify that no row with id=7 exists (it should have failed)
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_error_handling WHERE id = 7')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_error_handling WHERE id = 7')
     assert count == 0, 'Conflicting row with id=7 should not be inserted'
 
 
-def test_upsert_with_constraint_name(psql_docker, conn):
+def test_upsert_with_constraint_name(psql_docker, pg_conn):
     """Test upsert using a constraint name instead of key columns"""
     # Create a test table with a named constraint
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_constraint (
         id INTEGER,
         name VARCHAR(50),
@@ -752,13 +752,13 @@ def test_upsert_with_constraint_name(psql_docker, conn):
     """)
 
     # Insert initial data
-    db.execute(conn, 'INSERT INTO test_constraint VALUES (1, %s, %s)', 'ConstraintTest', 100)
+    db.execute(pg_conn, 'INSERT INTO test_constraint VALUES (1, %s, %s)', 'ConstraintTest', 100)
 
     # Test upsert with constraint name
     rows = [{'id': 1, 'name': 'ConstraintTest', 'value': 200}]
 
     row_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_constraint',
         rows,
         constraint_name='test_unique_constraint',
@@ -766,14 +766,14 @@ def test_upsert_with_constraint_name(psql_docker, conn):
     )
 
     # Verify the row was updated
-    result = db.select_scalar(conn, 'SELECT value FROM test_constraint WHERE id = 1')
+    result = db.select_scalar(pg_conn, 'SELECT value FROM test_constraint WHERE id = 1')
     assert result == 200, 'Row should be updated using constraint-based conflict detection'
 
     # Test inserting a new row
     rows = [{'id': 2, 'name': 'ConstraintTest2', 'value': 300}]
 
     row_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_constraint',
         rows,
         constraint_name='test_unique_constraint',
@@ -781,11 +781,11 @@ def test_upsert_with_constraint_name(psql_docker, conn):
     )
 
     # Verify new row was inserted
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_constraint')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_constraint')
     assert count == 2, 'New row should be inserted'
 
 
-def test_upsert_with_standard_constraint(psql_docker, conn):
+def test_upsert_with_standard_constraint(psql_docker, pg_conn):
     """Test upsert behavior with regular constraint
 
     This test verifies that the upsert functionality correctly handles:
@@ -795,9 +795,9 @@ def test_upsert_with_standard_constraint(psql_docker, conn):
     4. With standard constraints (id, name), changing only value results in an update
     """
     # Create a test table for testing with a standard unique constraint
-    db.execute(conn, 'DROP TABLE IF EXISTS test_complex_constraint;')
+    db.execute(pg_conn, 'DROP TABLE IF EXISTS test_complex_constraint;')
 
-    db.execute(conn, """
+    db.execute(pg_conn, """
         CREATE TABLE test_complex_constraint (
             id INTEGER NOT NULL,
             name VARCHAR(100),
@@ -809,7 +809,7 @@ def test_upsert_with_standard_constraint(psql_docker, conn):
     # Add a standard unique constraint without expressions
     # This creates a constraint that only includes id and name, NOT value
     # A row with same id and name but different value SHOULD update the existing row
-    db.execute(conn, """
+    db.execute(pg_conn, """
         ALTER TABLE test_complex_constraint
         ADD CONSTRAINT complex_unique_constraint
         UNIQUE (id, name)
@@ -817,13 +817,13 @@ def test_upsert_with_standard_constraint(psql_docker, conn):
 
     # Test with the CONSTRAINT
     _test_complex_upsert_scenarios(
-        conn,
+        pg_conn,
         'test_complex_constraint',
         'complex_unique_constraint'
     )
 
 
-def test_upsert_with_complex_index(psql_docker, conn):
+def test_upsert_with_complex_index(psql_docker, pg_conn):
     """Test upsert behavior with complex unique index
 
     This test verifies that the upsert functionality correctly handles:
@@ -833,9 +833,9 @@ def test_upsert_with_complex_index(psql_docker, conn):
     4. Update of non-constrained columns when the constraint matches exactly
     """
     # Create a test table with a complex unique index
-    db.execute(conn, 'DROP TABLE IF EXISTS test_complex_index')
+    db.execute(pg_conn, 'DROP TABLE IF EXISTS test_complex_index')
 
-    db.execute(conn, """
+    db.execute(pg_conn, """
         CREATE TABLE test_complex_index (
             id INTEGER NOT NULL,
             name VARCHAR(100),
@@ -845,7 +845,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     """)
 
     # Create the unique index with expressions that include id, name and value
-    db.execute(conn, """
+    db.execute(pg_conn, """
         CREATE UNIQUE INDEX complex_unique_index
         ON test_complex_index (id, COALESCE(name, ''), COALESCE(value, -1))
     """)
@@ -859,13 +859,13 @@ def test_upsert_with_complex_index(psql_docker, conn):
     }
 
     # Insert the row
-    db.insert(conn, """
+    db.insert(pg_conn, """
         INSERT INTO test_complex_index (id, name, value, last_updated)
         VALUES (%s, %s, %s, %s)
     """, initial_row['id'], initial_row['name'], initial_row['value'], initial_row['last_updated'])
 
     # Verify initial state
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
     assert count == 1, 'Should have 1 row initially'
 
     # First test: Try to update with all constraint columns matching
@@ -878,7 +878,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_complex_index',
         [same_constraint_row],
         constraint_name='complex_unique_index',
@@ -886,11 +886,11 @@ def test_upsert_with_complex_index(psql_docker, conn):
     )
 
     # Verify we still have just 1 row (it was updated, not inserted)
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
     assert count == 1, 'Should still have 1 row after updating non-constraint column'
 
     # Verify last_updated was changed
-    updated_time = db.select_scalar(conn, 'SELECT last_updated FROM test_complex_index WHERE id = 1')
+    updated_time = db.select_scalar(pg_conn, 'SELECT last_updated FROM test_complex_index WHERE id = 1')
     assert updated_time.date() == datetime.date(2023, 3, 18), 'The last_updated field should be updated'
 
     # Second test: Now change one of the constraint columns (value)
@@ -903,7 +903,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_complex_index',
         [different_value_row],
         constraint_name='complex_unique_index',
@@ -911,11 +911,11 @@ def test_upsert_with_complex_index(psql_docker, conn):
     )
 
     # Verify we now have 2 rows (new one inserted because constraint didn't match)
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
     assert count == 2, 'Should have 2 rows after trying to update with different constraint value'
 
     # Verify both rows exist with different values
-    rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
+    rows = db.select(pg_conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
 
     assert len(rows) == 2, 'Should have 2 distinct rows'
     assert rows[0]['value'] == 100, 'First row should have original value=100'
@@ -932,7 +932,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_complex_index',
         [update_second_row],
         constraint_name='complex_unique_index',
@@ -940,11 +940,11 @@ def test_upsert_with_complex_index(psql_docker, conn):
     )
 
     # Verify we still have 2 rows (one updated, not inserted)
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_complex_index WHERE id = 1')
     assert count == 2, 'Should still have 2 rows after selective update'
 
     # Verify only the second row's timestamp was updated
-    rows = db.select(conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
+    rows = db.select(pg_conn, 'SELECT id, name, value, last_updated FROM test_complex_index WHERE id = 1 ORDER BY value')
 
     assert len(rows) == 2, 'Should still have 2 distinct rows'
     assert rows[0]['value'] == 100, 'First row should have original value'
@@ -953,7 +953,7 @@ def test_upsert_with_complex_index(psql_docker, conn):
     assert rows[1]['last_updated'].date() == datetime.date(2023, 3, 20), 'Second row should have updated timestamp'
 
 
-def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
+def _test_complex_upsert_scenarios(pg_conn, table_name, constraint_name):
     """Helper function to run the same test scenarios on different tables"""
     # Insert initial test row
     initial_row = {
@@ -963,11 +963,11 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
         'last_updated': datetime.datetime(2023, 3, 17, 17, 47, 15, 906191)
     }
     # Use insert rather than insert_row
-    db.insert(conn, f'INSERT INTO {table_name} (id, name, value, last_updated) VALUES (%s, %s, %s, %s)',
+    db.insert(pg_conn, f'INSERT INTO {table_name} (id, name, value, last_updated) VALUES (%s, %s, %s, %s)',
               initial_row['id'], initial_row['name'], initial_row['value'], initial_row['last_updated'])
 
     # Verify initial state
-    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
     assert count == 1, 'Should have 1 row initially'
 
     # Scenario 1: Update with matching constraint values
@@ -979,7 +979,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     }
 
     result = db.upsert_rows(
-        conn,
+        pg_conn,
         table_name,
         [update_same_constraint],
         constraint_name=constraint_name,
@@ -987,11 +987,11 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     )
 
     # Should still be only one row as it updated
-    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
     assert count == 1, 'Should still have 1 row after update with matching constraint'
 
     # Check the timestamp was updated
-    updated_time = db.select_scalar(conn, f'SELECT last_updated FROM {table_name} WHERE id = 1')
+    updated_time = db.select_scalar(pg_conn, f'SELECT last_updated FROM {table_name} WHERE id = 1')
     assert updated_time > initial_row['last_updated'], 'The last_updated field should be updated'
 
     # Scenario 2: Insert with different constraint value
@@ -1003,7 +1003,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         table_name,
         [different_value_row],
         constraint_name=constraint_name,
@@ -1011,32 +1011,32 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     )
 
     # With our standard constraint (id, name), changing just the value will UPDATE not INSERT
-    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+    count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
     assert count == 1, 'Should have 1 row after upsert (value is not part of constraint)'
 
     # Verify the value was updated
-    current_value = db.select_scalar(conn, f'SELECT value FROM {table_name} WHERE id = 1')
+    current_value = db.select_scalar(pg_conn, f'SELECT value FROM {table_name} WHERE id = 1')
     assert current_value == 200, 'Value should be updated to 200'
 
     # For the second part with complex index, this check will only pass
     # if we're using the second table with the index that includes value
     if 'complex_unique_index' in constraint_name:
-        rows = db.select(conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1 ORDER BY value')
+        rows = db.select(pg_conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1 ORDER BY value')
         assert len(rows) == 2, f'Expected 2 rows for {table_name} with constraint {constraint_name}'
         assert rows[0]['value'] == 100
         assert rows[1]['value'] == 200
 
         # For complex_unique_index, we expect 2 rows after updates
-        count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+        count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
         assert count == 2, f'Should have 2 rows for {table_name} with constraint {constraint_name}'
     else:
         # For the first table, we only expect one row since value isn't in the constraint
-        rows = db.select(conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1')
+        rows = db.select(pg_conn, f'SELECT id, name, value FROM {table_name} WHERE id = 1')
         assert len(rows) == 1, f'Expected 1 row for {table_name} with constraint {constraint_name}'
         assert rows[0]['value'] == 200
 
         # For complex_unique_constraint, we expect 1 row after updates
-        count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
+        count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 1')
         assert count == 1, f'Should have 1 row for {table_name} with constraint {constraint_name}'
 
     # Scenario 3: Update specific row by matching the constraint exactly
@@ -1048,7 +1048,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         table_name,
         [update_specific_row],
         constraint_name=constraint_name,
@@ -1058,7 +1058,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     # Row count depends on constraint type - will be checked in the next section
 
     # Check the timestamp was updated only for the row with value=200
-    last_updated_200 = db.select_scalar(conn,
+    last_updated_200 = db.select_scalar(pg_conn,
                                         f'SELECT last_updated FROM {table_name} WHERE id = 1 AND value = 200')
     assert last_updated_200.date() == datetime.date(2023, 3, 18), 'Only the targeted row should be updated'
 
@@ -1071,7 +1071,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         table_name,
         [null_value_row],
         constraint_name=constraint_name,
@@ -1079,7 +1079,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     )
 
     # Verify row was inserted
-    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
+    count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
     assert count == 1, 'Should have inserted row with NULL value'
 
     # Update the NULL value row
@@ -1091,7 +1091,7 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     }
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         table_name,
         [update_null_row],
         constraint_name=constraint_name,
@@ -1099,20 +1099,20 @@ def _test_complex_upsert_scenarios(conn, table_name, constraint_name):
     )
 
     # Should still have 1 row with id=2
-    count = db.select_scalar(conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
+    count = db.select_scalar(pg_conn, f'SELECT COUNT(*) FROM {table_name} WHERE id = 2')
     assert count == 1, 'Should still have 1 row with id=2 after update'
 
     # Check timestamp was updated
-    last_updated_null = db.select_scalar(conn,
+    last_updated_null = db.select_scalar(pg_conn,
                                          f'SELECT last_updated FROM {table_name} WHERE id = 2')
     assert last_updated_null.date() == datetime.date(2023, 3, 20), 'Row with NULL should be updated'
 
 
-def test_upsert_with_column_order_mismatch(psql_docker, conn):
+def test_upsert_with_column_order_mismatch(psql_docker, pg_conn):
     """Test that upsert correctly handles when column order in dictionaries doesn't match DB schema order"""
 
     # Create a test table with a specific column order
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_column_order (
         id SERIAL PRIMARY KEY,
         last_name VARCHAR(50) NOT NULL,
@@ -1141,11 +1141,11 @@ def test_upsert_with_column_order_mismatch(psql_docker, conn):
     ]
 
     # Insert with mismatched column order
-    row_count = db.upsert_rows(conn, 'test_column_order', rows)
+    row_count = db.upsert_rows(pg_conn, 'test_column_order', rows)
     assert row_count == 2, 'Expected 2 rows to be inserted'
 
     # Verify all data was inserted correctly despite the column order mismatch
-    result = db.select(conn, 'SELECT id, first_name, last_name, age, email FROM test_column_order ORDER BY id')
+    result = db.select(pg_conn, 'SELECT id, first_name, last_name, age, email FROM test_column_order ORDER BY id')
 
     assert len(result) == 2, 'Expected 2 rows to be returned'
 
@@ -1180,7 +1180,7 @@ def test_upsert_with_column_order_mismatch(psql_docker, conn):
 
     # Update with mismatched column order
     update_count = db.upsert_rows(
-        conn,
+        pg_conn,
         'test_column_order',
         update_rows,
         use_primary_key=True,
@@ -1189,7 +1189,7 @@ def test_upsert_with_column_order_mismatch(psql_docker, conn):
     assert update_count == 2, 'Expected 2 rows to be updated'
 
     # Verify updates were applied correctly despite column order differences
-    result = db.select(conn, 'SELECT id, last_name, age FROM test_column_order ORDER BY id')
+    result = db.select(pg_conn, 'SELECT id, last_name, age FROM test_column_order ORDER BY id')
 
     assert result[0]['id'] == 1
     assert result[0]['last_name'] == 'Doe-Updated'
@@ -1200,10 +1200,10 @@ def test_upsert_with_column_order_mismatch(psql_docker, conn):
     assert result[1]['age'] == 29
 
 
-def test_upsert_primary_key_filtering(psql_docker, conn):
+def test_upsert_primary_key_filtering(psql_docker, pg_conn):
     """Test that primary key columns are filtered from update_cols_always and update_cols_ifnull."""
     # Create a test table with a composite primary key
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_pk_filtering (
         id INTEGER,
         code VARCHAR(10),
@@ -1214,7 +1214,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     """)
 
     # Insert initial data
-    db.insert(conn, 'INSERT INTO test_pk_filtering VALUES (%s, %s, %s, %s)',
+    db.insert(pg_conn, 'INSERT INTO test_pk_filtering VALUES (%s, %s, %s, %s)',
               1, 'ABC', 'Initial description', 100)
 
     # Attempt to update with primary keys in the update columns
@@ -1229,7 +1229,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
 
     # Include primary keys in both update_cols_always and update_cols_ifnull
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_pk_filtering',
         update_data,
         use_primary_key=True,
@@ -1238,7 +1238,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     )
 
     # Verify that the row was updated, but primary keys were NOT changed
-    result = db.select_row(conn, "SELECT * FROM test_pk_filtering WHERE id = 1 AND code = 'ABC'")
+    result = db.select_row(pg_conn, "SELECT * FROM test_pk_filtering WHERE id = 1 AND code = 'ABC'")
 
     # Primary keys should remain unchanged
     assert result.id == 1, "Primary key 'id' should not be updated"
@@ -1249,7 +1249,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     assert result.value == 200, 'Value should be updated'
 
     # Check total row count to ensure no new row was inserted
-    count = db.select_scalar(conn, 'SELECT COUNT(*) FROM test_pk_filtering')
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_pk_filtering')
     assert count == 1, 'Should still have only one row (update, not insert)'
 
     # Edge case 1: When ALL columns in update sets are primary keys
@@ -1263,7 +1263,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
 
     # Only include primary keys in update columns
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_pk_filtering',
         pk_only_update,
         use_primary_key=True,
@@ -1273,21 +1273,21 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
 
     # Verify nothing was updated since all update columns were filtered out
     # The first row should remain unchanged
-    result = db.select_row(conn, "SELECT * FROM test_pk_filtering WHERE id = 1 AND code = 'ABC'")
+    result = db.select_row(pg_conn, "SELECT * FROM test_pk_filtering WHERE id = 1 AND code = 'ABC'")
     assert result.id == 1, 'Primary key should remain unchanged'
     assert result.code == 'ABC', 'Primary key should remain unchanged'
     assert result.description == 'Updated description', 'Description should remain as previously updated'
     assert result.value == 200, 'Value should remain as previously updated'
 
     # Also verify the new row with id=3 was inserted (not updated since update cols were filtered)
-    new_row = db.select_row(conn, "SELECT * FROM test_pk_filtering WHERE id = 3 AND code = 'DEF'")
+    new_row = db.select_row(pg_conn, "SELECT * FROM test_pk_filtering WHERE id = 3 AND code = 'DEF'")
     assert new_row.id == 3, 'New row should be inserted with id=3'
     assert new_row.code == 'DEF', "New row should be inserted with code='DEF'"
     assert new_row.description == 'Initial description', 'Description should be as specified'
     assert new_row.value == 100, 'Value should be as specified'
 
     # Edge case 2: Primary keys with similar column names
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_similar_pk_cols (
         user_id INTEGER,
         user_id_type VARCHAR(10),
@@ -1297,7 +1297,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     """)
 
     # Insert initial data
-    db.insert(conn, 'INSERT INTO test_similar_pk_cols VALUES (%s, %s, %s)',
+    db.insert(pg_conn, 'INSERT INTO test_similar_pk_cols VALUES (%s, %s, %s)',
               1, 'LOCAL', 'Initial user description')
 
     # Try to update with primary keys that have similar names
@@ -1308,7 +1308,7 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     }]
 
     db.upsert_rows(
-        conn,
+        pg_conn,
         'test_similar_pk_cols',
         similar_cols_update,
         use_primary_key=True,
@@ -1317,29 +1317,29 @@ def test_upsert_primary_key_filtering(psql_docker, conn):
     )
 
     # Verify that the row was updated but primary keys remained unchanged
-    result = db.select_row(conn, "SELECT * FROM test_similar_pk_cols WHERE user_id = 1 AND user_id_type = 'LOCAL'")
+    result = db.select_row(pg_conn, "SELECT * FROM test_similar_pk_cols WHERE user_id = 1 AND user_id_type = 'LOCAL'")
     assert result.user_id == 1, "Primary key 'user_id' should not be updated"
     assert result.user_id_type == 'LOCAL', "Primary key 'user_id_type' should not be updated"
     assert result.user_desc == 'Updated user description', 'Description should be updated'
 
 
-def test_upsert_with_smartcase_update_columns(psql_docker, conn):
+def test_upsert_with_smartcase_update_columns(psql_docker, pg_conn):
     """Test upsert with update_cols_always provided in SmartCase while database columns are lower-case.
 
     This test ensures that the upsert operation correctly maps SmartCase
     column names (e.g., 'Value') to the lower-case database columns (e.g., 'value')
     for update operations.
     """
-    db.execute(conn, """
+    db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_smart_case (
         name VARCHAR(50) PRIMARY KEY,
         value INTEGER NOT NULL
     )
     """)
-    db.insert(conn, 'INSERT INTO test_smart_case (name, value) VALUES (%s, %s)', 'SmartCaseTest', 100)
+    db.insert(pg_conn, 'INSERT INTO test_smart_case (name, value) VALUES (%s, %s)', 'SmartCaseTest', 100)
     rows = [{'name': 'SmartCaseTest', 'value': 200}]
-    row_count = db.upsert_rows(conn, 'test_smart_case', rows, use_primary_key=True, update_cols_always=['Value'])
-    result = db.select_row(conn, 'SELECT name, value FROM test_smart_case WHERE name = %s', 'SmartCaseTest')
+    row_count = db.upsert_rows(pg_conn, 'test_smart_case', rows, use_primary_key=True, update_cols_always=['Value'])
+    result = db.select_row(pg_conn, 'SELECT name, value FROM test_smart_case WHERE name = %s', 'SmartCaseTest')
     assert result['value'] == 200, 'Row should be updated even when update_cols_always is given in SmartCase'
 
 

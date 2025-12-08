@@ -9,10 +9,10 @@ import pandas as pd
 from database.options import iterdict_data_loader, pandas_numpy_data_loader
 
 
-def test_numpy_pandas_types_pandas_loader(psql_docker, conn):
+def test_numpy_pandas_types_pandas_loader(psql_docker, pg_conn):
     """Test numpy and pandas type handling with PostgreSQL using pandas data loader"""
 
-    conn.options.data_loader = pandas_numpy_data_loader
+    pg_conn.options.data_loader = pandas_numpy_data_loader
 
     np_int = np.int64(42)
     np_float = np.float64(math.pi)
@@ -36,7 +36,7 @@ def test_numpy_pandas_types_pandas_loader(psql_docker, conn):
     """
     insert_params = [np_int, np_float, list(np_array), pd_series[0], pd_na]
 
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         tx.execute(f'DROP TABLE IF EXISTS {table_name}')
 
         tx.execute(create_sql)
@@ -55,10 +55,10 @@ def test_numpy_pandas_types_pandas_loader(psql_docker, conn):
         assert pd.isna(result['null_col'].iloc[0])
 
 
-def test_numpy_pandas_types_iterdict_loader(psql_docker, conn):
+def test_numpy_pandas_types_iterdict_loader(psql_docker, pg_conn):
     """Test numpy and pandas type handling with PostgreSQL using iterdict data loader"""
 
-    conn.options.data_loader = iterdict_data_loader
+    pg_conn.options.data_loader = iterdict_data_loader
 
     np_int = np.int64(42)
     np_float = np.float64(math.pi)
@@ -82,7 +82,7 @@ def test_numpy_pandas_types_iterdict_loader(psql_docker, conn):
     """
     insert_params = [np_int, np_float, list(np_array), pd_series[0], pd_na]
 
-    with db.transaction(conn) as tx:
+    with db.transaction(pg_conn) as tx:
         tx.execute(f'DROP TABLE IF EXISTS {table_name}')
 
         tx.execute(create_sql)
