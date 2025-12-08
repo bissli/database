@@ -1,57 +1,607 @@
 """
-SQL formatting and parameter handling utilities.
+SQL parameter processing with single-pass architecture.
 
-This module provides a single entry point for all SQL parameter processing:
-- `prepare_query(cn, sql, args)` - Main function, handles everything
+This module provides SQL parameter handling through a single-pass tokenization
+and transformation pipeline:
 
-Individual functions are also exported for backwards compatibility and testing:
-- `standardize_placeholders()` - Convert %s to ? for SQLite
+    SQL + Args → Tokenize → Analyze Context → Normalize Args → Build Output
+                  (once)      (one pass)        (unified)      (single pass)
+
+Main entry points:
+- `prepare_query(cn, sql, args)` - Full processing with connection dialect
+- `process_sql_params(sql, args, dialect)` - Core processing without connection
+
+Individual functions exported for backwards compatibility:
+- `standardize_placeholders()` - Convert %s ↔ ? for dialect
 - `handle_in_clause_params()` - Expand IN clause parameters
 - `handle_null_is_operators()` - Convert IS %s with None to IS NULL
 - `escape_percent_signs_in_literals()` - Escape % in string literals
 - `has_placeholders()` - Check if SQL has placeholders
 - `quote_identifier()` - Quote table/column names
 """
-import logging
 import re
-from functools import wraps
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any
-
-from more_itertools import collapse
 
 from libb import isiterable, issequence
 
-logger = logging.getLogger(__name__)
+# =============================================================================
+# Data Structures
+# =============================================================================
 
-# Pre-compiled regex patterns
-_PATTERNS = {
-    'positional': re.compile(r'%s|\?'),
-    'named': re.compile(r'%\([^)]+\)s'),
-    'in_clause': re.compile(r'\bIN\s+(%s|\(%s\)|\?|\(\?\))', re.IGNORECASE),
-    'in_clause_named': re.compile(r'(?i)\b(in)\s+(?:\()?(%\([^)]+\)s)(?:\))?'),
-    'null_is_positional': re.compile(r'\b(IS\s+NOT|IS)\s+(%s|\?)', re.IGNORECASE),
-    'null_is_named': re.compile(r'\b(IS\s+NOT|IS)\s+(%\([^)]+\)s)\b', re.IGNORECASE),
-    'string_literal': re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\""),
-    'param_name': re.compile(r'%\(([^)]+)\)s'),
-    'regexp_replace': re.compile(r'(regexp_replace\s*\(\s*[^,]+\s*,\s*[\'"])(.*?)([\'"].*?\))', re.IGNORECASE),
-}
+
+class TokenType(Enum):
+    """Token types identified during SQL parsing."""
+    SQL_TEXT = auto()
+    STRING_LITERAL = auto()
+    POSITIONAL_PH = auto()      # %s or ?
+    NAMED_PH = auto()           # %(name)s
+    IN_KEYWORD = auto()
+    IS_KEYWORD = auto()
+    IS_NOT_KEYWORD = auto()
+    REGEXP_FUNC = auto()
+    OPEN_PAREN = auto()
+    CLOSE_PAREN = auto()
+
+
+@dataclass(slots=True)
+class Token:
+    """Token from SQL parsing."""
+    type: TokenType
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(slots=True)
+class PlaceholderInfo:
+    """Information about a placeholder and its context."""
+    token: Token
+    index: int                      # Position in args (-1 for named)
+    name: str | None = None         # For %(name)s
+    context: str = 'value'          # 'value', 'in_clause', 'is_null', 'is_not_null'
+    in_parentheses: bool = False    # Already in parens: IN (%s)
+
+
+# =============================================================================
+# Consolidated Regex Patterns (4 patterns)
+# =============================================================================
+
+# Master tokenization pattern - captures all token types in one scan
+# Note: regexp pattern handles string literals inside function to avoid matching
+# parentheses within regex patterns like '(CN|US)'
+_TOKENIZE = re.compile(r"""
+    (?P<string>'(?:[^']|'')*'|"(?:[^"]|"")*")
+    |(?P<regexp>regexp_replace\s*\((?:[^()'"]|'(?:[^']|'')*'|"(?:[^"]|"")*"|\((?:[^()'"]|'(?:[^']|'')*'|"(?:[^"]|"")*")*\))*\))
+    |(?P<named>%\((?P<pname>[^)]+)\)s)
+    |(?P<percent_s>%s)
+    |(?P<qmark>\?)
+    |(?P<is_not>\bIS\s+NOT\b)
+    |(?P<is_kw>\bIS\b)
+    |(?P<in_kw>\bIN\b)
+    |(?P<open_paren>\()
+    |(?P<close_paren>\))
+""", re.IGNORECASE | re.VERBOSE)
+
+# Extract parameter name from %(name)s
+_PARAM_NAME = re.compile(r'%\(([^)]+)\)s')
+
+# Find unescaped percent signs in string content
+_UNESCAPED_PERCENT = re.compile(r'(?<!%)%(?![%s(])')
+
+# Quick placeholder check
+_HAS_PLACEHOLDER = re.compile(r'%s|\?|%\([^)]+\)s')
+
+
+# =============================================================================
+# Core Functions
+# =============================================================================
+
+def tokenize_sql(sql: str) -> list[Token]:
+    """Parse SQL into tokens in a single pass.
+
+    Parameters
+        sql: SQL query string
+
+    Returns
+        List of tokens preserving all SQL text
+    """
+    tokens = []
+    last_end = 0
+
+    for match in _TOKENIZE.finditer(sql):
+        start, end = match.span()
+
+        # Capture SQL text between tokens
+        if start > last_end:
+            tokens.append(Token(
+                type=TokenType.SQL_TEXT,
+                text=sql[last_end:start],
+                start=last_end,
+                end=start
+            ))
+
+        # Determine token type from matched group
+        if match.group('string'):
+            ttype = TokenType.STRING_LITERAL
+        elif match.group('regexp'):
+            ttype = TokenType.REGEXP_FUNC
+        elif match.group('named'):
+            ttype = TokenType.NAMED_PH
+        elif match.group('percent_s'):
+            ttype = TokenType.POSITIONAL_PH
+        elif match.group('qmark'):
+            ttype = TokenType.POSITIONAL_PH
+        elif match.group('is_not'):
+            ttype = TokenType.IS_NOT_KEYWORD
+        elif match.group('is_kw'):
+            ttype = TokenType.IS_KEYWORD
+        elif match.group('in_kw'):
+            ttype = TokenType.IN_KEYWORD
+        elif match.group('open_paren'):
+            ttype = TokenType.OPEN_PAREN
+        elif match.group('close_paren'):
+            ttype = TokenType.CLOSE_PAREN
+        else:
+            continue
+
+        tokens.append(Token(type=ttype, text=match.group(0), start=start, end=end))
+        last_end = end
+
+    # Capture trailing SQL text
+    if last_end < len(sql):
+        tokens.append(Token(
+            type=TokenType.SQL_TEXT,
+            text=sql[last_end:],
+            start=last_end,
+            end=len(sql)
+        ))
+
+    return tokens
+
+
+def analyze_placeholders(tokens: list[Token]) -> list[PlaceholderInfo]:
+    """Analyze placeholder context in single forward pass.
+
+    Determines whether each placeholder is:
+    - Regular value placeholder
+    - IN clause placeholder (needs expansion)
+    - IS NULL placeholder (value may be None)
+
+    Parameters
+        tokens: List of tokens from tokenize_sql()
+
+    Returns
+        List of PlaceholderInfo for each placeholder found
+    """
+    placeholders = []
+    positional_index = 0
+
+    prev_keyword: TokenType | None = None
+    in_paren_after_in = False
+    i = 0
+
+    while i < len(tokens):
+        token = tokens[i]
+
+        if token.type == TokenType.IN_KEYWORD:
+            prev_keyword = TokenType.IN_KEYWORD
+            # Check if next significant token is open paren
+            j = i + 1
+            while j < len(tokens) and tokens[j].type == TokenType.SQL_TEXT and not tokens[j].text.strip():
+                j += 1
+            if j < len(tokens) and tokens[j].type == TokenType.OPEN_PAREN:
+                in_paren_after_in = True
+
+        elif token.type in {TokenType.IS_KEYWORD, TokenType.IS_NOT_KEYWORD}:
+            prev_keyword = token.type
+
+        elif token.type == TokenType.OPEN_PAREN:
+            pass  # Already handled in IN_KEYWORD check
+
+        elif token.type == TokenType.CLOSE_PAREN:
+            in_paren_after_in = False
+
+        elif token.type == TokenType.POSITIONAL_PH:
+            context = _determine_context(prev_keyword)
+            placeholders.append(PlaceholderInfo(
+                token=token,
+                index=positional_index,
+                name=None,
+                context=context,
+                in_parentheses=in_paren_after_in
+            ))
+            positional_index += 1
+            prev_keyword = None
+            in_paren_after_in = False
+
+        elif token.type == TokenType.NAMED_PH:
+            param_name = _PARAM_NAME.search(token.text).group(1)
+            context = _determine_context(prev_keyword)
+            placeholders.append(PlaceholderInfo(
+                token=token,
+                index=-1,
+                name=param_name,
+                context=context,
+                in_parentheses=in_paren_after_in
+            ))
+            prev_keyword = None
+            in_paren_after_in = False
+
+        elif token.type == TokenType.SQL_TEXT:
+            # Reset keyword state on significant SQL text
+            if token.text.strip() and prev_keyword not in {TokenType.IN_KEYWORD, TokenType.IS_KEYWORD, TokenType.IS_NOT_KEYWORD}:
+                prev_keyword = None
+
+        i += 1
+
+    return placeholders
+
+
+def _determine_context(prev_keyword: TokenType | None) -> str:
+    """Determine placeholder context from preceding keyword."""
+    if prev_keyword == TokenType.IN_KEYWORD:
+        return 'in_clause'
+    if prev_keyword == TokenType.IS_KEYWORD:
+        return 'is_null'
+    if prev_keyword == TokenType.IS_NOT_KEYWORD:
+        return 'is_not_null'
+    return 'value'
+
+
+def normalize_args(
+    sql: str,
+    args: tuple | list | dict | Any,
+    placeholders: list[PlaceholderInfo]
+) -> tuple | dict:
+    """Normalize all input formats to canonical form.
+
+    Handles:
+    - Direct list: [1, 2, 3] for single IN clause
+    - Nested tuple: [(1, 2, 3)]
+    - Double-nested: [[(1, 2, 3)]]
+    - Single item: [101]
+    - Named dict: {'ids': [1,2,3]}
+    - Mixed: (date1, date2, (1,2,3))
+
+    Parameters
+        sql: Original SQL string
+        args: Original arguments
+        placeholders: List of placeholder info
+
+    Returns
+        Normalized args matching placeholder count
+    """
+    if args is None or not args:
+        return args
+
+    # Dict args - return as-is
+    if isinstance(args, dict):
+        return args
+
+    # Unwrap single-element containing dict
+    if isinstance(args, (list, tuple)) and len(args) == 1 and isinstance(args[0], dict):
+        return args[0]
+
+    in_clause_count = sum(1 for p in placeholders if p.context == 'in_clause')
+    total_placeholders = len(placeholders)
+
+    # Case 1: Unwrap nested parameters [(a, b, c)] -> (a, b, c)
+    if (isinstance(args, (list, tuple)) and len(args) == 1
+            and issequence(args[0]) and not isinstance(args[0], str)):
+        inner = args[0]
+        if len(inner) == total_placeholders:
+            return tuple(inner)
+
+    # Case 2: Direct list [1, 2, 3] for single IN clause
+    if (in_clause_count == 1 and total_placeholders == 1
+            and isiterable(args) and not isinstance(args, str)):
+        if all(not isiterable(a) or isinstance(a, str) for a in args):
+            return (tuple(args),)
+
+    # Case 3: Single item [101] -> wrap for IN clause
+    if (isinstance(args, list) and len(args) == 1
+            and in_clause_count == 1 and total_placeholders == 1):
+        item = args[0]
+        if not isiterable(item) or isinstance(item, str):
+            return ((item,),)
+
+    # Case 4: Double-nested [[(1, 2, 3)]] -> flatten once
+    if (isinstance(args, (list, tuple)) and len(args) == 1
+        and issequence(args[0]) and len(args[0]) == 1
+            and issequence(args[0][0])):
+        return (tuple(args[0][0]),)
+
+    # Case 5: Multiple IN clauses with direct lists
+    if isinstance(args, list) and in_clause_count > 1:
+        normalized = []
+        for i, arg in enumerate(args):
+            ph_info = placeholders[i] if i < len(placeholders) else None
+            if ph_info and ph_info.context == 'in_clause' and isinstance(arg, list):
+                normalized.append(tuple(arg))
+            else:
+                normalized.append(arg)
+        return tuple(normalized)
+
+    return tuple(args) if isinstance(args, list) else args
+
+
+def build_sql(
+    tokens: list[Token],
+    placeholders: list[PlaceholderInfo],
+    args: tuple | dict,
+    dialect: str
+) -> tuple[str, tuple | dict]:
+    """Build final SQL and args in single forward pass.
+
+    Parameters
+        tokens: Tokenized SQL
+        placeholders: Placeholder info list
+        args: Normalized arguments
+        dialect: Database dialect ('postgresql' or 'sqlite')
+
+    Returns
+        Tuple of (processed_sql, processed_args)
+    """
+    result_parts = []
+    is_dict_args = isinstance(args, dict)
+    result_args = {} if is_dict_args else []
+    placeholder_idx = 0
+    args_idx = 0
+
+    for token in tokens:
+        if token.type == TokenType.STRING_LITERAL:
+            # Escape percent signs in literals for PostgreSQL
+            if dialect == 'postgresql':
+                result_parts.append(_escape_percent_in_literal(token.text))
+            else:
+                result_parts.append(token.text)
+
+        elif token.type == TokenType.REGEXP_FUNC:
+            # Preserve regexp_replace unchanged
+            result_parts.append(token.text)
+
+        elif token.type == TokenType.POSITIONAL_PH:
+            if placeholder_idx < len(placeholders):
+                ph = placeholders[placeholder_idx]
+                sql_part, new_args = _process_positional_placeholder(
+                    ph, args, args_idx, dialect
+                )
+                result_parts.append(sql_part)
+                result_args.extend(new_args)
+                args_idx += 1
+                placeholder_idx += 1
+            else:
+                result_parts.append(_dialect_placeholder(dialect))
+
+        elif token.type == TokenType.NAMED_PH:
+            if not is_dict_args:
+                # Named placeholders unchanged when args is not a dict
+                result_parts.append(token.text)
+                placeholder_idx += 1
+            elif placeholder_idx < len(placeholders):
+                ph = placeholders[placeholder_idx]
+                sql_part, arg_updates = _process_named_placeholder(ph, args, dialect)
+                result_parts.append(sql_part)
+                result_args.update(arg_updates)
+                placeholder_idx += 1
+            else:
+                result_parts.append(token.text)
+
+        elif token.type in {TokenType.IS_KEYWORD, TokenType.IS_NOT_KEYWORD}:
+            # Check if next placeholder has None value
+            next_ph_idx = placeholder_idx
+            if next_ph_idx < len(placeholders):
+                ph = placeholders[next_ph_idx]
+                value = _get_placeholder_value(ph, args, args_idx)
+                if value is None and ph.context in {'is_null', 'is_not_null'}:
+                    result_parts.append(token.text)
+                else:
+                    result_parts.append(token.text)
+            else:
+                result_parts.append(token.text)
+
+        elif token.type == TokenType.IN_KEYWORD:
+            # Just append the IN keyword as-is
+            result_parts.append(token.text)
+
+        elif token.type == TokenType.OPEN_PAREN:
+            # Always keep open parens - expansion handles not duplicating
+            result_parts.append(token.text)
+
+        elif token.type == TokenType.CLOSE_PAREN:
+            # Skip close paren if placeholder added it
+            result_parts.append(token.text)
+
+        else:
+            result_parts.append(token.text)
+
+    final_sql = ''.join(result_parts)
+    final_args = result_args if is_dict_args else tuple(result_args)
+
+    return final_sql, final_args
+
+
+def _get_placeholder_value(ph: PlaceholderInfo, args: tuple | dict, args_idx: int) -> Any:
+    """Get value for a placeholder from args."""
+    if isinstance(args, dict):
+        return args.get(ph.name)
+    if args_idx < len(args):
+        return args[args_idx]
+    return None
+
+
+def _process_positional_placeholder(
+    ph: PlaceholderInfo,
+    args: tuple,
+    args_idx: int,
+    dialect: str
+) -> tuple[str, list]:
+    """Process a positional placeholder."""
+    placeholder = _dialect_placeholder(dialect)
+
+    if args_idx >= len(args):
+        return placeholder, []
+
+    value = args[args_idx]
+
+    # Handle IS NULL / IS NOT NULL
+    if ph.context in {'is_null', 'is_not_null'} and value is None:
+        return 'NULL', []
+
+    # Handle IN clause
+    if ph.context == 'in_clause':
+        return _expand_in_clause(value, dialect, ph.in_parentheses)
+
+    return placeholder, [value]
+
+
+def _expand_in_clause(
+    value: Any,
+    dialect: str,
+    already_in_parens: bool
+) -> tuple[str, list]:
+    """Expand IN clause value to multiple placeholders."""
+    placeholder = _dialect_placeholder(dialect)
+
+    if issequence(value) and not isinstance(value, str):
+        # Unwrap single-nested sequences
+        if len(value) == 1 and issequence(value[0]) and not isinstance(value[0], str):
+            value = value[0]
+
+        # Empty sequence -> NULL
+        if not value:
+            return 'NULL' if already_in_parens else '(NULL)', []
+
+        # Expand to multiple placeholders
+        placeholders = ', '.join([placeholder] * len(value))
+        if already_in_parens:
+            return placeholders, list(value)
+        return f'({placeholders})', list(value)
+
+    # Single value
+    if already_in_parens:
+        return placeholder, [value]
+    return f'({placeholder})', [value]
+
+
+def _process_named_placeholder(
+    ph: PlaceholderInfo,
+    args: dict,
+    dialect: str
+) -> tuple[str, dict]:
+    """Process a named placeholder."""
+    name = ph.name
+
+    if name not in args:
+        return ph.token.text, {}
+
+    value = args[name]
+
+    # Handle IS NULL / IS NOT NULL
+    if ph.context in {'is_null', 'is_not_null'} and value is None:
+        return 'NULL', {}
+
+    # Handle IN clause
+    if ph.context == 'in_clause':
+        return _expand_named_in_clause(name, value, ph.in_parentheses)
+
+    return ph.token.text, {name: value}
+
+
+def _expand_named_in_clause(
+    name: str,
+    value: Any,
+    already_in_parens: bool
+) -> tuple[str, dict]:
+    """Expand named IN clause to multiple named placeholders."""
+    if not issequence(value) or isinstance(value, str):
+        return f'%({name})s', {name: value}
+
+    # Unwrap nested
+    if len(value) == 1 and issequence(value[0]) and not isinstance(value[0], str):
+        value = list(value[0])
+
+    # Empty -> NULL
+    if not value:
+        return 'NULL' if already_in_parens else '(NULL)', {}
+
+    # Generate indexed placeholders
+    placeholders = []
+    new_args = {}
+    for i, v in enumerate(value):
+        key = f'{name}_{i}'
+        placeholders.append(f'%({key})s')
+        new_args[key] = v
+
+    result = ', '.join(placeholders)
+    if already_in_parens:
+        return result, new_args
+    return f'({result})', new_args
+
+
+def _dialect_placeholder(dialect: str) -> str:
+    """Return placeholder for dialect."""
+    return '?' if dialect == 'sqlite' else '%s'
+
+
+def _escape_percent_in_literal(literal: str) -> str:
+    """Escape unescaped percent signs in string literal."""
+    quote = literal[0]
+    content = literal[1:-1]
+    escaped = _UNESCAPED_PERCENT.sub('%%', content)
+    return f'{quote}{escaped}{quote}'
+
+
+# =============================================================================
+# Main Entry Points
+# =============================================================================
+
+def process_sql_params(
+    sql: str,
+    args: tuple | list | dict | Any,
+    dialect: str = 'postgresql'
+) -> tuple[str, tuple | dict]:
+    """Process SQL and parameters in a single pass.
+
+    Parameters
+        sql: SQL query string with placeholders
+        args: Query parameters (tuple, list, dict, or scalar)
+        dialect: Database dialect ('postgresql' or 'sqlite')
+
+    Returns
+        Tuple of (processed_sql, processed_args)
+    """
+    if not sql:
+        return sql, args
+
+    if not args:
+        return sql, args
+
+    if '%' not in sql and '?' not in sql:
+        return sql, ()
+
+    if not _HAS_PLACEHOLDER.search(sql):
+        return sql, ()
+
+    tokens = tokenize_sql(sql)
+    placeholders = analyze_placeholders(tokens)
+
+    if not placeholders:
+        return sql, ()
+
+    normalized_args = normalize_args(sql, args, placeholders)
+    return build_sql(tokens, placeholders, normalized_args, dialect)
 
 
 def prepare_query(cn: Any, sql: str, args: tuple | list | dict | Any) -> tuple[str, Any]:
-    """Single entry point for all SQL/parameter processing.
-
-    This function handles:
-    1. Empty/placeholder-less queries (early exit)
-    2. Parameter unwrapping for nested tuples
-    3. IN clause expansion
-    4. IS NULL operator handling
-    5. Placeholder standardization (SQLite: %s -> ?)
-    6. Type conversion (NumPy, Pandas, PyArrow)
+    """Process SQL and parameters using connection's dialect.
 
     Parameters
-        cn: Database connection (used to detect dialect)
+        cn: Database connection
         sql: SQL query string
-        args: Parameters (tuple, list, dict, or scalar)
+        args: Query parameters
 
     Returns
         Tuple of (processed_sql, processed_args)
@@ -65,30 +615,29 @@ def prepare_query(cn: Any, sql: str, args: tuple | list | dict | Any) -> tuple[s
     from database.utils.connection_utils import get_dialect_name
     dialect = get_dialect_name(cn)
 
-    # Step 1: Unwrap nested parameters
-    args = _unwrap_args(sql, args)
+    sql, args = process_sql_params(sql, args, dialect)
 
-    # Step 2: Escape percent signs in string literals (PostgreSQL)
-    sql = escape_percent_signs_in_literals(sql)
-
-    # Step 3: Handle IS NULL operators
-    sql, args = handle_null_is_operators(sql, args)
-
-    # Step 4: Handle IN clause expansion
-    sql, args = handle_in_clause_params(sql, args, dialect=dialect)
-
-    # Step 5: Standardize placeholders for SQLite
-    sql = standardize_placeholders(sql, dialect=dialect)
-
-    # Step 6: Type conversion
+    # Type conversion for special types
     from database.types import TypeConverter
     args = TypeConverter.convert_params(args)
 
     return sql, args
 
 
+# =============================================================================
+# Backwards Compatible Public API
+# =============================================================================
+
+def process_query_parameters(cn: Any, sql: str, args: Any) -> tuple[str, Any]:
+    """Process SQL query parameters (backwards compatible).
+
+    This function wraps process_sql_params for backwards compatibility.
+    """
+    return prepare_query(cn, sql, args)
+
+
 def has_placeholders(sql: str | None) -> bool:
-    """Check if SQL has any parameter placeholders (%s, ?, %(name)s).
+    """Check if SQL has any parameter placeholders.
 
     Parameters
         sql: SQL query string
@@ -99,21 +648,18 @@ def has_placeholders(sql: str | None) -> bool:
     if not sql:
         return False
 
-    # Quick check before regex
     if '%' not in sql and '?' not in sql:
         return False
 
-    return bool(_PATTERNS['positional'].search(sql) or _PATTERNS['named'].search(sql))
+    return bool(_HAS_PLACEHOLDER.search(sql))
 
 
 def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
-    """Standardize SQL placeholders based on database dialect.
-
-    PostgreSQL uses %s, SQLite uses ?
+    """Convert placeholders between %s and ? based on dialect.
 
     Parameters
         sql: SQL query string
-        dialect: Database dialect ('postgresql' or 'sqlite')
+        dialect: Database dialect
 
     Returns
         SQL with standardized placeholders
@@ -121,80 +667,44 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
     if not sql:
         return sql
 
-    if dialect == 'postgresql':
-        # Convert ? to %s, but preserve regex patterns in regexp_replace
-        if '?' not in sql:
-            return sql
-        if 'regexp_replace' not in sql.lower():
-            return re.sub(r'(?<!\w)\?(?!\w)', '%s', sql)
-        return _preserve_regex_patterns(sql)
-
-    elif dialect == 'sqlite':
-        # Convert %s to ?, protecting string literals
+    if dialect == 'sqlite':
         if '%s' not in sql:
             return sql
-        return _convert_placeholders_sqlite(sql)
+        # Protect string literals
+        tokens = tokenize_sql(sql)
+        result = []
+        for token in tokens:
+            if token.type == TokenType.STRING_LITERAL:
+                result.append(token.text)
+            elif token.type == TokenType.POSITIONAL_PH and token.text == '%s':
+                result.append('?')
+            else:
+                result.append(token.text)
+        return ''.join(result)
+
+    elif dialect == 'postgresql':
+        if '?' not in sql:
+            return sql
+        tokens = tokenize_sql(sql)
+        result = []
+        for token in tokens:
+            if token.type == TokenType.REGEXP_FUNC:
+                result.append(token.text)
+            elif token.type == TokenType.POSITIONAL_PH and token.text == '?':
+                result.append('%s')
+            else:
+                result.append(token.text)
+        return ''.join(result)
 
     return sql
 
 
-def escape_percent_signs_in_literals(sql: str) -> str:
-    """Escape percent signs in string literals to avoid placeholder conflicts.
-
-    Parameters
-        sql: SQL query string
-
-    Returns
-        SQL with escaped percent signs in literals
-    """
-    if not sql or '%' not in sql:
-        return sql
-
-    # Don't escape if it's a simple SELECT with no placeholders
-    if (sql.strip().upper().startswith('SELECT') and
-        "'%" in sql and '%s' not in sql and '?' not in sql):
-        return sql
-
-    def escape_literal(match):
-        literal = match.group(0)
-        quote = literal[0]
-        content = literal[1:-1]
-        # Replace single % with %%, but not if already %%
-        escaped = re.sub(r'(?<!%)%(?!%)', '%%', content)
-        return f'{quote}{escaped}{quote}'
-
-    return _PATTERNS['string_literal'].sub(escape_literal, sql)
-
-
-def handle_null_is_operators(sql: str, args: Any) -> tuple[str, Any]:
-    """Handle NULL values with IS and IS NOT operators.
-
-    Converts 'IS %s' with None parameter to 'IS NULL', removing the parameter.
-
-    Parameters
-        sql: SQL query string
-        args: Query parameters
-
-    Returns
-        Tuple of (processed_sql, processed_args)
-    """
-    if not args or not sql:
-        return sql, args
-
-    if isinstance(args, dict):
-        return _handle_null_named(sql, args)
-    else:
-        return _handle_null_positional(sql, args)
-
-
-def handle_in_clause_params(sql: str, args: Any, dialect: str = 'postgresql') -> tuple[str, Any]:
+def handle_in_clause_params(
+    sql: str,
+    args: Any,
+    dialect: str = 'postgresql'
+) -> tuple[str, Any]:
     """Expand list/tuple parameters for IN clauses.
-
-    Handles various formats:
-    - "WHERE x IN %s" with args [(1,2,3)] -> "WHERE x IN (%s,%s,%s)" with (1,2,3)
-    - "WHERE x IN %s" with args [1,2,3] -> "WHERE x IN (%s,%s,%s)" with (1,2,3)
-    - "WHERE x IN %(ids)s" with {'ids': [1,2,3]} -> expanded named params
-    - Empty sequences -> "WHERE x IN (NULL)"
 
     Parameters
         sql: SQL query string
@@ -207,18 +717,106 @@ def handle_in_clause_params(sql: str, args: Any, dialect: str = 'postgresql') ->
     if not args or not sql or ' in ' not in sql.lower():
         return sql, args
 
-    # Handle tuple-wrapped dict (common when dict passed via *args)
-    if isinstance(args, tuple) and len(args) == 1 and isinstance(args[0], dict):
-        sql, result_dict = _handle_in_named(sql, args[0])
-        return sql, (result_dict,)
+    # Use the full pipeline
+    return process_sql_params(sql, args, dialect)
 
-    # Route based on parameter type
+
+def handle_null_is_operators(sql: str, args: Any) -> tuple[str, Any]:
+    """Handle NULL values with IS and IS NOT operators.
+
+    Parameters
+        sql: SQL query string
+        args: Query parameters
+
+    Returns
+        Tuple of (processed_sql, processed_args)
+    """
+    if not args or not sql:
+        return sql, args
+
+    # Use full pipeline but filter for IS NULL handling only
+    tokens = tokenize_sql(sql)
+    placeholders = analyze_placeholders(tokens)
+
+    if not placeholders:
+        return sql, args
+
+    # Check if any IS NULL placeholders exist
+    has_is_null = any(p.context in {'is_null', 'is_not_null'} for p in placeholders)
+    if not has_is_null:
+        return sql, args
+
+    # Process only IS NULL transformations
     if isinstance(args, dict):
-        return _handle_in_named(sql, args)
-    elif isinstance(args, (list, tuple)):
-        return _handle_in_positional(sql, args, dialect)
+        return _handle_null_named(sql, args, placeholders)
+    else:
+        return _handle_null_positional(sql, args, placeholders)
 
-    return sql, args
+
+def _handle_null_positional(
+    sql: str,
+    args: list | tuple,
+    placeholders: list[PlaceholderInfo]
+) -> tuple[str, list | tuple]:
+    """Handle IS NULL for positional parameters."""
+    args_was_tuple = isinstance(args, tuple)
+    args = list(args)
+    result_sql = sql
+
+    # Process in reverse to maintain positions
+    for ph in reversed(placeholders):
+        if ph.context in {'is_null', 'is_not_null'} and ph.index < len(args):
+            if args[ph.index] is None:
+                # Replace placeholder with NULL
+                result_sql = result_sql[:ph.token.start] + 'NULL' + result_sql[ph.token.end:]
+                args.pop(ph.index)
+
+    return result_sql, tuple(args) if args_was_tuple else args
+
+
+def _handle_null_named(
+    sql: str,
+    args: dict,
+    placeholders: list[PlaceholderInfo]
+) -> tuple[str, dict]:
+    """Handle IS NULL for named parameters."""
+    args = args.copy()
+    result_sql = sql
+
+    for ph in reversed(placeholders):
+        if ph.context in {'is_null', 'is_not_null'} and ph.name in args:
+            if args[ph.name] is None:
+                result_sql = result_sql[:ph.token.start] + 'NULL' + result_sql[ph.token.end:]
+                args.pop(ph.name)
+
+    return result_sql, args
+
+
+def escape_percent_signs_in_literals(sql: str) -> str:
+    """Escape percent signs in string literals.
+
+    Parameters
+        sql: SQL query string
+
+    Returns
+        SQL with escaped percent signs in literals
+    """
+    if not sql or '%' not in sql:
+        return sql
+
+    # Skip if SELECT with literal % but no placeholders
+    if (sql.strip().upper().startswith('SELECT')
+            and "'%" in sql and '%s' not in sql and '?' not in sql):
+        return sql
+
+    tokens = tokenize_sql(sql)
+    result = []
+    for token in tokens:
+        if token.type == TokenType.STRING_LITERAL:
+            result.append(_escape_percent_in_literal(token.text))
+        else:
+            result.append(token.text)
+    return ''.join(result)
 
 
 def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
@@ -240,9 +838,75 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     raise ValueError(f'Unknown dialect: {dialect}')
 
 
-# Decorator for backwards compatibility (will be removed in Phase 5)
+# =============================================================================
+# Helper Functions for Tests
+# =============================================================================
+
+def _unwrap_nested_parameters(sql: str, args: Any) -> Any:
+    """Unwrap nested parameters (for backwards compatibility with tests)."""
+    if args is None:
+        return None
+
+    if not isinstance(args, (list, tuple)) or not args:
+        return args
+
+    if len(args) != 1:
+        return args
+
+    first = args[0]
+    if not issequence(first) or isinstance(first, str):
+        return args
+
+    placeholder_count = sql.count('%s') + sql.count('?')
+    if len(first) == placeholder_count:
+        return first
+
+    return args
+
+
+def _generate_named_placeholders(base_name: str, values: Any, args_dict: dict) -> list:
+    """Generate named placeholders for IN clause expansion (for tests)."""
+    placeholders = []
+    next_idx = 0
+
+    for key in args_dict:
+        if key.startswith(f'{base_name}_') and key[len(base_name)+1:].isdigit():
+            idx = int(key[len(base_name)+1:])
+            next_idx = max(next_idx, idx + 1)
+
+    for i, val in enumerate(values):
+        key = f'{base_name}_{next_idx + i}'
+        placeholders.append(f'%({key})s')
+        args_dict[key] = val
+
+    return placeholders
+
+
+def chunk_sql_parameters(sql: str, args: list | tuple, param_limit: int) -> list:
+    """Split parameters into chunks for batch operations."""
+    if not args or len(args) <= param_limit:
+        return [args]
+    return [args[i:i + param_limit] for i in range(0, len(args), param_limit)]
+
+
+def prepare_sql_params_for_execution(
+    sql: str,
+    args: Any,
+    dialect: str = 'postgresql'
+) -> tuple[str, Any]:
+    """Prepare SQL and parameters for execution (backwards compatible)."""
+    result_sql, result_args = process_sql_params(sql, args, dialect)
+
+    from database.types import TypeConverter
+    result_args = TypeConverter.convert_params(result_args)
+
+    return result_sql, result_args
+
+
 def handle_query_params(func: Any) -> Any:
-    """Decorator to handle query parameters (DEPRECATED - use prepare_query directly)."""
+    """Decorator to handle query parameters (backwards compatible)."""
+    from functools import wraps
+
     @wraps(func)
     def wrapper(cn, sql, *args, **kwargs):
         sql = escape_percent_signs_in_literals(sql)
@@ -257,347 +921,3 @@ def handle_query_params(func: Any) -> Any:
         return func(cn, processed_sql, *processed_args, **kwargs)
 
     return wrapper
-
-
-def process_query_parameters(cn: Any, sql: str, args: Any) -> tuple[str, Any]:
-    """Process SQL query parameters (backwards compatible wrapper).
-
-    This function is kept for backwards compatibility with tests.
-    New code should use prepare_query() directly.
-    """
-    from database.utils.connection_utils import get_dialect_name
-    dialect = get_dialect_name(cn)
-
-    if not sql or not args:
-        return sql, args
-
-    if not has_placeholders(sql):
-        return sql, ()
-
-    # Step 1: Unwrap nested parameters
-    args = _unwrap_args(sql, args)
-
-    # Step 2: Handle named IN clauses early
-    if ' in ' in sql.lower():
-        if isinstance(args, dict):
-            sql, args = _handle_in_named(sql, args)
-        elif args and len(args) == 1 and isinstance(args[0], dict):
-            sql, args_dict = _handle_in_named(sql, args[0])
-            args = (args_dict,)
-
-    # Step 3: Standardize placeholders
-    sql = standardize_placeholders(sql, dialect=dialect)
-
-    # Step 4: Handle IS NULL operators
-    sql, args = handle_null_is_operators(sql, args)
-
-    # Step 5: Escape percent signs
-    sql = escape_percent_signs_in_literals(sql)
-
-    # Step 6: Handle remaining IN clause params
-    sql, args = handle_in_clause_params(sql, args, dialect=dialect)
-
-    return sql, args
-
-
-# Keep these for backwards compatibility with tests
-def prepare_sql_params_for_execution(sql: str, args: Any, dialect: str = 'postgresql') -> tuple[str, Any]:
-    """Prepare SQL and parameters for execution (backwards compatible).
-
-    DEPRECATED: This function is redundant. Use prepare_query() instead.
-    """
-    if ' in ' in sql.lower():
-        if isinstance(args, dict):
-            sql, args = _handle_in_named(sql, args)
-        elif args and len(args) == 1 and isinstance(args[0], dict):
-            sql, args_dict = _handle_in_named(sql, args[0])
-            args = (args_dict,)
-
-    sql = standardize_placeholders(sql, dialect=dialect)
-    sql, args = handle_in_clause_params(sql, args, dialect=dialect)
-
-    from database.types import TypeConverter
-    args = TypeConverter.convert_params(args)
-
-    return sql, args
-
-
-def chunk_sql_parameters(sql: str, args: list | tuple, param_limit: int) -> list:
-    """Split parameters into chunks for batch operations."""
-    if not args or len(args) <= param_limit:
-        return [args]
-    return [args[i:i + param_limit] for i in range(0, len(args), param_limit)]
-
-
-# Internal helper functions
-
-def _unwrap_args(sql: str, args: Any) -> Any:
-    """Unwrap nested parameters if appropriate."""
-    if args is None:
-        return None
-
-    if not isinstance(args, (list, tuple)) or not args:
-        return args
-
-    if len(args) != 1:
-        return args
-
-    first = args[0]
-    if not issequence(first) or isinstance(first, str):
-        return args
-
-    # Unwrap if placeholder count matches inner sequence length
-    placeholder_count = sql.count('%s') + sql.count('?')
-    if len(first) == placeholder_count:
-        return first
-
-    return args
-
-
-def _unwrap_nested_parameters(sql: str, args: Any) -> Any:
-    """Backwards compatible alias for _unwrap_args."""
-    return _unwrap_args(sql, args)
-
-
-def _handle_null_positional(sql: str, args: list | tuple) -> tuple[str, list | tuple]:
-    """Handle NULL with IS/IS NOT for positional parameters."""
-    args_was_tuple = isinstance(args, tuple)
-    args = list(args)
-
-    matches = list(_PATTERNS['null_is_positional'].finditer(sql))
-
-    for match in reversed(matches):
-        text_before = sql[:match.start(2)]
-        idx = text_before.count('%s') + text_before.count('?')
-
-        if idx < len(args) and args[idx] is None:
-            operator = match.group(1).upper()
-            sql = sql[:match.start(0)] + f'{operator} NULL' + sql[match.end(0):]
-            args.pop(idx)
-
-    return sql, tuple(args) if args_was_tuple else args
-
-
-def _handle_null_named(sql: str, args: dict) -> tuple[str, dict]:
-    """Handle NULL with IS/IS NOT for named parameters."""
-    args = args.copy()
-
-    for match in _PATTERNS['null_is_named'].finditer(sql):
-        param_name = _PATTERNS['param_name'].search(match.group(2)).group(1)
-
-        if param_name in args and args[param_name] is None:
-            operator = match.group(1).upper()
-            sql = sql[:match.start(0)] + f'{operator} NULL' + sql[match.end(0):]
-            args.pop(param_name)
-
-    return sql, args
-
-
-def _handle_in_positional(sql: str, args: list | tuple, dialect: str) -> tuple[str, Any]:
-    """Handle IN clause expansion for positional parameters."""
-    # Normalize args format
-    args = _normalize_in_args(sql, args)
-    args_list = list(args) if isinstance(args, tuple) else list(args)
-
-    # Find all placeholders and their types
-    # Pattern for IN clause placeholders
-    in_clause_pattern = _PATTERNS['in_clause']
-    # Pattern for all placeholders
-    all_placeholder_pattern = re.compile(r'\bIN\s+(%s|\(%s\)|\?|\(\?\))|%s|\?', re.IGNORECASE)
-
-    # Find all matches with their positions
-    all_matches = []
-    for match in all_placeholder_pattern.finditer(sql):
-        matched_text = match.group(0)
-        is_in_clause = matched_text.upper().startswith('IN')
-        all_matches.append({
-            'start': match.start(),
-            'end': match.end(),
-            'text': matched_text,
-            'is_in_clause': is_in_clause
-        })
-
-    if not all_matches:
-        return sql, args
-
-    # Check if any IN clause has a list/tuple arg that needs expansion
-    has_expansion = False
-    for i, match_info in enumerate(all_matches):
-        if match_info['is_in_clause'] and i < len(args_list):
-            param = args_list[i]
-            if issequence(param) and not isinstance(param, str):
-                has_expansion = True
-                break
-
-    if not has_expansion:
-        return sql, args
-
-    # Process matches in order, building new SQL and args
-    result_sql = sql
-    result_args = []
-    offset = 0
-
-    for i, match_info in enumerate(all_matches):
-        if i >= len(args_list):
-            break
-
-        param = args_list[i]
-        start = match_info['start'] + offset
-        end = match_info['end'] + offset
-
-        if match_info['is_in_clause']:
-            # Handle IN clause
-            if issequence(param) and not isinstance(param, str):
-                # Unwrap single-item nested sequences
-                if len(param) == 1 and issequence(param[0]) and not isinstance(param[0], str):
-                    param = param[0]
-
-                if not param:
-                    # Empty sequence -> IN (NULL)
-                    replacement = 'IN (NULL)'
-                    result_sql = result_sql[:start] + replacement + result_sql[end:]
-                    offset += len(replacement) - (end - start)
-                else:
-                    # Expand placeholders
-                    placeholders = ', '.join(['%s'] * len(param))
-                    replacement = f'IN ({placeholders})'
-                    result_sql = result_sql[:start] + replacement + result_sql[end:]
-                    offset += len(replacement) - (end - start)
-                    result_args.extend(param)
-            else:
-                # Single value for IN clause
-                replacement = 'IN (%s)'
-                result_sql = result_sql[:start] + replacement + result_sql[end:]
-                offset += len(replacement) - (end - start)
-                result_args.append(param)
-        else:
-            # Regular placeholder - keep as-is
-            result_args.append(param)
-
-    # Add remaining args
-    result_args.extend(args_list[len(all_matches):])
-
-    return result_sql, tuple(result_args)
-
-
-def _normalize_in_args(sql: str, args: list | tuple) -> list | tuple:
-    """Normalize different argument formats for IN clause handling."""
-    if not args:
-        return args
-
-    # Check if this is a direct list for single IN clause
-    in_count = sql.lower().count(' in ')
-    placeholder_count = sql.count('%s') + sql.count('?')
-
-    # Only wrap if IN clause directly contains a placeholder (not subquery like "IN (SELECT...)")
-    # Check for "IN %s" or "IN ?" pattern
-    has_in_placeholder = bool(re.search(r'\bIN\s+(%s|\?)\b', sql, re.IGNORECASE))
-
-    # Case: Direct list like [1, 2, 3] for single IN clause
-    if (in_count == 1 and placeholder_count == 1 and has_in_placeholder and
-        isiterable(args) and not isinstance(args, str)):
-        if all(not isiterable(a) or isinstance(a, str) for a in args):
-            return (args,)  # Wrap in tuple
-
-    # Case: Single item list [101]
-    if (isinstance(args, list) and len(args) == 1 and
-        (not isiterable(args[0]) or isinstance(args[0], str))):
-        return ([args[0]],)
-
-    return args
-
-
-def _handle_in_named(sql: str, args: dict) -> tuple[str, dict]:
-    """Handle IN clause expansion for named parameters."""
-    args = args.copy()
-    matches = list(_PATTERNS['in_clause_named'].finditer(sql))
-
-    for match in reversed(matches):
-        param_placeholder = match.group(2)
-        param_name = _PATTERNS['param_name'].search(param_placeholder).group(1)
-
-        if param_name not in args:
-            continue
-
-        param = args[param_name]
-        if not issequence(param) or isinstance(param, str):
-            continue
-
-        if not param:
-            # Empty sequence
-            in_kw = match.group(1)
-            sql = sql[:match.start(0)] + f'{in_kw} (NULL)' + sql[match.end(0):]
-            args.pop(param_name)
-        else:
-            # Flatten if needed
-            values = param
-            if len(param) == 1 and issequence(param[0]) and not isinstance(param[0], str):
-                values = list(collapse([param[0]]))
-
-            # Generate placeholders
-            placeholders = []
-            for i, val in enumerate(values):
-                key = f'{param_name}_{i}'
-                placeholders.append(f'%({key})s')
-                args[key] = val
-
-            in_kw = match.group(1)
-            sql = sql[:match.start(0)] + f'{in_kw} ({", ".join(placeholders)})' + sql[match.end(0):]
-            args.pop(param_name)
-
-    return sql, args
-
-
-def _preserve_regex_patterns(sql: str) -> str:
-    """Convert ? to %s while preserving regexp_replace patterns."""
-    segments = []
-    last_end = 0
-
-    for match in _PATTERNS['regexp_replace'].finditer(sql):
-        prefix = sql[last_end:match.start()]
-        if prefix:
-            segments.append(re.sub(r'(?<!\w)\?(?!\w)', '%s', prefix))
-        segments.append(match.group(0))
-        last_end = match.end()
-
-    if last_end < len(sql):
-        segments.append(re.sub(r'(?<!\w)\?(?!\w)', '%s', sql[last_end:]))
-
-    return ''.join(segments)
-
-
-def _convert_placeholders_sqlite(sql: str) -> str:
-    """Convert %s to ? for SQLite, protecting string literals."""
-    literals = []
-
-    def save_literal(match):
-        literals.append(match.group(0))
-        return f'__LITERAL_{len(literals)-1}__'
-
-    protected = _PATTERNS['string_literal'].sub(save_literal, sql)
-    converted = protected.replace('%s', '?')
-
-    for i, literal in enumerate(literals):
-        converted = converted.replace(f'__LITERAL_{i}__', literal)
-
-    return converted
-
-
-# Export helper for tests
-def _generate_named_placeholders(base_name: str, values: Any, args_dict: dict) -> list:
-    """Generate named placeholders for IN clause expansion."""
-    placeholders = []
-    next_idx = 0
-
-    # Find next available index
-    for key in args_dict:
-        if key.startswith(f'{base_name}_') and key[len(base_name)+1:].isdigit():
-            idx = int(key[len(base_name)+1:])
-            next_idx = max(next_idx, idx + 1)
-
-    for i, val in enumerate(values):
-        key = f'{base_name}_{next_idx + i}'
-        placeholders.append(f'%({key})s')
-        args_dict[key] = val
-
-    return placeholders
