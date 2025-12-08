@@ -481,7 +481,7 @@ class RowAdapter:
         """Convert row to dictionary."""
         # sqlite3.Row
         if hasattr(self.row, 'keys') and callable(self.row.keys):
-            return {key: self.row[key] for key in self.row}
+            return {key: self.row[key] for key in self.row.keys()}
         # Already a dict
         if isinstance(self.row, dict):
             return self.row
