@@ -3,7 +3,7 @@ import pathlib
 import site
 
 import pytest
-from database.utils.cache import CacheManager
+from database.cache import Cache
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +14,9 @@ site.addsitedir(HERE)
 @pytest.fixture(autouse=True)
 def clear_caches():
     """Clear all caches before and after each test to ensure test isolation."""
-    CacheManager.get_instance().clear_all()
+    Cache.get_instance().clear_all()
     yield
-    CacheManager.get_instance().clear_all()
+    Cache.get_instance().clear_all()
 
 
 def pytest_addoption(parser):

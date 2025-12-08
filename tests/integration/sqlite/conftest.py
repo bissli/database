@@ -1,13 +1,27 @@
+"""
+Fixtures for SQLite-specific integration tests.
+"""
+import time
+
 import database as db
 import pytest
+import pathlib
 
 
 @pytest.fixture
-def sl_conn():
-    """SQLite in-memory connection fixture for testing."""
+def test_table_prefix():
+    """Generate a unique test table prefix for isolation."""
+    return f'test_autocommit_{int(time.time())}'
+
+
+@pytest.fixture
+def sqlite_file_conn():
+    """File-based SQLite connection fixture for testing persistence across connections."""
+    db_file = f'./test_sqlite_{int(time.time())}.db'
+
     conn = db.connect({
         'drivername': 'sqlite',
-        'database': ':memory:'
+        'database': db_file
     })
 
     # Create test schema
@@ -30,4 +44,7 @@ def sl_conn():
     db.execute(conn, insert_data)
 
     yield conn
+
     conn.close()
+    if pathlib.Path(db_file).exists():
+        pathlib.Path(db_file).unlink()

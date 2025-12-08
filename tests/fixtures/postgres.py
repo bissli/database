@@ -112,9 +112,9 @@ where
 
 
 @pytest.fixture
-def conn(psql_docker):
-    """
-    Connection fixture with function scope for clean tests.
+def pg_conn(psql_docker):
+    """PostgreSQL connection fixture with function scope.
+
     Each test gets a fresh connection with reset test data.
     """
     cn = db.connect('postgresql', config=config)
