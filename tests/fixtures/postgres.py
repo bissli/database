@@ -1,5 +1,5 @@
 import logging
-import os
+import pathlib
 import sys
 import time
 
@@ -7,7 +7,7 @@ import database as db
 import docker
 import pytest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
 sys.path.insert(0, HERE)
 sys.path.append('..')
 import config
