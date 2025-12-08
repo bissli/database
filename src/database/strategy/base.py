@@ -175,9 +175,11 @@ class DatabaseStrategy(ABC):
             raw_conn: The raw DBAPI connection (not wrapped)
         """
 
-    @abstractmethod
     def quote_identifier(self, identifier: str) -> str:
         """Quote a database identifier.
+
+        Default implementation uses standard SQL double-quote escaping.
+        Override in subclasses if database requires different quoting.
 
         Args:
             identifier: Database identifier to be quoted
@@ -185,6 +187,8 @@ class DatabaseStrategy(ABC):
         Returns
             str: Properly quoted identifier according to database-specific rules
         """
+        from database.sql import quote_identifier
+        return quote_identifier(identifier)
 
     @abstractmethod
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
@@ -332,3 +336,36 @@ class DatabaseStrategy(ABC):
             return primary_keys[0]
 
         return 'id'
+
+    def _build_update_exprs(
+        self,
+        table: str,
+        update_cols_always: list[str] | None,
+        update_cols_ifnull: list[str] | None,
+    ) -> list[str]:
+        """Build UPDATE SET expressions for upsert operations.
+
+        Shared helper used by both PostgreSQL and SQLite strategies.
+
+        Args:
+            table: Target table name (for COALESCE expressions)
+            update_cols_always: Columns to always update
+            update_cols_ifnull: Columns to update only if target is NULL
+
+        Returns
+            List of SET expressions like 'col = excluded.col'
+        """
+        quoted_table = self.quote_identifier(table)
+        update_exprs = []
+
+        if update_cols_always:
+            for col in update_cols_always:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = excluded.{qc}')
+
+        if update_cols_ifnull:
+            for col in update_cols_ifnull:
+                qc = self.quote_identifier(col)
+                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
+
+        return update_exprs

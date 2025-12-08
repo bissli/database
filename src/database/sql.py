@@ -58,6 +58,20 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     return f'"{identifier.replace(chr(34), chr(34)+chr(34))}"'
 
 
+def make_placeholders(count: int, dialect: str = 'postgresql') -> str:
+    """Generate SQL placeholders for the given dialect.
+
+    Args:
+        count: Number of placeholders to generate
+        dialect: Database dialect ('postgresql' or 'sqlite')
+
+    Returns
+        Comma-separated placeholder string (e.g., '%s, %s, %s' or '?, ?, ?')
+    """
+    marker = '?' if dialect == 'sqlite' else '%s'
+    return ', '.join([marker] * count)
+
+
 def has_placeholders(sql: str | None) -> bool:
     """Check if SQL contains parameter placeholders."""
     return bool(sql and _PH_RE.search(sql))
