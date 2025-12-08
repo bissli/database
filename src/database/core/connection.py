@@ -54,6 +54,7 @@ class ConnectionWrapper:
         self.engine = sa_connection.engine if sa_connection else None
         self.options = options
         self.dbapi_connection = sa_connection.connection if sa_connection else None
+        self._dialect = get_dialect_name(sa_connection) if sa_connection else None
         self.calls = 0
         self.time = 0
         self.in_transaction = False
@@ -148,7 +149,7 @@ class ConnectionWrapper:
     @property
     def dialect(self) -> str:
         """Return the dialect name ('postgresql' or 'sqlite')."""
-        return get_dialect_name(self.sa_connection)
+        return self._dialect
 
     def commit(self) -> None:
         """Explicit commit that works regardless of auto-commit setting

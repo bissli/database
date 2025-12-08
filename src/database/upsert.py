@@ -7,13 +7,10 @@ import logging
 from typing import Any
 
 from database.data import insert_rows
-from database.query import select
 from database.schema import get_table_columns, get_table_primary_keys
 from database.schema import reset_table_sequence
 from database.sql import quote_identifier
 from database.strategy import get_db_strategy
-from database.types import RowStructureAdapter
-from database.utils.connection_utils import get_dialect_name
 from database.utils.sql_generation import build_insert_sql
 
 logger = logging.getLogger(__name__)
@@ -79,7 +76,7 @@ def upsert_rows(
         logger.debug('Skipping upsert of empty rows')
         return 0
 
-    dialect = get_dialect_name(cn)
+    dialect = cn.dialect
 
     if dialect != 'postgresql':
         constraint_name = None
@@ -185,66 +182,6 @@ def upsert_rows(
                                   update_cols_ifnull if should_update else None,
                                   reset_sequence,
                                   batch_size)
-
-
-def _fetch_existing_rows(
-    tx_or_cn: Any,
-    table: str,
-    rows: tuple[dict[str, Any], ...],
-    key_cols: list[str],
-    batch_size: int,
-) -> dict[tuple[Any, ...], dict[str, Any]]:
-    """Fetch existing rows for a set of key values using batching.
-
-    Parameters
-        tx_or_cn: Database transaction or connection
-            Active connection to the database.
-        table: Target table name
-            Name of the table to query.
-        rows: Rows to check for existing matches
-            Collection of row dictionaries.
-        key_cols: Key columns to use for matching
-            Column names that form the unique key.
-        batch_size: Maximum rows per batch
-            Maximum number of keys to query per batch.
-
-    Returns
-        Dictionary mapping row keys to existing row data.
-    """
-    existing_rows = {}
-    dialect = get_dialect_name(tx_or_cn)
-    quoted_table = quote_identifier(table, dialect)
-
-    # Collect unique keys from rows
-    keys_set = set()
-    keys_list = []
-    for row in rows:
-        key_value = tuple(row[key] for key in key_cols)
-        if key_value not in keys_set:
-            keys_set.add(key_value)
-            keys_list.append(key_value)
-
-    if not key_cols:
-        logger.warning('No key columns specified for fetching existing rows')
-        return {}
-
-    placeholder = '%s'
-    for batch_idx in range(0, len(keys_list), batch_size):
-        batch_keys = keys_list[batch_idx: batch_idx + batch_size]
-        where_conditions = []
-        params = []
-        for key_value in batch_keys:
-            condition_parts = [f'{quote_identifier(key, dialect)} = {placeholder}' for key in key_cols]
-            where_conditions.append(f"({' AND '.join(condition_parts)})")
-            params.extend(key_value)
-        where_clause = ' OR '.join(where_conditions)
-        sql = f'SELECT * FROM {quoted_table} WHERE {where_clause}'
-        result = select(tx_or_cn, sql, *params)
-        for row in result:
-            adapter = RowStructureAdapter.create(tx_or_cn, row)
-            key_val = tuple(adapter.get_value(key) for key in key_cols)
-            existing_rows[key_val] = adapter.to_dict()
-    return existing_rows
 
 
 def _upsert_postgresql(

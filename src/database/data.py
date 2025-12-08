@@ -6,7 +6,6 @@ import logging
 from database.core.transaction import Transaction
 from database.query import execute, select
 from database.sql import quote_identifier
-from database.utils.connection_utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ def insert_rows(cn, table, rows):
     rows = tuple(filtered_rows)
 
     # Determine database type for quoting
-    dialect = get_dialect_name(cn)
+    dialect = cn.dialect
 
     # Prepare the SQL INSERT statement
     cols = tuple(rows[0].keys())
