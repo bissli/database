@@ -8,7 +8,7 @@ import logging
 
 import database as db
 import pytest
-from database.utils.auto_commit import diagnose_connection
+from database.transaction import diagnose_connection
 
 logger = logging.getLogger(__name__)
 

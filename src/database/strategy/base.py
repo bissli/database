@@ -14,12 +14,57 @@ from typing import TYPE_CHECKING, Any
 from database.cache import cacheable_strategy
 
 if TYPE_CHECKING:
-    from database.core.connection import ConnectionWrapper
+    from database.connection import ConnectionWrapper
 
 
 class DatabaseStrategy(ABC):
     """Base class for database-specific operations.
     """
+
+    def _execute_raw(self, cn: 'ConnectionWrapper', sql: str,
+                     params: tuple | None = None) -> int:
+        """Execute SQL and return rowcount without importing query.py.
+
+        Used internally by strategy methods for DDL/DML operations.
+        """
+        sql = self.standardize_sql(sql)
+        cursor = cn.dbapi_connection.cursor()
+        try:
+            cursor.execute(sql, params or ())
+            return cursor.rowcount
+        finally:
+            cursor.close()
+
+    def _select_raw(self, cn: 'ConnectionWrapper', sql: str,
+                    params: tuple | None = None) -> list[dict]:
+        """Execute SQL and return results as list of dicts without importing query.py.
+
+        Used internally by strategy methods for queries returning multiple columns.
+        """
+        sql = self.standardize_sql(sql)
+        cursor = cn.dbapi_connection.cursor()
+        try:
+            cursor.execute(sql, params or ())
+            if cursor.description is None:
+                return []
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def _select_column_raw(self, cn: 'ConnectionWrapper', sql: str,
+                           params: tuple | None = None) -> list:
+        """Execute SQL and return first column as list without importing query.py.
+
+        Used internally by strategy methods for single-column queries.
+        """
+        sql = self.standardize_sql(sql)
+        cursor = cn.dbapi_connection.cursor()
+        try:
+            cursor.execute(sql, params or ())
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            cursor.close()
 
     @abstractmethod
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:

@@ -912,7 +912,7 @@ def _setup_connection_pool_testing(mock_conn_factory, pool_size=5):
         pool_mock.conn_status = conn_status
 
         # Patch the connection pool creation
-        pool_patcher = patch('database.core.connection.ConnectionPool', return_value=pool_mock)
+        pool_patcher = patch('database.connection.ConnectionPool', return_value=pool_mock)
         pool_patcher.start()
 
         return pool_mock, pool_patcher
@@ -1017,7 +1017,7 @@ def _setup_transaction(mock_conn, cursor):
     mock_conn.create_transaction = create_transaction
 
     # Add patch for the transaction module
-    return patch('database.core.transaction.Transaction', side_effect=create_transaction)
+    return patch('database.transaction.Transaction', side_effect=create_transaction)
 
 
 def _setup_data_loader(mock_conn, driver_name):

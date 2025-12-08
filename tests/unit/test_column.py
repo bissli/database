@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from database.types import Column, columns_from_cursor_description
-from database.utils.connection_utils import get_dialect_name
+from database.connection import get_dialect_name
 
 
 def test_column_get_names():

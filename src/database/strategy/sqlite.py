@@ -13,12 +13,11 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from database.query import execute, select, select_column
 from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy
 
 if TYPE_CHECKING:
-    from database.core.connection import ConnectionWrapper
+    from database.connection import ConnectionWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +29,14 @@ class SQLiteStrategy(DatabaseStrategy):
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
         """
-        execute(cn, 'VACUUM')
+        self._execute_raw(cn, 'VACUUM')
         logger.info('Executed VACUUM on entire SQLite database (table-specific vacuum not supported)')
 
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Rebuild indexes for a table.
         """
         quoted_table = self.quote_identifier(table)
-        execute(cn, f'REINDEX {quoted_table}')
+        self._execute_raw(cn, f'REINDEX {quoted_table}')
 
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
@@ -59,7 +58,7 @@ class SQLiteStrategy(DatabaseStrategy):
         sql = f"""
 select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
 """
-        return select_column(cn, sql)
+        return self._select_column_raw(cn, sql)
 
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
@@ -68,7 +67,7 @@ select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
         sql = f"""
 select name as column from pragma_table_info('{table}')
     """
-        return select_column(cn, sql)
+        return self._select_column_raw(cn, sql)
 
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
@@ -118,7 +117,7 @@ select name as column from pragma_table_info('{table}')
         """
         logger.warning("SQLite doesn't fully support constraint definition retrieval")
         sql = f"PRAGMA index_info('{constraint_name}')"
-        result = select(cn, sql)
+        result = self._select_raw(cn, sql)
 
         if not result:
             raise ValueError(f"Constraint '{constraint_name}' not found on table '{table}'")
@@ -138,7 +137,7 @@ select name as column from pragma_table_info('{table}')
 SELECT name FROM pragma_table_info('{table}')
 ORDER BY cid
 """
-        return select_column(cn, sql)
+        return self._select_column_raw(cn, sql)
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
@@ -148,7 +147,7 @@ ORDER BY cid
 SELECT name FROM pragma_table_info('{table}')
 ORDER BY cid
 """
-        return select_column(cn, sql)
+        return self._select_column_raw(cn, sql)
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
@@ -161,14 +160,14 @@ ORDER BY cid
         """Get columns that have UNIQUE constraints (excluding primary key).
         """
         sql = f"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1"
-        index_names = select_column(cn, sql)
+        index_names = self._select_column_raw(cn, sql)
 
         unique_columns = []
         primary_keys = set(self.get_primary_keys(cn, table, bypass_cache=bypass_cache))
 
         for idx_name in index_names:
             col_sql = f"SELECT name FROM pragma_index_info('{idx_name}')"
-            cols = select_column(cn, col_sql)
+            cols = self._select_column_raw(cn, col_sql)
 
             if cols and set(cols) != primary_keys:
                 unique_columns.append(cols)

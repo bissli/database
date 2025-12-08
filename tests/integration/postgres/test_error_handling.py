@@ -2,7 +2,7 @@ import database as db
 import psycopg
 import pytest
 import sqlalchemy.exc
-from database.utils.connection_utils import check_connection
+from database.connection import check_connection
 
 
 def test_check_connection_decorator(psql_docker, pg_conn):

@@ -1093,23 +1093,25 @@ cn = db.connect({
 The module includes caching utilities for performance optimization:
 
 ```python
-from database.utils.cache import TTLCacheManager
+from database.cache import Cache
 import cachetools
 
+# Get the singleton cache manager instance
+cache_manager = Cache.get_instance()
+
 # Create or get a TTL cache
-cache = TTLCacheManager.get_cache('my_cache', maxsize=100, ttl=300)
+cache = cache_manager.get_cache('my_cache', maxsize=100, ttl=300)
 
 # Use with cachetools decorators
 @cachetools.cached(cache=cache)
 def fetch_user(user_id):
     return db.select_row(cn, "SELECT * FROM users WHERE id = %s", user_id)
 
-# Get cache statistics
-stats = TTLCacheManager.get_stats()
-print(stats['my_cache']['size'])  # Current number of items in cache
-
 # Clear all caches
-TTLCacheManager.clear_all()
+cache_manager.clear_all()
+
+# Clear cache entries for a specific table
+cache_manager.clear_for_table('users')
 ```
 
 ### SQL Parameter Handling

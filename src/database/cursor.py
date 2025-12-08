@@ -11,9 +11,9 @@ from collections.abc import Iterator, Sequence
 from numbers import Number
 from typing import Any
 
+from database.connection import ensure_commit
 from database.sql import has_placeholders
 from database.types import TypeConverter, postgres_types
-from database.utils.auto_commit import ensure_commit
 
 from libb import collapse
 

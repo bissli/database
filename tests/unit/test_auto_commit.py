@@ -3,10 +3,10 @@ Test auto-commit functionality across different database drivers.
 """
 import logging
 
-from database.core.transaction import Transaction
-from database.utils.auto_commit import diagnose_connection
-from database.utils.auto_commit import disable_auto_commit, enable_auto_commit
-from database.utils.auto_commit import ensure_commit
+from database.transaction import Transaction
+from database.transaction import diagnose_connection
+from database.transaction import disable_auto_commit, enable_auto_commit
+from database.connection import ensure_commit
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,8 @@ class TestAutoCommit:
         mock_disable = mocker.Mock()
         mock_enable = mocker.Mock()
 
-        mocker.patch('database.core.transaction.disable_auto_commit', mock_disable)
-        mocker.patch('database.core.transaction.enable_auto_commit', mock_enable)
+        mocker.patch('database.transaction.disable_auto_commit', mock_disable)
+        mocker.patch('database.transaction.enable_auto_commit', mock_enable)
 
         with Transaction(conn) as tx:
             mock_disable.assert_called_once_with(conn)
@@ -164,7 +164,7 @@ class TestAutoCommitIntegration:
     def test_execute_with_transaction_no_auto_commit(self, mocker):
         """Test that execute within a transaction does not auto-commit"""
         ensure_commit_mock = mocker.Mock()
-        mocker.patch('database.utils.auto_commit.ensure_commit', ensure_commit_mock)
+        mocker.patch('database.connection.ensure_commit', ensure_commit_mock)
 
         conn = mocker.Mock()
         mock_tx = mocker.MagicMock()

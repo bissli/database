@@ -13,12 +13,10 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from database.core.transaction import Transaction
-from database.query import execute, select, select_column
 from database.strategy.base import DatabaseStrategy
 
 if TYPE_CHECKING:
-    from database.core.connection import ConnectionWrapper
+    from database.connection import ConnectionWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +32,7 @@ class PostgresStrategy(DatabaseStrategy):
         try:
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
-            execute(cn, f'vacuum (full, analyze) {quoted_table}')
+            self._execute_raw(cn, f'vacuum (full, analyze) {quoted_table}')
         finally:
             cn.connection.autocommit = original_autocommit
 
@@ -45,7 +43,7 @@ class PostgresStrategy(DatabaseStrategy):
         try:
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
-            execute(cn, f'reindex table {quoted_table}')
+            self._execute_raw(cn, f'reindex table {quoted_table}')
         finally:
             cn.connection.autocommit = original_autocommit
 
@@ -59,10 +57,10 @@ class PostgresStrategy(DatabaseStrategy):
             quoted_table = self.quote_identifier(table)
 
             if index is None:
-                execute(cn, f'cluster {quoted_table}')
+                self._execute_raw(cn, f'cluster {quoted_table}')
             else:
                 quoted_index = self.quote_identifier(index)
-                execute(cn, f'cluster {quoted_table} using {quoted_index}')
+                self._execute_raw(cn, f'cluster {quoted_table} using {quoted_index}')
         finally:
             cn.connection.autocommit = original_autocommit
 
@@ -82,10 +80,9 @@ select
 from
 {quoted_table}
 """
-        if isinstance(cn, Transaction):
-            cn.execute(sql)
-        else:
-            execute(cn, sql)
+        # Handle both ConnectionWrapper and Transaction (which wraps a connection)
+        conn = cn.cn if hasattr(cn, 'cn') else cn
+        self._select_raw(conn, sql)
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
 
@@ -99,7 +96,7 @@ from pg_index i
 join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
 where i.indrelid = %s::regclass and i.indisprimary
 """
-        return select_column(cn, sql, table)
+        return self._select_column_raw(cn, sql, (table,))
 
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
@@ -108,7 +105,7 @@ where i.indrelid = %s::regclass and i.indisprimary
         sql = f"""
 select skeys(hstore(null::{table})) as column
     """
-        return select_column(cn, sql)
+        return self._select_column_raw(cn, sql)
 
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
@@ -120,7 +117,7 @@ select skeys(hstore(null::{table})) as column
         WHERE table_name = %s
         AND column_default LIKE 'nextval%%'
         """
-        return select_column(cn, sql, table)
+        return self._select_column_raw(cn, sql, (table,))
 
     def configure_connection(self, conn: Any) -> None:
         """Configure connection settings for PostgreSQL.
@@ -179,7 +176,7 @@ select skeys(hstore(null::{table})) as column
 
         """
 
-        result = select(cn, union_query, constraint_name, table_name, constraint_name, table_name)
+        result = self._select_raw(cn, union_query, (constraint_name, table_name, constraint_name, table_name))
 
         if not result:
             raise ValueError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
@@ -217,7 +214,7 @@ and t.data_type in ('character', 'character varying', 'boolean',
 order by
 t.ordinal_position
 """
-        return select_column(cn, sql, table)
+        return self._select_column_raw(cn, sql, (table,))
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
@@ -232,7 +229,7 @@ t.table_name = %s
 order by
 t.ordinal_position
 """
-        return select_column(cn, sql, table)
+        return self._select_column_raw(cn, sql, (table,))
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:

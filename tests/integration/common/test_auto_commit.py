@@ -5,7 +5,7 @@ These tests run against both PostgreSQL and SQLite to verify
 consistent auto-commit behavior across database backends.
 """
 import pytest
-from database.utils.auto_commit import diagnose_connection
+from database.transaction import diagnose_connection
 
 
 class TestAutoCommitBasics:

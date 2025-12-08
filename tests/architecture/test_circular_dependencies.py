@@ -13,42 +13,33 @@ def test_circular_dependencies():
 
     # List of all modules to test in dependency order
     modules = [
-        # SQL processing (independent)
+        # Independent modules (no internal deps)
+        'database.exceptions',
+        'database.cache',
         'database.sql',
 
-        # Utils (most independent)
-        'database.utils',
-        'database.utils.auto_commit',
-        'database.utils.cache',
-        'database.utils.connection_utils',
-        'database.utils.query_utils',
-        'database.utils.schema_cache',
-        'database.utils.sql_generation',
+        # Type system and options
+        'database.types',
+        'database.options',
 
-        # Core modules
-        'database.core',
-        'database.core.exceptions',
-        'database.core.connection',
-        'database.core.cursor',
-        'database.core.transaction',
-        'database.core.query',
-
-        # Strategy
+        # Strategy (self-contained with raw execution)
         'database.strategy',
         'database.strategy.base',
-        'database.strategy.decorators',
         'database.strategy.postgres',
         'database.strategy.sqlite',
 
-        # Root modules (operations are at package level)
-        'database.options',
-        'database.query',
-        'database.data',
-        'database.schema',
-        'database.upsert',
+        # Connection and cursor
         'database.cursor',
-        'database.types',
-        'database.cache',
+        'database.connection',
+
+        # Transaction and query
+        'database.transaction',
+        'database.query',
+
+        # Operations
+        'database.schema',
+        'database.data',
+        'database.upsert',
 
         # Main package
         'database',

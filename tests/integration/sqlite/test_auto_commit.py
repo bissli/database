@@ -7,7 +7,7 @@ This file contains only SQLite-specific tests (e.g., connection reopening with f
 import logging
 
 import database as db
-from database.utils.auto_commit import diagnose_connection
+from database.transaction import diagnose_connection
 
 logger = logging.getLogger(__name__)
 

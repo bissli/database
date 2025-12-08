@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from database.strategy import get_db_strategy
 
 if TYPE_CHECKING:
-    from database.core.connection import ConnectionWrapper
+    from database.connection import ConnectionWrapper
 
 logger = logging.getLogger(__name__)
 

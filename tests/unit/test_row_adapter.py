@@ -75,13 +75,13 @@ def test_row_adapter_factory(create_simple_mock_connection):
     sqlite_conn = create_simple_mock_connection('sqlite')
 
     # Test with PostgreSQL
-    with patch('database.utils.connection_utils.get_dialect_name', return_value='postgresql'):
+    with patch('database.connection.get_dialect_name', return_value='postgresql'):
         adapter = RowAdapter.create(pg_conn, row_data)
         assert isinstance(adapter, RowAdapter)
         assert adapter.to_dict() == row_data
 
     # Test with SQLite
-    with patch('database.utils.connection_utils.get_dialect_name', return_value='sqlite'):
+    with patch('database.connection.get_dialect_name', return_value='sqlite'):
         adapter = RowAdapter.create(sqlite_conn, row_data)
         assert isinstance(adapter, RowAdapter)
         assert adapter.to_dict() == row_data

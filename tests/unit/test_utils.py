@@ -6,8 +6,8 @@ import logging
 
 import pytest
 from database.sql import quote_identifier, standardize_placeholders
-from database.utils.connection_utils import get_dialect_name
-from database.utils.sql_generation import build_insert_sql
+from database.connection import get_dialect_name
+from database.data import build_insert_sql
 
 logger = logging.getLogger(__name__)
 

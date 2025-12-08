@@ -1,10 +1,10 @@
 """
 Database strategy factory for database-specific operations.
 """
+from database.connection import get_dialect_name
 from database.strategy.base import DatabaseStrategy as DatabaseStrategy
 from database.strategy.postgres import PostgresStrategy
 from database.strategy.sqlite import SQLiteStrategy
-from database.utils.connection_utils import get_dialect_name
 
 
 def get_db_strategy(cn):
