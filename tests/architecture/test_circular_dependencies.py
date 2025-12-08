@@ -20,8 +20,8 @@ def test_circular_dependencies():
         'database.utils.connection_utils',
         'database.utils.query_utils',
         'database.utils.schema_cache',
-        'database.sql',
-        'database.sql_generation',
+        'database.utils.sql',
+        'database.utils.sql_generation',
 
         # Core modules
         'database.core',
