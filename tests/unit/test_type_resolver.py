@@ -9,47 +9,25 @@ from database.adapters.type_mapping import TypeResolver, resolve_type
 
 def test_resolve_type_function():
     """Test the global resolve_type function"""
-    # Mock the TypeResolver to avoid initialization errors
-    with patch('database.adapters.type_mapping.TypeResolver') as mock_resolver_class:
-        # Create a mock resolver instance
-        mock_resolver = MagicMock()
-        mock_resolver_class.return_value = mock_resolver
+    import database.adapters.type_mapping as tm
 
-        # Configure mock return values
-        def resolve_side_effect(db_type, type_code, column_name=None, **kwargs):
-            if db_type == 'postgresql' and type_code == 23:
-                return int
-            elif db_type == 'sqlite' and type_code == 'INTEGER':
-                return int
-            elif db_type == 'postgresql' and type_code == 1043:
-                if column_name == 'user_id':
-                    return int
-                elif column_name == 'created_date':
-                    return datetime.date
-                elif column_name == 'event_time' and kwargs.get('table_name') == 'events':
-                    return datetime.datetime
-            return str  # default
+    # Reset global resolver to ensure fresh state
+    tm._global_resolver = None
 
-        mock_resolver.resolve_python_type.side_effect = resolve_side_effect
+    # Test basic type resolution
+    assert resolve_type('postgresql', 23) == int  # int4 OID
+    assert resolve_type('sqlite', 'INTEGER') == int
 
-        # Test basic type resolution
-        assert resolve_type('postgresql', 23) == int  # int4 OID
-        assert resolve_type('sqlite', 'INTEGER') == int
+    # Test with column name hints - the resolver uses column name patterns
+    # for type resolution when type_code doesn't determine it
+    assert resolve_type('postgresql', 23, 'user_id') == int  # int4 is always int
+    assert resolve_type('postgresql', 1082, 'created_date') == datetime.date  # date OID
 
-        # Test with column name hints
-        assert resolve_type('postgresql', 1043, 'user_id') == int  # Column name hint
-        assert resolve_type('postgresql', 1043, 'created_date') == datetime.date
-
-        # Test with table name context
-        with patch('database.config.type_mapping.TypeMappingConfig.get_instance') as mock_config:
-            # Setup mock to return specific type for a column
-            config_instance = MagicMock()
-            config_instance.get_type_for_column.return_value = 'timestamp'
-            mock_config.return_value = config_instance
-
-            # Test resolution with table context
-            python_type = resolve_type('postgresql', 1043, 'event_time', table_name='events')
-            assert python_type == datetime.datetime
+    # Test name-based resolution when type code is None or ambiguous
+    # The _resolve_by_column_name method handles these patterns
+    resolver = TypeResolver()
+    assert resolver._resolve_by_column_name('user_id', None, None, 'postgresql') == int
+    assert resolver._resolve_by_column_name('created_at', None, None, 'postgresql') == datetime.datetime
 
 
 def test_type_resolver_postgres_types():

@@ -127,9 +127,9 @@ class TestAutoCommit:
         mock_disable = mocker.Mock()
         mock_enable = mocker.Mock()
 
-        # Mock the auto-commit functions
-        mocker.patch('database.utils.auto_commit.disable_auto_commit', mock_disable)
-        mocker.patch('database.utils.auto_commit.enable_auto_commit', mock_enable)
+        # Mock the auto-commit functions where they are used (in transaction module)
+        mocker.patch('database.core.transaction.disable_auto_commit', mock_disable)
+        mocker.patch('database.core.transaction.enable_auto_commit', mock_enable)
 
         # Enter a transaction
         with Transaction(conn) as tx:
@@ -179,52 +179,23 @@ class TestAutoCommitIntegration:
     """Integration tests for auto-commit with mock database operations"""
 
     def test_execute_with_auto_commit(self, mocker):
-        """Test that execute with auto_commit=True forces a commit"""
+        """Test that ensure_commit properly commits the connection"""
         # Create a mock connection directly
         conn = mocker.Mock()
+        conn.commit = mocker.Mock()
 
-        # Setup mock cursor with rowcount
-        cursor = mocker.Mock()
-        cursor.rowcount = 1
-        conn.cursor.return_value = cursor
+        # Call ensure_commit to force a commit
+        ensure_commit(conn)
 
-        # Create mock for cursor wrapper
-        mock_cursor_wrapper = mocker.Mock()
-        mock_cursor_wrapper.execute.return_value = 1
-        MockCursorWrapper = mocker.Mock(return_value=mock_cursor_wrapper)
+        # Verify commit was called on the connection
+        conn.commit.assert_called_once()
 
-        # Mock CursorWrapper
-        mocker.patch('database.core.cursor.CursorWrapper', MockCursorWrapper)
+        # Reset and call again
+        conn.commit.reset_mock()
+        ensure_commit(conn)
 
-        # Create a simple list to track ensure_commit calls
-        ensure_commit_calls = []
-
-        # Mock ensure_commit to track calls
-        def mock_ensure_commit(connection):
-            ensure_commit_calls.append(connection)
-
-        # Replace ensure_commit with our tracking function
-        mocker.patch('database.utils.auto_commit.ensure_commit', side_effect=mock_ensure_commit)
-
-        # Get a reference to the patched ensure_commit function to call directly
-        patched_ensure_commit = mocker.patch('database.utils.auto_commit.ensure_commit', side_effect=mock_ensure_commit)
-
-        # Call the patched function directly
-        patched_ensure_commit(conn)
-
-        # Verify ensure_commit was called with our connection
-        assert len(ensure_commit_calls) == 1
-        assert ensure_commit_calls[0] is conn
-
-        # Clear the calls list
-        ensure_commit_calls.clear()
-
-        # Call our patched function again to simulate a database operation
-        patched_ensure_commit(conn)
-
-        # Verify ensure_commit was called again
-        assert len(ensure_commit_calls) == 1
-        assert ensure_commit_calls[0] is conn
+        # Verify commit was called again
+        conn.commit.assert_called_once()
 
     def test_execute_with_transaction_no_auto_commit(self, mocker):
         """Test that execute within a transaction does not auto-commit"""

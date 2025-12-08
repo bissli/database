@@ -3,7 +3,7 @@ Unit tests for database strategy caching functionality.
 """
 
 import pytest
-from database.strategy import get_db_strategy
+from database.strategy.postgres import PostgresStrategy
 from database.utils.cache import CacheManager
 
 
@@ -43,10 +43,6 @@ def mock_connection(mocker):
     # Mock the connection wrapper access from cursor
     mock_cursor.connwrapper = conn
 
-    # Configure connection type checks
-    mocker.patch('database.utils.connection_utils.is_sqlite3_connection', return_value=False)
-    mocker.patch('database.utils.connection_utils.is_psycopg_connection', return_value=True)
-
     # Mock the extract_column_info function to return a predetermined list
     mocker.patch('database.operations.query.extract_column_info',
                  return_value=['col1', 'col2'])
@@ -55,9 +51,11 @@ def mock_connection(mocker):
 
 
 @pytest.fixture
-def strategy(mock_connection):
+def strategy():
     """Get the actual strategy instance that will be used in tests"""
-    return get_db_strategy(mock_connection)
+    # Directly create PostgresStrategy since we're testing caching behavior,
+    # not strategy selection
+    return PostgresStrategy()
 
 
 def test_strategy_caching(mock_connection, strategy, mocker):
