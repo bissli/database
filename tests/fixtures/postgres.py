@@ -1,11 +1,12 @@
 import logging
 import pathlib
 import sys
-import time
 
 import database as db
-import docker
 import pytest
+from testcontainers.postgres import PostgresContainer
+
+from libb import Setting
 
 HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
 sys.path.insert(0, HERE)
@@ -17,59 +18,54 @@ logger = logging.getLogger(__name__)
 
 @pytest.fixture(scope='session')
 def psql_docker(request):
-    client = docker.from_env()
+    """Session-scoped PostgreSQL container using testcontainers.
 
-    # Check if container already exists and remove it
-    try:
-        old_container = client.containers.get('test_postgres')
-        logger.info('Found existing test container, removing it')
-        old_container.stop()
-        old_container.remove()
-    except docker.errors.NotFound:
-        pass
-    except Exception as e:
-        logger.warning(f'Error when cleaning up container: {e}')
+    Testcontainers automatically:
+    - Assigns a random available port
+    - Waits for the database to be ready
+    - Handles cleanup when the session ends
+    """
+    container = PostgresContainer(
+        image='postgres:12',
+        username=config.postgresql.username,
+        password=config.postgresql.password,
+        dbname=config.postgresql.database,
+    ).with_env('TZ', 'US/Eastern').with_env('PGTZ', 'US/Eastern')
 
     try:
-        container = client.containers.run(
-            image='postgres:12',
-            auto_remove=True,
-            environment={
-                'POSTGRES_DB': config.postgresql.database,
-                'POSTGRES_USER': config.postgresql.username,
-                'POSTGRES_PASSWORD': config.postgresql.password,
-                'TZ': 'US/Eastern',
-                'PGTZ': 'US/Eastern'},
-            name='test_postgres',
-            ports={'5432/tcp': ('127.0.0.1', 5432)},
-            detach=True,
-            remove=True,
+        container.start()
+
+        # Update config with dynamic host/port
+        Setting.unlock()
+        config.postgresql.hostname = container.get_container_host_ip()
+        config.postgresql.port = int(container.get_exposed_port(5432))
+        Setting.lock()
+
+        logger.info(
+            f'PostgreSQL container started at '
+            f'{config.postgresql.hostname}:{config.postgresql.port}'
         )
 
-        # Register finalizer to ensure container is cleaned up after all tests
+        # Verify connection works
+        cn = db.connect('postgresql', config=config)
+        cn.close()
+
         def finalizer():
             try:
                 container.stop()
+                logger.info('PostgreSQL container stopped')
             except Exception as e:
-                logger.warning(f'Error stopping container during cleanup: {e}')
+                logger.warning(f'Error stopping container: {e}')
 
         request.addfinalizer(finalizer)
-
-        for i in range(30):
-            try:
-                cn = db.connect('postgresql', config=config)
-                cn.close()
-                break
-            except Exception as e:
-                logger.debug(e)
-                time.sleep(1)
-        else:
-            raise Exception('Postgres container failed to start in time', exc)
-
         return container
 
     except Exception as e:
         logger.error(f'Error setting up postgres container: {e}')
+        try:
+            container.stop()
+        except Exception:
+            pass
         raise
 
 

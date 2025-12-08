@@ -21,7 +21,7 @@ libb-util = { git = "https://github.com/bissli/libb-util" }
 # == test
 asserts = { version = "*", optional = true }
 pytest = { version = "*", optional = true }
-docker = { version = "*", optional = true }
+testcontainers = { extras = ["postgres"], version = ">=4.0.0", optional = true }
 pytest-cov = { version = "^6.0.0", optional = true }
 pytest-mock = { version = "*", optional = true }
 pdbpp = { git = "https://github.com/pdbpp/pdbpp.git", optional = true }
@@ -30,7 +30,7 @@ pdbpp = { git = "https://github.com/pdbpp/pdbpp.git", optional = true }
 test = [
   "asserts",
   "pytest",
-  "docker",
+  "testcontainers",
   "pytest-mock",
   "pytest-cov",
   "pdbpp"
