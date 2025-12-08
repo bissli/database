@@ -13,6 +13,9 @@ def test_circular_dependencies():
 
     # List of all modules to test in dependency order
     modules = [
+        # SQL processing (independent)
+        'database.sql',
+
         # Utils (most independent)
         'database.utils',
         'database.utils.auto_commit',
@@ -20,7 +23,6 @@ def test_circular_dependencies():
         'database.utils.connection_utils',
         'database.utils.query_utils',
         'database.utils.schema_cache',
-        'database.utils.sql',
         'database.utils.sql_generation',
 
         # Core modules

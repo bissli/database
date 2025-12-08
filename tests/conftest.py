@@ -46,6 +46,6 @@ def logger(request):
 pytest_plugins = [
     'tests.fixtures.mocks',
     'tests.fixtures.values',
+    'tests.fixtures.sqlite',
     'tests.fixtures.postgres',
-    'tests.fixtures.sqlite'
 ]

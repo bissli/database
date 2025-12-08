@@ -1204,12 +1204,12 @@ def mock_postgres_conn():
 
     # SQL handling patches
     patchers.append(patch(
-        'database.utils.sql.quote_identifier',
+        'database.sql.quote_identifier',
         side_effect=lambda ident, dialect: f'"{ident}"'
     ))
     patchers.append(patch(
-        'database.utils.sql.standardize_placeholders',
-        side_effect=lambda db_type, sql: sql.replace('?', '%s') if db_type == 'postgresql' else sql
+        'database.sql.standardize_placeholders',
+        side_effect=lambda sql, dialect: sql.replace('?', '%s') if dialect == 'postgresql' else sql
     ))
     patchers.append(patch(
         'database.operations.query.load_data',
@@ -1486,12 +1486,12 @@ def mock_sqlite_conn():
 
     # SQL handling patches
     patchers.append(patch(
-        'database.utils.sql.quote_identifier',
-        side_effect=lambda db_type, ident: f'"{ident}"'
+        'database.sql.quote_identifier',
+        side_effect=lambda ident, dialect: f'"{ident}"'
     ))
     patchers.append(patch(
-        'database.utils.sql.standardize_placeholders',
-        side_effect=lambda db_type, sql: sql.replace('%s', '?') if db_type == 'sqlite' else sql
+        'database.sql.standardize_placeholders',
+        side_effect=lambda sql, dialect: sql.replace('%s', '?') if dialect == 'sqlite' else sql
     ))
     patchers.append(patch(
         'database.operations.query.load_data',

@@ -13,7 +13,7 @@ from database.utils.sql_generation import build_insert_sql, build_select_sql
 ])
 def test_simple_select(dialect, table, expected):
     """Test basic SELECT statement generation"""
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_select_sql(table, dialect)
@@ -26,7 +26,7 @@ def test_simple_select(dialect, table, expected):
 ])
 def test_select_with_columns(dialect, table, columns, expected):
     """Test SELECT with column specifications"""
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_select_sql(table, dialect, columns=columns)
@@ -35,7 +35,7 @@ def test_select_with_columns(dialect, table, columns, expected):
 
 def test_select_with_where():
     """Test SELECT with WHERE clause"""
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_select_sql('users', 'postgresql',  where='active = TRUE')
@@ -45,7 +45,7 @@ def test_select_with_where():
 def test_select_with_limit():
     """Test SELECT with LIMIT clause"""
     # PostgreSQL uses LIMIT
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_select_sql('users', 'postgresql', limit=10)
@@ -55,7 +55,7 @@ def test_select_with_limit():
 def test_insert_sql_generation():
     """Test INSERT SQL generation"""
     # PostgreSQL
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_insert_sql(dialect='postgresql', table='users', columns=['id', 'name'])
@@ -63,7 +63,7 @@ def test_insert_sql_generation():
         assert 'VALUES (%s, %s)' in result
 
     # SQLite
-    with patch('database.utils.sql.quote_identifier') as mock_quote:
+    with patch('database.sql.quote_identifier') as mock_quote:
         mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
         result = build_insert_sql(dialect='sqlite', table='users', columns=['id', 'name'])
