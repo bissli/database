@@ -6,9 +6,22 @@ other database modules, making them safe to import without circular
 dependency concerns.
 """
 import logging
+import sqlite3
 from typing import Any
 
+import psycopg
+
 logger = logging.getLogger(__name__)
+
+# Exceptions that indicate commit is not possible or not needed
+_CommitError = (
+    psycopg.ProgrammingError,
+    psycopg.InterfaceError,
+    psycopg.OperationalError,
+    sqlite3.ProgrammingError,
+    sqlite3.InterfaceError,
+    sqlite3.OperationalError,
+)
 
 
 def get_dialect_name(obj: Any) -> str:
@@ -50,17 +63,18 @@ def ensure_commit(connection: Any) -> None:
     """Force a commit on any database connection if it's not in auto-commit mode.
 
     Works safely even if the connection is already in auto-commit mode.
+    Catches database-specific exceptions that indicate commit is not possible.
     """
     if hasattr(connection, 'commit'):
         try:
             connection.commit()
             return
-        except Exception as e:
+        except _CommitError as e:
             logger.debug(f'Could not commit transaction: {e}')
 
     if hasattr(connection, 'driver_connection') and hasattr(connection.driver_connection, 'commit'):
         try:
             connection.driver_connection.commit()
             return
-        except Exception as e:
+        except _CommitError as e:
             logger.debug(f'Could not commit driver_connection transaction: {e}')

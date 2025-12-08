@@ -10,7 +10,7 @@ The module functions are facades for backwards compatibility.
 from typing import Any
 
 from database.connection import ConnectionWrapper, connect
-from database.exceptions import ConnectionError, DatabaseError
+from database.exceptions import ConnectionFailure, DatabaseError, ValidationError
 from database.exceptions import DbConnectionError, IntegrityError
 from database.exceptions import IntegrityViolationError, OperationalError
 from database.exceptions import ProgrammingError, QueryError
@@ -48,7 +48,7 @@ def select_column(cn: ConnectionWrapper, sql: str, *args: Any) -> list[Any]:
 def select_row(cn: ConnectionWrapper, sql: str, *args: Any) -> Any:
     """Execute a query and return a single row.
 
-    Raises AssertionError if the query returns zero or multiple rows.
+    Raises ValidationError if the query returns zero or multiple rows.
     """
     return cn.select_row(sql, *args)
 
@@ -62,7 +62,7 @@ def select_row_or_none(cn: ConnectionWrapper, sql: str, *args: Any) -> Any | Non
 def select_scalar(cn: ConnectionWrapper, sql: str, *args: Any) -> Any:
     """Execute a query and return a single scalar value.
 
-    Raises AssertionError if the query returns zero or multiple rows.
+    Raises ValidationError if the query returns zero or multiple rows.
     """
     return cn.select_scalar(sql, *args)
 
@@ -184,7 +184,8 @@ __all__ = [
     'OperationalError',
     'UniqueViolation',
     'DbConnectionError',
-    'ConnectionError',
+    'ConnectionFailure',
+    'ValidationError',
     'DatabaseError',
     'IntegrityViolationError',
     'QueryError',

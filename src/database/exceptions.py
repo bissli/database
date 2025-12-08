@@ -11,7 +11,7 @@ class DatabaseError(Exception):
     """
 
 
-class ConnectionError(DatabaseError):
+class ConnectionFailure(DatabaseError):
     """Error establishing or maintaining database connection.
     """
 
@@ -41,7 +41,7 @@ DbConnectionError = (
     psycopg.InterfaceError,
     sqlite3.OperationalError,
     sqlite3.InterfaceError,
-    ConnectionError,
+    ConnectionFailure,
     )
 
 IntegrityError = (

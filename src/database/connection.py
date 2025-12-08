@@ -64,6 +64,7 @@ _engine_registry_lock = threading.RLock()
 
 # Simple cache for schema info (cleared on bypass_cache=True)
 _schema_cache: dict[tuple, list[str]] = {}
+_schema_cache_lock = threading.RLock()
 
 
 def create_url_from_options(options: DatabaseOptions,
@@ -379,25 +380,29 @@ class ConnectionWrapper:
         """Get all column names for a table using SQLAlchemy Inspector.
         """
         cache_key = ('columns', id(self.engine), table)
-        if not bypass_cache and cache_key in _schema_cache:
-            return _schema_cache[cache_key]
+        with _schema_cache_lock:
+            if not bypass_cache and cache_key in _schema_cache:
+                return _schema_cache[cache_key]
 
         inspector = inspect(self.sa_connection)
         columns = [col['name'] for col in inspector.get_columns(table)]
-        _schema_cache[cache_key] = columns
+        with _schema_cache_lock:
+            _schema_cache[cache_key] = columns
         return columns
 
     def get_table_primary_keys(self, table: str, bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table using SQLAlchemy Inspector.
         """
         cache_key = ('primary_keys', id(self.engine), table)
-        if not bypass_cache and cache_key in _schema_cache:
-            return _schema_cache[cache_key]
+        with _schema_cache_lock:
+            if not bypass_cache and cache_key in _schema_cache:
+                return _schema_cache[cache_key]
 
         inspector = inspect(self.sa_connection)
         pk_constraint = inspector.get_pk_constraint(table)
         primary_keys = pk_constraint.get('constrained_columns', [])
-        _schema_cache[cache_key] = primary_keys
+        with _schema_cache_lock:
+            _schema_cache[cache_key] = primary_keys
         return primary_keys
 
     def get_sequence_columns(self, table: str, bypass_cache: bool = False) -> list[str]:
@@ -469,12 +474,8 @@ class ConnectionWrapper:
 
         cols = tuple(rows[0].keys())
 
-        try:
-            quoted_table = quote_identifier(table, self.dialect)
-            quoted_cols = ','.join(quote_identifier(col, self.dialect) for col in cols)
-        except ValueError:
-            quoted_table = table
-            quoted_cols = ','.join(cols)
+        quoted_table = quote_identifier(table, self.dialect)
+        quoted_cols = ','.join(quote_identifier(col, self.dialect) for col in cols)
 
         placeholders = make_placeholders(len(cols), self.dialect)
         sql = f'INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})'

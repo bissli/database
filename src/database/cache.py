@@ -169,8 +169,9 @@ def cacheable_strategy(cache_name: str, ttl: int = 300, maxsize: int = 50):
                 cache[cache_key] = result
                 return result
 
-            except Exception as e:
-                logger.error(f'Cache error in {method.__name__}({table}): {e}')
+            except (KeyError, TypeError, ValueError) as e:
+                # Cache-related exceptions - fall back to uncached execution
+                logger.warning(f'Cache error in {method.__name__}({table}): {e}')
                 return method(self, cn, table, *args, **kwargs)
 
         return wrapper
