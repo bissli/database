@@ -179,7 +179,6 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
     parts = []
     new_args = {} if isinstance(args, dict) else []
     pos = 0
-    skip_paren = False
     is_pg = dialect == 'postgresql'
     marker = '?' if dialect == 'sqlite' else '%s'
 
@@ -188,10 +187,6 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
         seg = sql[pos:ph.pos]
         if is_pg:
             seg = _escape_percents(seg)
-        if skip_paren:
-            seg = seg.lstrip()
-            seg = seg.removeprefix(')')
-            skip_paren = False
         parts.append(seg)
 
         # Process placeholder
@@ -201,7 +196,7 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
             new_args.update(arg_upd)
         else:
             val = args[i] if args and i < len(args) else None
-            sql_part, arg_list, skip_paren = _proc_pos(ph, val, marker)
+            sql_part, arg_list = _proc_pos(ph, val, marker)
             parts.append(sql_part)
             new_args.extend(arg_list)
 
@@ -211,46 +206,40 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
     seg = sql[pos:]
     if is_pg:
         seg = _escape_percents(seg)
-    if skip_paren and seg.lstrip().startswith(')'):
-        seg = seg.lstrip()[1:]
     parts.append(seg)
 
     final_args = new_args if isinstance(args, dict) else tuple(new_args)
     return ''.join(parts), final_args
 
 
-def _proc_pos(ph: PH, val: Any, marker: str) -> tuple[str, list, bool]:
-    """Process positional placeholder. Returns (sql, args, skip_close_paren)."""
+def _proc_pos(ph: PH, val: Any, marker: str) -> tuple[str, list]:
+    """Process positional placeholder. Returns (sql, args)."""
     # IS NULL / IS NOT NULL
     if ph.ctx in {'is', 'is_not'} and val is None:
-        return 'NULL', [], False
+        return 'NULL', []
 
     # IN clause
     if ph.ctx == 'in':
         return _expand_in(val, marker, ph.in_parens)
 
-    return marker, [val], False
+    return marker, [val]
 
 
-def _expand_in(val: Any, marker: str, in_parens: bool) -> tuple[str, list, bool]:
-    """Expand IN clause. Returns (sql, args, skip_close_paren)."""
+def _expand_in(val: Any, marker: str, in_parens: bool) -> tuple[str, list]:
+    """Expand IN clause. Returns (sql, args)."""
     # Unwrap single nested sequence
     if _isseq(val) and len(val) == 1 and _isseq(val[0]):
         val = val[0]
 
     if _isseq(val):
         if not val:  # Empty -> NULL
-            return ('NULL', [], False) if in_parens else ('(NULL)', [], False)
+            return 'NULL' if in_parens else '(NULL)', []
 
         phs = ', '.join([marker] * len(val))
-        if in_parens:
-            return phs, list(val), True
-        return f'({phs})', list(val), False
+        return phs if in_parens else f'({phs})', list(val)
 
     # Single value
-    if in_parens:
-        return marker, [val], True
-    return f'({marker})', [val], False
+    return marker if in_parens else f'({marker})', [val]
 
 
 def _proc_named(ph: PH, args: dict) -> tuple[str, dict]:

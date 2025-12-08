@@ -138,6 +138,50 @@ class TestPrepareQueryInClause:
 
         assert result_args == ('2025-01-01', 1, 2, 'USER_A')
 
+    def test_parenthesized_in_clause_preserves_closing_paren(self):
+        """Test IN (%s) preserves closing paren in all cases.
+
+        Regression test for bug where closing paren was stripped.
+        """
+        # Multiple values - should have closing paren
+        sql = 'SELECT * FROM t WHERE id IN (%s)'
+        result_sql, _ = prepare_query(sql, ((1, 2, 3),), 'postgresql')
+        assert result_sql.endswith(')'), f'Missing closing paren: {result_sql}'
+        assert 'IN (%s, %s, %s)' in result_sql
+
+        # Single value list - should have closing paren
+        result_sql, _ = prepare_query(sql, ([42],), 'postgresql')
+        assert result_sql.endswith(')'), f'Missing closing paren: {result_sql}'
+        assert 'IN (%s)' in result_sql
+
+    def test_in_clause_with_scalar_value(self):
+        """Test IN clause with scalar value (not a sequence).
+
+        When a scalar is passed directly to an IN clause, it should still
+        produce valid SQL with proper parentheses.
+        """
+        sql = 'SELECT * FROM t WHERE date = %s AND fund IN (%s)'
+        args = ('2025-01-01', 'Tenor')  # 'Tenor' is scalar, not a list
+
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
+
+        # Should have closing paren after the IN clause
+        assert 'IN (%s)' in result_sql, f'Missing proper IN clause: {result_sql}'
+        # Should not be truncated
+        assert result_sql.count('(') == result_sql.count(')'), f'Unbalanced parens: {result_sql}'
+        assert result_args == ('2025-01-01', 'Tenor')
+
+    def test_in_clause_with_single_element_list(self):
+        """Test IN clause with single-element list."""
+        sql = 'SELECT * FROM t WHERE date = %s AND fund IN (%s)'
+        args = ('2025-01-01', ['Tenor'])
+
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
+
+        assert 'IN (%s)' in result_sql
+        assert result_sql.count('(') == result_sql.count(')')
+        assert result_args == ('2025-01-01', 'Tenor')
+
 
 # =============================================================================
 # prepare_query - Named Parameters
