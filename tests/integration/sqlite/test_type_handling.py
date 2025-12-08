@@ -10,20 +10,20 @@ from database.options import iterdict_data_loader
 
 
 @pytest.mark.sqlite
-def test_sqlite_type_consistency(sqlite_conn, value_dict):
+def test_sqlite_type_consistency(sl_conn, value_dict):
     """Test type consistency with SQLite"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sqlite_conn):
+    if not db.is_sqlite3_connection(sl_conn):
         pytest.skip('Not connected to SQLite')
 
     # Save original data loader
-    original_loader = sqlite_conn.options.data_loader
+    original_loader = sl_conn.options.data_loader
     # Use iterdict_data_loader for this test
-    sqlite_conn.options.data_loader = iterdict_data_loader
+    sl_conn.options.data_loader = iterdict_data_loader
 
     try:
         # Create a test table with various types
-        with db.transaction(sqlite_conn) as tx:
+        with db.transaction(sl_conn) as tx:
             # Create table with various types
             tx.execute("""
             CREATE TABLE IF NOT EXISTS type_test (
@@ -173,4 +173,4 @@ def test_sqlite_type_consistency(sqlite_conn, value_dict):
             assert scalar == value_dict['int_value']
     finally:
         # Restore original data loader
-        sqlite_conn.options.data_loader = original_loader
+        sl_conn.options.data_loader = original_loader

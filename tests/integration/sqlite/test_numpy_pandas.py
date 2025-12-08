@@ -4,18 +4,18 @@ Integration tests for NumPy and Pandas type handling with SQLite.
 import json
 import math
 
+import database as db
 import numpy as np
 import pandas as pd
 import pytest
-import database as db
 from database.options import iterdict_data_loader
 
 
 @pytest.mark.sqlite
-def test_numpy_pandas_types_pandas_loader(sqlite_conn):
+def test_numpy_pandas_types_pandas_loader(sl_conn):
     """Test numpy and pandas type handling with SQLite using pandas data loader"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sqlite_conn):
+    if not db.is_sqlite3_connection(sl_conn):
         pytest.skip('Not connected to SQLite')
 
     # Create numpy and pandas test values
@@ -44,7 +44,7 @@ def test_numpy_pandas_types_pandas_loader(sqlite_conn):
     insert_params = [np_int, np_float, json.dumps(np_array.tolist()), pd_series[0], pd_na]
 
     # Execute the test
-    with db.transaction(sqlite_conn) as tx:
+    with db.transaction(sl_conn) as tx:
         # Drop table if it exists (for non-temp tables)
         tx.execute(f'DROP TABLE IF EXISTS {table_name}')
 
@@ -67,17 +67,17 @@ def test_numpy_pandas_types_pandas_loader(sqlite_conn):
 
 
 @pytest.mark.sqlite
-def test_numpy_pandas_types_iterdict_loader(sqlite_conn):
+def test_numpy_pandas_types_iterdict_loader(sl_conn):
     """Test numpy and pandas type handling with SQLite using iterdict data loader"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sqlite_conn):
+    if not db.is_sqlite3_connection(sl_conn):
         pytest.skip('Not connected to SQLite')
 
     # Save original data loader
-    original_loader = sqlite_conn.options.data_loader
+    original_loader = sl_conn.options.data_loader
     # Use iterdict_data_loader for this test
-    sqlite_conn.options.data_loader = iterdict_data_loader
-    
+    sl_conn.options.data_loader = iterdict_data_loader
+
     try:
         # Create numpy and pandas test values
         np_int = np.int64(42)
@@ -105,7 +105,7 @@ def test_numpy_pandas_types_iterdict_loader(sqlite_conn):
         insert_params = [np_int, np_float, json.dumps(np_array.tolist()), pd_series[0], pd_na]
 
         # Execute the test
-        with db.transaction(sqlite_conn) as tx:
+        with db.transaction(sl_conn) as tx:
             # Drop table if it exists (for non-temp tables)
             tx.execute(f'DROP TABLE IF EXISTS {table_name}')
 
@@ -128,4 +128,4 @@ def test_numpy_pandas_types_iterdict_loader(sqlite_conn):
             assert row['null_col'] is None
     finally:
         # Restore original data loader
-        sqlite_conn.options.data_loader = original_loader
+        sl_conn.options.data_loader = original_loader
