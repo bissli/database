@@ -13,7 +13,7 @@ from database.options import iterdict_data_loader
 def test_sqlite_type_consistency(sl_conn, value_dict):
     """Test type consistency with SQLite"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sl_conn):
+    if sl_conn.dialect != 'sqlite':
         pytest.skip('Not connected to SQLite')
 
     # Save original data loader

@@ -118,7 +118,6 @@ def pg_conn(psql_docker):
     Each test gets a fresh connection with reset test data.
     """
     cn = db.connect('postgresql', config=config)
-    assert db.isconnection(cn)
 
     try:
         stage_test_data(cn)

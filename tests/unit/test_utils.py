@@ -6,7 +6,7 @@ import logging
 
 import pytest
 from database.sql import quote_identifier, standardize_placeholders
-from database.utils.connection_utils import get_dialect_name, isconnection
+from database.utils.connection_utils import get_dialect_name
 from database.utils.sql_generation import build_insert_sql
 
 logger = logging.getLogger(__name__)
@@ -137,33 +137,6 @@ class TestDatabaseUtilities:
         # Test with SQLAlchemy connection
         sa_sqlite_conn = _create_mock_sqlalchemy_connection(mocker, 'sqlite')
         assert get_dialect_name(sa_sqlite_conn) == 'sqlite'
-
-    def test_isconnection(self, mocker):
-        """Test isconnection function with various connection types"""
-        # Create different types of connections
-        pg_mock = _create_mock_connection(mocker, 'postgresql')
-        sqlite_mock = _create_mock_connection(mocker, 'sqlite')
-
-        # Create a non-database object for comparison - use spec to prevent auto-creating attributes
-        non_db_mock = mocker.MagicMock(spec=['some_attr'])
-        non_db_mock.__class__.__module__ = 'builtins'
-        non_db_mock.__class__.__name__ = 'object'
-
-        # Create an object with just driver_connection attribute
-        sqlalchemy_like = mocker.MagicMock()
-        sqlalchemy_like.driver_connection = mocker.MagicMock()
-
-        # Test all types of connections
-        assert isconnection(pg_mock)
-        assert isconnection(sqlite_mock)
-        assert isconnection(sqlalchemy_like)
-        assert not isconnection(non_db_mock)
-
-        # Test with SQLAlchemy connections
-        sa_pg_conn = _create_mock_sqlalchemy_connection(mocker, 'postgresql')
-        sa_sqlite_conn = _create_mock_sqlalchemy_connection(mocker, 'sqlite')
-        assert isconnection(sa_pg_conn)
-        assert isconnection(sa_sqlite_conn)
 
     def test_connection_type_detection_postgres(self, mocker):
         """Test PostgreSQL connection type detection"""

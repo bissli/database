@@ -239,13 +239,10 @@ def create_simple_mock_connection():
             # Create connections of different types
             pg_conn = create_simple_mock_connection('postgresql')
             sqlite_conn = create_simple_mock_connection('sqlite')
-            unknown_conn = create_simple_mock_connection('unknown')
 
-            # Test type detection functions
-            assert is_psycopg_connection(pg_conn) is True
-            assert is_sqlite3_connection(sqlite_conn) is True
-            assert is_psycopg_connection(unknown_conn) is False
-            assert is_sqlite3_connection(unknown_conn) is False
+            # Test dialect detection
+            assert pg_conn.dialect == 'postgresql'
+            assert sqlite_conn.dialect == 'sqlite'
     """
     def factory(connection_type='postgresql'):
         return _create_simple_mock_connection(connection_type)

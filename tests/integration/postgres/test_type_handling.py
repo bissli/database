@@ -232,7 +232,7 @@ def test_postgres_cursor_executemany(psql_docker, pg_conn):
     """
     import numpy as np
     import pandas as pd
-    from database.core.cursor import get_dict_cursor
+    from database.cursor import get_dict_cursor
 
     with db.transaction(pg_conn) as tx:
         tx.execute('DROP TABLE IF EXISTS executemany_test')

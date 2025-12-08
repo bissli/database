@@ -15,7 +15,7 @@ from database.options import iterdict_data_loader
 def test_numpy_pandas_types_pandas_loader(sl_conn):
     """Test numpy and pandas type handling with SQLite using pandas data loader"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sl_conn):
+    if sl_conn.dialect != 'sqlite':
         pytest.skip('Not connected to SQLite')
 
     # Create numpy and pandas test values
@@ -70,7 +70,7 @@ def test_numpy_pandas_types_pandas_loader(sl_conn):
 def test_numpy_pandas_types_iterdict_loader(sl_conn):
     """Test numpy and pandas type handling with SQLite using iterdict data loader"""
     # Skip if not connected to SQLite
-    if not db.is_sqlite3_connection(sl_conn):
+    if sl_conn.dialect != 'sqlite':
         pytest.skip('Not connected to SQLite')
 
     # Save original data loader

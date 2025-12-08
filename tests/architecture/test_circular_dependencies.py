@@ -51,15 +51,17 @@ def test_circular_dependencies():
         'database.strategy.postgres',
         'database.strategy.sqlite',
 
-        # Operations (most dependent)
-        'database.operations',
-        'database.operations.query',
-        'database.operations.data',
-        'database.operations.schema',
-        'database.operations.upsert',
-
-        # Root modules
+        # Root modules (operations are at package level)
         'database.options',
+        'database.query',
+        'database.data',
+        'database.schema',
+        'database.upsert',
+        'database.cursor',
+        'database.types',
+        'database.cache',
+
+        # Main package
         'database',
     ]
 
