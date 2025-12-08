@@ -11,10 +11,26 @@ It handles PostgreSQL's unique features such as:
 """
 import logging
 import re
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from database.sql import make_placeholders, quote_identifier
 from database.strategy.base import DatabaseStrategy
+
+
+@contextmanager
+def temporary_autocommit(connection):
+    """Context manager to temporarily enable autocommit on a connection.
+
+    Saves current autocommit state, enables autocommit, executes the block,
+    then restores the original state.
+    """
+    original = connection.autocommit
+    try:
+        connection.autocommit = True
+        yield
+    finally:
+        connection.autocommit = original
 
 
 def _escape_string_literal(s: str) -> str:
@@ -34,41 +50,28 @@ class PostgresStrategy(DatabaseStrategy):
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
         """
-        original_autocommit = cn.connection.autocommit
-        try:
-            cn.connection.autocommit = True
+        with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
             self._execute_raw(cn, f'vacuum (full, analyze) {quoted_table}')
-        finally:
-            cn.connection.autocommit = original_autocommit
 
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Rebuild indexes for a table.
         """
-        original_autocommit = cn.connection.autocommit
-        try:
-            cn.connection.autocommit = True
+        with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
             self._execute_raw(cn, f'reindex table {quoted_table}')
-        finally:
-            cn.connection.autocommit = original_autocommit
 
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
         """Order table data according to an index.
         """
-        original_autocommit = cn.connection.autocommit
-        try:
-            cn.connection.autocommit = True
+        with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
-
             if index is None:
                 self._execute_raw(cn, f'cluster {quoted_table}')
             else:
                 quoted_index = self.quote_identifier(index)
                 self._execute_raw(cn, f'cluster {quoted_table} using {quoted_index}')
-        finally:
-            cn.connection.autocommit = original_autocommit
 
     def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
                        identity: str | None = None) -> None:

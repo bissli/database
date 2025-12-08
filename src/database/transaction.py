@@ -35,66 +35,50 @@ def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
     return False
 
 
-def enable_auto_commit(connection: Any) -> None:
-    """Enable auto-commit mode for any database connection.
+def _set_autocommit(connection: Any, enable: bool) -> None:
+    """Set auto-commit mode for any database connection.
 
-    Works with:
-    - SQLAlchemy connections
-    - psycopg (PostgreSQL)
-    - sqlite3
-    - Raw DBAPI connections
+    Works with SQLAlchemy connections, psycopg, sqlite3, and raw DBAPI connections.
     """
+    # SQLAlchemy execution_options
     if hasattr(connection, 'execution_options') and callable(connection.execution_options):
+        isolation = 'AUTOCOMMIT' if enable else 'READ COMMITTED'
         try:
-            connection.execution_options(isolation_level='AUTOCOMMIT')
+            connection.execution_options(isolation_level=isolation)
         except Exception as e:
             logger.debug(f'Could not set SQLAlchemy execution_options: {e}')
 
-    if _try_strategy_autocommit(connection, enable=True):
+    # Strategy-based autocommit
+    if _try_strategy_autocommit(connection, enable=enable):
         return
 
     raw_conn = get_raw_connection(connection)
 
+    # Direct autocommit property
     if hasattr(raw_conn, 'autocommit'):
         try:
-            raw_conn.autocommit = True
+            raw_conn.autocommit = enable
             return
         except Exception as e:
             logger.debug(f'Could not set autocommit: {e}')
 
+    # SQLite isolation_level
     if hasattr(raw_conn, 'isolation_level'):
+        level = None if enable else 'DEFERRED'
         try:
-            raw_conn.isolation_level = None
+            raw_conn.isolation_level = level
         except Exception as e:
             logger.debug(f'Could not set isolation_level: {e}')
+
+
+def enable_auto_commit(connection: Any) -> None:
+    """Enable auto-commit mode for any database connection."""
+    _set_autocommit(connection, enable=True)
 
 
 def disable_auto_commit(connection: Any) -> None:
-    """Disable auto-commit mode for any database connection.
-    """
-    if hasattr(connection, 'execution_options') and callable(connection.execution_options):
-        try:
-            connection.execution_options(isolation_level='READ COMMITTED')
-        except Exception as e:
-            logger.debug(f'Could not reset SQLAlchemy execution_options: {e}')
-
-    if _try_strategy_autocommit(connection, enable=False):
-        return
-
-    raw_conn = get_raw_connection(connection)
-
-    if hasattr(raw_conn, 'autocommit'):
-        try:
-            raw_conn.autocommit = False
-            return
-        except Exception as e:
-            logger.debug(f'Could not set autocommit: {e}')
-
-    if hasattr(raw_conn, 'isolation_level'):
-        try:
-            raw_conn.isolation_level = 'DEFERRED'
-        except Exception as e:
-            logger.debug(f'Could not set isolation_level: {e}')
+    """Disable auto-commit mode for any database connection."""
+    _set_autocommit(connection, enable=False)
 
 
 def diagnose_connection(conn: Any) -> dict[str, Any]:
@@ -143,7 +127,6 @@ class Transaction:
     def __init__(self, cn: Any) -> None:
         self.cn = cn
         self.connection = cn
-        self.sa_connection = getattr(cn, 'sa_connection', None)
 
         if not hasattr(_local, 'active_transactions'):
             _local.active_transactions = {}

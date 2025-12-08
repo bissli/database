@@ -245,7 +245,7 @@ class ConnectionWrapper:
 
         return get_dict_cursor(self)
 
-    def addcall(self, elapsed: float) -> None:
+    def _addcall(self, elapsed: float) -> None:
         """Track execution statistics
         """
         self.time += elapsed

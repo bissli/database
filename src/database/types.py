@@ -57,50 +57,66 @@ def _check_special_string(value: str) -> None:
     return False
 
 
+def _normalize_special_string(py_value: Any) -> Any:
+    """Return None if value is a special null string, otherwise return value."""
+    if isinstance(py_value, str) and _check_special_string(py_value) is None:
+        return None
+    return py_value
+
+
 def _convert_pyarrow_value(value: Any) -> Any:
-    """Convert PyArrow value to Python type."""
+    """Convert PyArrow value to Python type.
+
+    Attempts conversion in order of preference:
+    1. Check for null values
+    2. Use as_py() method (preferred for scalars)
+    3. Use .value property (fallback for scalars)
+    4. Use to_pylist() for arrays
+    5. Use to_pandas() for tables
+    6. Fall back to str()
+    """
     if not PYARROW_AVAILABLE or value is None:
         return value
 
+    # Check for null
     try:
         if pa.compute.is_null(value).as_py():
             return None
     except (AttributeError, TypeError, ValueError):
         pass
 
+    # Preferred: as_py() method
     if hasattr(value, 'as_py'):
         try:
-            py_value = value.as_py()
-            if isinstance(py_value, str) and _check_special_string(py_value) is None:
-                return None
-            return py_value
-        except Exception:
+            return _normalize_special_string(value.as_py())
+        except (ValueError, TypeError, AttributeError):
             pass
 
+    # Scalar fallback: .value property
     if pa and isinstance(value, pa.Scalar):
         try:
-            py_value = value.value
-            if isinstance(py_value, str) and _check_special_string(py_value) is None:
-                return None
-            return py_value
-        except Exception:
+            return _normalize_special_string(value.value)
+        except (ValueError, TypeError, AttributeError):
             pass
 
+    # Array types
     if pa and isinstance(value, pa.Array | pa.ChunkedArray):
         try:
             return value.to_pylist()
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             pass
 
+    # Table type
     if pa and isinstance(value, pa.Table):
         try:
             return value.to_pandas()
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             pass
 
+    # Final fallback
     try:
         return str(value)
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 

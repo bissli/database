@@ -8,10 +8,6 @@ import pytest
 from database.cache import Cache, _create_cache_key, cacheable_strategy
 from database.strategy.postgres import PostgresStrategy
 
-# =============================================================================
-# Fixtures
-# =============================================================================
-
 
 @pytest.fixture
 def mock_connection(mocker):
@@ -97,10 +93,6 @@ def method_factory(strategy):
     return CacheableMethodFactory(strategy)
 
 
-# =============================================================================
-# Basic Caching Behavior Tests
-# =============================================================================
-
 class TestBasicCaching:
     """Tests for fundamental caching behavior"""
 
@@ -138,10 +130,6 @@ class TestBasicCaching:
         assert result3 == ['col1', 'col2']  # Cached from first call
         assert get_count() == 2
 
-
-# =============================================================================
-# Cache Isolation Tests
-# =============================================================================
 
 class TestCacheIsolation:
     """Tests for cache isolation between methods, tables, and strategies"""
@@ -221,10 +209,6 @@ class TestCacheIsolation:
         assert counters['s1'] == 1
         assert counters['s2'] == 1
 
-
-# =============================================================================
-# Cache Clearing Tests
-# =============================================================================
 
 class TestCacheClearing:
     """Tests for cache clearing functionality"""
@@ -334,10 +318,6 @@ class TestCacheClearing:
         assert get_pks_count() == 1  # Still cached
 
 
-# =============================================================================
-# Cache Key Tests
-# =============================================================================
-
 class TestCacheKeyGeneration:
     """Tests for cache key generation"""
 
@@ -387,10 +367,6 @@ class TestCacheKeyGeneration:
         assert key1 == key2
 
 
-# =============================================================================
-# Table Name Case Sensitivity Tests
-# =============================================================================
-
 class TestTableNameCaseSensitivity:
     """Tests for table name case handling"""
 
@@ -415,10 +391,6 @@ class TestTableNameCaseSensitivity:
         strategy.get_columns(mock_connection, 'TEST_TABLE')
         assert get_count() == 2  # Cache repopulated
 
-
-# =============================================================================
-# Performance Tests
-# =============================================================================
 
 class TestCachePerformance:
     """Tests for cache performance characteristics"""
@@ -450,10 +422,6 @@ class TestCachePerformance:
         assert second_call_time < first_call_time
         assert bypass_call_time > second_call_time
 
-
-# =============================================================================
-# Skipped Tests
-# =============================================================================
 
 @pytest.mark.skip(reason='get_detailed_stats removed during cache simplification')
 def test_get_detailed_stats():

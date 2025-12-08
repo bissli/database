@@ -7,19 +7,11 @@ import psycopg
 import pytest
 from database.types import postgres_types, resolve_type, sqlite_types
 
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
 
 def get_pg_oid(type_name):
     """Get PostgreSQL OID from type name"""
     return psycopg.postgres.types.get(type_name).oid
 
-
-# =============================================================================
-# PostgreSQL Type Mapping Tests
-# =============================================================================
 
 class TestPostgresTypeMapping:
     """Tests for PostgreSQL type resolution"""
@@ -54,10 +46,6 @@ class TestPostgresTypeMapping:
         assert result == expected_python_type
 
 
-# =============================================================================
-# SQLite Type Mapping Tests
-# =============================================================================
-
 class TestSqliteTypeMapping:
     """Tests for SQLite type resolution"""
 
@@ -81,10 +69,6 @@ class TestSqliteTypeMapping:
         result = resolve_type('sqlite', sqlite_type)
         assert result == expected_python_type
 
-
-# =============================================================================
-# Column Name Pattern Tests
-# =============================================================================
 
 class TestColumnNamePatterns:
     """Tests for column name-based type resolution"""
@@ -126,10 +110,6 @@ class TestColumnNamePatterns:
         result = resolve_type(dialect, None, column_name=column_name)
         assert result == expected_type
 
-
-# =============================================================================
-# Fallback and Edge Case Tests
-# =============================================================================
 
 class TestUnknownTypes:
     """Tests for unknown type handling"""

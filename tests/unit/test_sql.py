@@ -12,10 +12,6 @@ import pytest
 from database.sql import has_placeholders, prepare_query, quote_identifier
 from database.sql import standardize_placeholders
 
-# =============================================================================
-# prepare_query - Basic Parameter Handling
-# =============================================================================
-
 
 class TestPrepareQueryBasic:
     """Test basic parameter handling through prepare_query."""
@@ -59,10 +55,6 @@ class TestPrepareQueryBasic:
         assert expected_sql_check(result_sql), f'SQL check failed: {result_sql}'
         assert expected_args_check(result_args), f'Args check failed: {result_args}'
 
-
-# =============================================================================
-# prepare_query - IN Clause Expansion
-# =============================================================================
 
 class TestPrepareQueryInClause:
     """Test IN clause parameter expansion."""
@@ -183,10 +175,6 @@ class TestPrepareQueryInClause:
         assert result_args == ('2025-01-01', 'Tenor')
 
 
-# =============================================================================
-# prepare_query - Named Parameters
-# =============================================================================
-
 class TestPrepareQueryNamedParams:
     """Test named parameter handling."""
 
@@ -222,10 +210,6 @@ class TestPrepareQueryNamedParams:
             assert result_args.get(key) == value, f'Key {key}: expected {value}, got {result_args.get(key)}'
 
 
-# =============================================================================
-# prepare_query - IS NULL Handling
-# =============================================================================
-
 class TestPrepareQueryIsNull:
     """Test IS NULL / IS NOT NULL handling."""
 
@@ -259,10 +243,6 @@ class TestPrepareQueryIsNull:
         assert 'val' not in result_args
         assert result_args['name'] == 'test'
 
-
-# =============================================================================
-# prepare_query - Percent Escaping
-# =============================================================================
 
 class TestPrepareQueryPercentEscaping:
     """Test percent sign escaping in string literals.
@@ -302,10 +282,6 @@ class TestPrepareQueryPercentEscaping:
             assert expected_not_contains not in result_sql
 
 
-# =============================================================================
-# prepare_query - Regexp Protection
-# =============================================================================
-
 class TestPrepareQueryRegexp:
     """Test regexp_replace patterns are preserved."""
 
@@ -325,10 +301,6 @@ class TestPrepareQueryRegexp:
         if expected_escaped:
             assert expected_escaped in result_sql
 
-
-# =============================================================================
-# quote_identifier
-# =============================================================================
 
 class TestQuoteIdentifier:
     """Test database identifier quoting."""
@@ -353,10 +325,6 @@ class TestQuoteIdentifier:
         with pytest.raises(ValueError, match='Unknown dialect: mysql'):
             quote_identifier('table', 'mysql')
 
-
-# =============================================================================
-# has_placeholders
-# =============================================================================
 
 class TestHasPlaceholders:
     """Test placeholder detection."""
@@ -385,10 +353,6 @@ class TestHasPlaceholders:
         """Test placeholder detection for various patterns."""
         assert has_placeholders(sql) is expected
 
-
-# =============================================================================
-# standardize_placeholders
-# =============================================================================
 
 class TestStandardizePlaceholders:
     """Test placeholder conversion between dialects."""
@@ -422,10 +386,6 @@ class TestStandardizePlaceholders:
         result = standardize_placeholders(sql, 'sqlite')
         assert '?' in result
 
-
-# =============================================================================
-# Integration / Full Pipeline Tests
-# =============================================================================
 
 class TestFullPipeline:
     """Test complete query processing scenarios."""
@@ -467,10 +427,6 @@ class TestFullPipeline:
         assert result_args['user'] == 'USER_A'
         assert 'ids' not in result_args
 
-
-# =============================================================================
-# Traceability Matrix - Explicit Input/Output Cases
-# =============================================================================
 
 class TestSQLMatrix:
     """Traceability matrix with explicit input → output mappings.

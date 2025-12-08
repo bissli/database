@@ -23,46 +23,39 @@ from libb import collapse
 logger = logging.getLogger(__name__)
 
 
-def dumpsql(func):
-    """Decorator for logging SQL queries and parameters."""
-    @wraps(func)
-    def wrapper(self, operation: str, *args: Any, **kwargs: Any):
-        start = time.time()
-        logger.debug(f'SQL:\n{operation}\nargs: {args}')
-        try:
-            result = func(self, operation, *args, **kwargs)
-            if hasattr(self.dbapi_cursor, 'statusmessage'):
-                logger.debug(f'Query result: {self.dbapi_cursor.statusmessage}')
-            return result
-        except Exception:
-            logger.error(f'Error with query:\nSQL:\n{operation}\nargs: {args}')
-            raise
-        finally:
-            elapsed = time.time() - start
-            self.connwrapper.addcall(elapsed)
-            logger.debug(f'Query time: {elapsed:.4f}s')
-    return wrapper
+def dumpsql(is_many: bool = False):
+    """Decorator for logging SQL queries and parameters.
 
+    Args:
+        is_many: If True, logs row count instead of args (for executemany)
+    """
+    def decorator(func):
+        label = 'Executemany' if is_many else 'Query'
 
-def dumpsql_many(func):
-    """Decorator for logging executemany operations."""
-    @wraps(func)
-    def wrapper(self, operation: str, seq_of_parameters: Sequence, *args: Any, **kwargs: Any):
-        start = time.time()
-        logger.debug(f'SQL:\n{operation}\nparams: {len(seq_of_parameters)} rows')
-        try:
-            result = func(self, operation, seq_of_parameters, *args, **kwargs)
-            if hasattr(self.dbapi_cursor, 'statusmessage'):
-                logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
-            return result
-        except Exception:
-            logger.error(f'Error with executemany:\nSQL:\n{operation}')
-            raise
-        finally:
-            elapsed = time.time() - start
-            self.connwrapper.addcall(elapsed)
-            logger.debug(f'Executemany time: {elapsed:.4f}s')
-    return wrapper
+        @wraps(func)
+        def wrapper(self, operation: str, *args: Any, **kwargs: Any):
+            start = time.time()
+            if is_many and args:
+                logger.debug(f'SQL:\n{operation}\nparams: {len(args[0])} rows')
+            else:
+                logger.debug(f'SQL:\n{operation}\nargs: {args}')
+            try:
+                result = func(self, operation, *args, **kwargs)
+                if hasattr(self.dbapi_cursor, 'statusmessage'):
+                    logger.debug(f'{label} result: {self.dbapi_cursor.statusmessage}')
+                return result
+            except Exception:
+                if is_many:
+                    logger.error(f'Error with executemany:\nSQL:\n{operation}')
+                else:
+                    logger.error(f'Error with query:\nSQL:\n{operation}\nargs: {args}')
+                raise
+            finally:
+                elapsed = time.time() - start
+                self.connwrapper._addcall(elapsed)
+                logger.debug(f'{label} time: {elapsed:.4f}s')
+        return wrapper
+    return decorator
 
 
 class Cursor:
@@ -84,7 +77,6 @@ class Cursor:
         self.connwrapper = connection_wrapper
         self._strategy = strategy
         self._arraysize: int = 1
-        self._original_sql: str = ''
 
     @property
     def strategy(self) -> Any:
@@ -99,7 +91,7 @@ class Cursor:
 
     def __iter__(self) -> Iterator:
         """Return iterator for cursor results."""
-        return IterChunk(self.dbapi_cursor)
+        return iter_chunk(self.dbapi_cursor)
 
     @property
     def description(self) -> list[tuple] | None:
@@ -153,13 +145,12 @@ class Cursor:
             return self.dbapi_cursor.nextset()
         return None
 
-    @dumpsql
+    @dumpsql()
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation."""
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)
-        self._original_sql = operation
 
         if args:
             args = tuple(TypeConverter.convert_params(arg) for arg in args)
@@ -173,30 +164,48 @@ class Cursor:
 
     def _execute_query(self, sql: str, args: tuple) -> None:
         """Execute query with parameter handling."""
+        # No placeholders - execute without parameters
         if args and not has_placeholders(sql):
             self.dbapi_cursor.execute(sql)
             logger.debug('Executed query without placeholders (ignoring args)')
             return
 
-        for arg in collapse(args):
-            if isinstance(arg, dict):
-                if self._is_multi_statement(sql):
-                    self._execute_multi_statement_named(sql, arg)
-                else:
-                    self.dbapi_cursor.execute(sql, arg)
-                return
+        # Named parameters (dict)
+        dict_params = self._find_dict_params(args)
+        if dict_params is not None:
+            self._execute_with_dict_params(sql, dict_params)
+            return
 
+        # Multi-statement SQL with positional params
         if self._is_multi_statement(sql) and args:
             self._execute_multi_statement(sql, args)
             return
 
-        if args:
-            if len(args) == 1 and isinstance(args[0], (list, tuple)):
-                self.dbapi_cursor.execute(sql, args[0])
-            else:
-                self.dbapi_cursor.execute(sql, args)
+        # Standard execution
+        self._execute_simple(sql, args)
+
+    def _find_dict_params(self, args: tuple) -> dict | None:
+        """Find first dict in args, or None if no dict found."""
+        for arg in collapse(args):
+            if isinstance(arg, dict):
+                return arg
+        return None
+
+    def _execute_with_dict_params(self, sql: str, params: dict) -> None:
+        """Execute SQL with named (dict) parameters."""
+        if self._is_multi_statement(sql):
+            self._execute_multi_statement_named(sql, params)
         else:
+            self.dbapi_cursor.execute(sql, params)
+
+    def _execute_simple(self, sql: str, args: tuple) -> None:
+        """Execute simple single-statement SQL."""
+        if not args:
             self.dbapi_cursor.execute(sql)
+        elif len(args) == 1 and isinstance(args[0], (list, tuple)):
+            self.dbapi_cursor.execute(sql, args[0])
+        else:
+            self.dbapi_cursor.execute(sql, args)
 
     def _is_multi_statement(self, sql: str) -> bool:
         """Check if SQL contains multiple statements."""
@@ -235,7 +244,7 @@ class Cursor:
             else:
                 self.dbapi_cursor.execute(stmt)
 
-    @dumpsql_many
+    @dumpsql(is_many=True)
     def executemany(self, operation: str, seq_of_parameters: Sequence,
                     batch_size: int = 500, **kwargs: Any) -> int:
         """Execute against all parameter sequences."""
@@ -266,7 +275,7 @@ class Cursor:
         return total_rowcount
 
 
-def IterChunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
+def iter_chunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
     """Iterate through cursor results in chunks."""
     while True:
         try:

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import wraps
+from typing import Any, Callable
 
 import pandas as pd
 import pyarrow as pa
@@ -108,7 +109,7 @@ class DatabaseOptions(ConfigOptions):
     appname: str = None
     cleanup: bool = True
     check_connection: bool = True
-    data_loader: callable = None
+    data_loader: Callable[..., Any] | None = None
     # Connection pooling parameters
     use_pool: bool = False
     pool_max_connections: int = 5
