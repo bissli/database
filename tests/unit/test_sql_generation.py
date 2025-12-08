@@ -4,7 +4,7 @@ Unit tests for SQL generation utilities.
 from unittest.mock import patch
 
 import pytest
-from database.data import build_insert_sql, build_select_sql
+from database.sql import build_insert_sql, build_select_sql
 
 
 @pytest.mark.parametrize(('dialect', 'table', 'expected'), [
@@ -81,7 +81,7 @@ class TestSQLGeneration:
     def test_build_select_sql(self, dialect, expected_sql):
         """Test SELECT statement generation for different database types"""
         # Mock quote_identifier to use the expected format for each dialect
-        with patch('database.data.quote_identifier') as mock_quote:
+        with patch('database.sql.quote_identifier') as mock_quote:
             mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
             sql = build_select_sql('users', dialect, columns=['id', 'name'], where='active = true',
@@ -96,7 +96,7 @@ class TestSQLGeneration:
     def test_build_insert_sql(self, dialect, placeholder):
         """Test INSERT statement generation with appropriate placeholders"""
         # Mock quote_identifier to use the expected format
-        with patch('database.data.quote_identifier') as mock_quote:
+        with patch('database.sql.quote_identifier') as mock_quote:
             mock_quote.side_effect = lambda ident, dialect: f'"{ident}"'
 
             sql = build_insert_sql(

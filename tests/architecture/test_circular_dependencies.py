@@ -11,37 +11,19 @@ def test_circular_dependencies():
     # Add src to path so imports work
     sys.path.insert(0, str(base_dir.parent))
 
-    # List of all modules to test in dependency order
     modules = [
-        # Independent modules (no internal deps)
         'database.exceptions',
         'database.cache',
         'database.sql',
-
-        # Type system and options
         'database.types',
         'database.options',
-
-        # Strategy (self-contained with raw execution)
         'database.strategy',
         'database.strategy.base',
         'database.strategy.postgres',
         'database.strategy.sqlite',
-
-        # Connection and cursor
         'database.cursor',
         'database.connection',
-
-        # Transaction and query
         'database.transaction',
-        'database.query',
-
-        # Operations
-        'database.schema',
-        'database.data',
-        'database.upsert',
-
-        # Main package
         'database',
     ]
 

@@ -3,10 +3,9 @@ Test auto-commit functionality across different database drivers.
 """
 import logging
 
-from database.transaction import Transaction
-from database.transaction import diagnose_connection
-from database.transaction import disable_auto_commit, enable_auto_commit
 from database.connection import ensure_commit
+from database.transaction import Transaction, diagnose_connection
+from database.transaction import disable_auto_commit, enable_auto_commit
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ class TestAutoCommit:
 
         # Mock strategy to test the strategy path
         mock_strategy = mocker.Mock()
-        mocker.patch('database.strategy.get_db_strategy', return_value=mock_strategy)
+        mocker.patch('database.transaction.get_db_strategy', return_value=mock_strategy)
 
         enable_auto_commit(conn)
 
@@ -47,7 +46,7 @@ class TestAutoCommit:
 
         # Mock strategy to test the strategy path
         mock_strategy = mocker.Mock()
-        mocker.patch('database.strategy.get_db_strategy', return_value=mock_strategy)
+        mocker.patch('database.transaction.get_db_strategy', return_value=mock_strategy)
 
         enable_auto_commit(conn)
 
@@ -64,7 +63,7 @@ class TestAutoCommit:
 
         # Mock strategy
         mock_strategy = mocker.Mock()
-        mocker.patch('database.strategy.get_db_strategy', return_value=mock_strategy)
+        mocker.patch('database.transaction.get_db_strategy', return_value=mock_strategy)
 
         disable_auto_commit(conn)
 

@@ -38,7 +38,7 @@ def mock_connection(mocker):
     conn.options.data_loader = lambda data, columns, **kwargs: data if isinstance(data, list) else []
     mock_cursor.connwrapper = conn
 
-    mocker.patch('database.query.extract_column_info', return_value=['col1', 'col2'])
+    mocker.patch('database.cursor.extract_column_info', return_value=['col1', 'col2'])
 
     return conn
 
@@ -230,7 +230,7 @@ class TestCacheClearing:
     """Tests for cache clearing functionality"""
 
     def test_cache_integration_with_cache_manager(self, mock_connection, strategy,
-                                                   method_factory, cache_manager):
+                                                  method_factory, cache_manager):
         """Test integration between strategy caches and Cache"""
         get_count = method_factory.create('table_columns', ['col1', 'col2'])
 
@@ -243,7 +243,7 @@ class TestCacheClearing:
         # Verify cache was created with table_columns prefix
         strategy_class = strategy.__class__.__name__
         matching_caches = [name for name in strategy_caches
-                          if 'table_columns' in name and strategy_class in name]
+                           if 'table_columns' in name and strategy_class in name]
         assert len(matching_caches) == 1
 
         cache_manager.clear_strategy_caches()
@@ -252,7 +252,7 @@ class TestCacheClearing:
         assert get_count() == 2
 
     def test_cache_clearing_for_specific_table(self, mock_connection, strategy,
-                                                method_factory, cache_manager):
+                                               method_factory, cache_manager):
         """Test clearing cache entries for a specific table"""
         def table_specific_return(table):
             return ['t1col1', 't1col2'] if table == 'test_table1' else ['t2col1', 't2col2']
@@ -272,7 +272,7 @@ class TestCacheClearing:
         assert get_count() == 3  # Cache hit
 
     def test_consolidated_cache_clearing(self, mock_connection, strategy,
-                                          method_factory, cache_manager):
+                                         method_factory, cache_manager):
         """Test that consolidated clearing clears both strategy and schema caches"""
         get_count = method_factory.create('table_columns', ['col1', 'col2'])
         table = 'test_table'
@@ -294,7 +294,7 @@ class TestCacheClearing:
         assert table.lower() not in schema_conn_cache
 
     def test_clearing_nonexistent_table(self, mock_connection, strategy,
-                                         method_factory, cache_manager):
+                                        method_factory, cache_manager):
         """Test that clearing a nonexistent table doesn't cause errors"""
         get_count = method_factory.create('table_columns', ['col1', 'col2'])
 
@@ -312,7 +312,7 @@ class TestCacheClearing:
         assert get_count() == 2
 
     def test_selective_cache_clearing_by_type(self, mock_connection, strategy,
-                                               method_factory, cache_manager):
+                                              method_factory, cache_manager):
         """Test that clearing one cache type doesn't affect others"""
         get_cols_count = method_factory.create('table_columns', ['col1', 'col2'], 'get_columns')
         get_pks_count = method_factory.create('primary_keys', ['col1'], 'get_primary_keys')
@@ -350,7 +350,7 @@ class TestCacheKeyGeneration:
          ['test_table', 'arg', 'none_arg=', 'regular_arg=']),
     ], ids=['basic_types', 'none_values'])
     def test_cache_key_contains_expected_values(self, table_name, method_args,
-                                                 method_kwargs, expected_in_key):
+                                                method_kwargs, expected_in_key):
         """Test that cache keys contain expected components"""
         key = _create_cache_key(table_name, method_args, method_kwargs)
 
