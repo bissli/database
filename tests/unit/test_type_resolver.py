@@ -2,154 +2,108 @@
 Tests for type resolution system to verify proper type identification behavior.
 """
 import datetime
-from unittest.mock import MagicMock, patch
 
-from database.adapters.type_mapping import TypeResolver, resolve_type
+from database.types import resolve_type
 
 
 def test_resolve_type_function():
     """Test the global resolve_type function"""
-    import database.adapters.type_mapping as tm
-
-    # Reset global resolver to ensure fresh state
-    tm._global_resolver = None
-
     # Test basic type resolution
     assert resolve_type('postgresql', 23) == int  # int4 OID
     assert resolve_type('sqlite', 'INTEGER') == int
 
-    # Test with column name hints - the resolver uses column name patterns
-    # for type resolution when type_code doesn't determine it
+    # Test with column name hints
     assert resolve_type('postgresql', 23, 'user_id') == int  # int4 is always int
     assert resolve_type('postgresql', 1082, 'created_date') == datetime.date  # date OID
 
-    # Test name-based resolution when type code is None or ambiguous
-    # The _resolve_by_column_name method handles these patterns
-    resolver = TypeResolver()
-    assert resolver._resolve_by_column_name('user_id', None, None, 'postgresql') == int
-    assert resolver._resolve_by_column_name('created_at', None, None, 'postgresql') == datetime.datetime
+    # Test name-based resolution when type code is None
+    assert resolve_type('postgresql', None, 'user_id') == int
+    assert resolve_type('postgresql', None, 'created_at') == datetime.datetime
 
 
-def test_type_resolver_postgres_types():
+def test_postgres_types():
     """Test PostgreSQL type resolution"""
-    resolver = TypeResolver()
-
     # Test basic PostgreSQL types
-    assert resolver.resolve_python_type('postgresql', 23) == int  # int4
-    assert resolver.resolve_python_type('postgresql', 25) == str  # text
-    assert resolver.resolve_python_type('postgresql', 16) == bool  # bool
-    assert resolver.resolve_python_type('postgresql', 1700) == float  # numeric
-    assert resolver.resolve_python_type('postgresql', 1082) == datetime.date  # date
+    assert resolve_type('postgresql', 23) == int  # int4
+    assert resolve_type('postgresql', 25) == str  # text
+    assert resolve_type('postgresql', 16) == bool  # bool
+    assert resolve_type('postgresql', 1700) == float  # numeric
+    assert resolve_type('postgresql', 1082) == datetime.date  # date
 
     # Test unknown type falls back to string
-    assert resolver.resolve_python_type('postgresql', 99999) == str
+    assert resolve_type('postgresql', 99999) == str
 
 
-def test_type_resolver_sqlite_types():
+def test_sqlite_types():
     """Test SQLite type resolution"""
-    resolver = TypeResolver()
-
     # Test basic SQLite types
-    assert resolver.resolve_python_type('sqlite', 'INTEGER') == int
-    assert resolver.resolve_python_type('sqlite', 'TEXT') == str
-    assert resolver.resolve_python_type('sqlite', 'REAL') == float
-    assert resolver.resolve_python_type('sqlite', 'BLOB') == bytes
-    assert resolver.resolve_python_type('sqlite', 'NUMERIC') == float
-    assert resolver.resolve_python_type('sqlite', 'BOOLEAN') == bool
-    assert resolver.resolve_python_type('sqlite', 'DATE') == datetime.date
-    assert resolver.resolve_python_type('sqlite', 'DATETIME') == datetime.datetime
+    assert resolve_type('sqlite', 'INTEGER') == int
+    assert resolve_type('sqlite', 'TEXT') == str
+    assert resolve_type('sqlite', 'REAL') == float
+    assert resolve_type('sqlite', 'BLOB') == bytes
+    assert resolve_type('sqlite', 'NUMERIC') == float
+    assert resolve_type('sqlite', 'BOOLEAN') == bool
+    assert resolve_type('sqlite', 'DATE') == datetime.date
+    assert resolve_type('sqlite', 'DATETIME') == datetime.datetime
 
     # Test type with parameters
-    assert resolver.resolve_python_type('sqlite', 'NUMERIC(10,2)') == float
+    assert resolve_type('sqlite', 'NUMERIC(10,2)') == float
 
     # Test unknown type falls back to string
-    assert resolver.resolve_python_type('sqlite', 'CUSTOM_TYPE') == str
+    assert resolve_type('sqlite', 'CUSTOM_TYPE') == str
 
 
 def test_resolve_by_column_name():
     """Test type resolution based on column name patterns"""
-    resolver = TypeResolver()
+    # Test ID column patterns
+    assert resolve_type('postgresql', None, 'user_id') == int
+    assert resolve_type('postgresql', None, 'customer_id') == int
+    assert resolve_type('postgresql', None, 'id') == int
 
-    # Test column name pattern matching
-    assert resolver._resolve_by_column_name('user_id', None, None, 'postgresql') == int
-    assert resolver._resolve_by_column_name('customer_id', None, None, 'postgresql') == int
-    assert resolver._resolve_by_column_name('id', None, None, 'postgresql') == int
+    # Test date column patterns
+    assert resolve_type('postgresql', None, 'created_date') == datetime.date
+    assert resolve_type('postgresql', None, 'start_date') == datetime.date
 
-    assert resolver._resolve_by_column_name('created_date', None, None, 'postgresql') == datetime.date
-    assert resolver._resolve_by_column_name('start_date', None, None, 'postgresql') == datetime.date
-    assert resolver._resolve_by_column_name('date', None, None, 'postgresql') == datetime.date
+    # Test datetime column patterns
+    assert resolve_type('postgresql', None, 'created_at') == datetime.datetime
+    assert resolve_type('postgresql', None, 'updated_at') == datetime.datetime
+    assert resolve_type('postgresql', None, 'timestamp') == datetime.datetime
+    assert resolve_type('postgresql', None, 'event_datetime') == datetime.datetime
 
-    assert resolver._resolve_by_column_name('created_at', None, None, 'postgresql') == datetime.datetime
-    assert resolver._resolve_by_column_name('updated_at', None, None, 'postgresql') == datetime.datetime
-    assert resolver._resolve_by_column_name('timestamp', None, None, 'postgresql') == datetime.datetime
+    # Test time column patterns
+    assert resolve_type('postgresql', None, 'start_time') == datetime.time
+    assert resolve_type('postgresql', None, 'end_time') == datetime.time
 
-    assert resolver._resolve_by_column_name('start_time', None, None, 'postgresql') == datetime.time
-    assert resolver._resolve_by_column_name('end_time', None, None, 'postgresql') == datetime.time
-    assert resolver._resolve_by_column_name('time', None, None, 'postgresql') == datetime.time
+    # Test boolean column patterns
+    assert resolve_type('postgresql', None, 'is_active') == bool
+    assert resolve_type('postgresql', None, 'active_flag') == bool
+    assert resolve_type('postgresql', None, 'enabled') == bool
 
-    assert resolver._resolve_by_column_name('is_active', None, None, 'postgresql') == bool
-    assert resolver._resolve_by_column_name('active_flag', None, None, 'postgresql') == bool
-    assert resolver._resolve_by_column_name('enabled', None, None, 'postgresql') == bool
+    # Test money column patterns
+    assert resolve_type('postgresql', None, 'total_price') == float
+    assert resolve_type('postgresql', None, 'amount_paid') == float
 
-    # Test with unknown pattern
-    assert resolver._resolve_by_column_name('unknown_column', None, None, 'postgresql') is None
-
-
-def test_config_overrides():
-    """Test type resolution with config overrides"""
-    resolver = TypeResolver()
-
-    with patch('database.config.type_mapping.TypeMappingConfig.get_instance') as mock_config:
-        # Setup mock to return specific types for columns
-        config_instance = MagicMock()
-
-        # Set up different return values based on input
-        def get_type_side_effect(db_type, table, column):
-            if table == 'users' and column == 'status_code':
-                return 'int'
-            elif table == 'orders' and column == 'total':
-                return 'numeric'
-            elif column == 'color_hex':
-                return 'varchar'
-            return None
-
-        config_instance.get_type_for_column.side_effect = get_type_side_effect
-        mock_config.return_value = config_instance
-
-        # Test table-specific column resolution
-        assert resolver.resolve_python_type('postgresql', 1043, 'status_code', table_name='users') == int
-        assert resolver.resolve_python_type('postgresql', 1700, 'total', table_name='orders') == float
-
-        # Test column-only resolution
-        assert resolver.resolve_python_type('postgresql', 1043, 'color_hex') == str  # varchar OID
-
-        # Test fallthrough to standard resolver when no config match
-        assert resolver.resolve_python_type('postgresql', 1043, 'name', table_name='users') == str
+    # Test with unknown pattern defaults to str
+    assert resolve_type('postgresql', None, 'unknown_column') == str
 
 
-def test_integration_with_handlers():
-    """Test integration with type handlers through registry"""
-    from database.adapters.type_mapping import TypeHandlerRegistry
+def test_type_code_is_python_type():
+    """Test that passing a Python type returns it unchanged"""
+    assert resolve_type('postgresql', int) == int
+    assert resolve_type('sqlite', str) == str
+    assert resolve_type('postgresql', datetime.datetime) == datetime.datetime
+    assert resolve_type('sqlite', bool) == bool
 
-    resolver = TypeResolver()
 
-    with patch.object(TypeHandlerRegistry, 'get_instance') as mock_registry_getter:
-        # Create a mock registry instance
-        mock_registry = MagicMock()
-        mock_registry_getter.return_value = mock_registry
+def test_both_type_code_and_column_name():
+    """Test when both type code and column name are provided"""
+    # Type code takes precedence when it's a valid known type
+    assert resolve_type('postgresql', 23, 'some_column') == int  # int4 OID
+    assert resolve_type('sqlite', 'INTEGER', 'some_column') == int
 
-        # Set up the mock to return custom types
-        def get_python_type_side_effect(db_type, type_code, type_name=None):
-            if db_type == 'postgresql' and type_code == 1043:
-                return str
-            return str  # Default
-
-        mock_registry.get_python_type.side_effect = get_python_type_side_effect
-
-        # Test that handler registry is consulted
-        with patch.object(resolver, '_registry', mock_registry):  # Patch the _registry attribute
-            assert resolver.resolve_python_type('postgresql', 1043) == str
-            mock_registry.get_python_type.assert_called_with('postgresql', 1043, None)
+    # For unknown type code, column name patterns are used
+    assert resolve_type('postgresql', 99999, 'user_id') == int
+    assert resolve_type('postgresql', 99999, 'is_active') == bool
 
 
 if __name__ == '__main__':

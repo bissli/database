@@ -7,8 +7,7 @@ import math
 
 import numpy as np
 import pandas as pd
-from database.adapters.type_conversion import TypeConverter
-from database.adapters.type_conversion import get_adapter_registry
+from database.types import TypeConverter, get_adapter_registry
 
 
 def test_adapter_registry_sqlite():

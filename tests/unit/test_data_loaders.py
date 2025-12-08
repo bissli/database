@@ -9,7 +9,7 @@ def test_pandas_numpy_data_loader():
     data = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
 
     # Create mock column info
-    from database.adapters.column_info import Column
+    from database.types import Column
     column_info = [Column(name='name', type_code=None), Column(name='age', type_code=None)]
 
     result = pandas_numpy_data_loader(data, column_info)
@@ -29,7 +29,7 @@ def test_pandas_pyarrow_data_loader():
     data = [{'name': 'Alice', 'age': 30}, {'name': 'Bob', 'age': 25}]
 
     # Create mock column info
-    from database.adapters.column_info import Column
+    from database.types import Column
     column_info = [Column(name='name', type_code=None), Column(name='age', type_code=None)]
 
     result = pandas_pyarrow_data_loader(data, column_info)

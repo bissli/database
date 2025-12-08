@@ -1,69 +1,51 @@
 """
 Unit tests for schema cache utilities.
 """
-from unittest.mock import patch
-
-import pytest
-from database.utils.schema_cache import SchemaCache
+from database.cache import Cache
 
 
-def test_schema_cache_singleton():
-    """Test that SchemaCache is a singleton"""
-    cache1 = SchemaCache.get_instance()
-    cache2 = SchemaCache.get_instance()
+def test_cache_singleton():
+    """Test that Cache is a singleton"""
+    cache1 = Cache.get_instance()
+    cache2 = Cache.get_instance()
     assert cache1 is cache2
 
 
-@pytest.mark.skip
-def test_get_column_metadata(mock_postgres_conn):
-    """Test getting column metadata from cache or database"""
-    cache = SchemaCache.get_instance()
+def test_schema_cache_operations():
+    """Test schema cache get/set operations"""
+    cache = Cache.get_instance()
 
-    # Mock the database query response
-    with patch('database.operations.query.select') as mock_select:
-        mock_select.return_value = [
-            {'column_name': 'id', 'data_type': 'integer', 'character_maximum_length': None,
-             'numeric_precision': 32, 'numeric_scale': 0, 'is_nullable': 'NO'},
-            {'column_name': 'name', 'data_type': 'character varying', 'character_maximum_length': 100,
-             'numeric_precision': None, 'numeric_scale': None, 'is_nullable': 'YES'}
-        ]
-
-        # First call should query the database
-        metadata = cache.get_column_metadata(mock_postgres_conn, 'users', connection_id='test_conn')
-
-        # Verify metadata was processed correctly
-        assert 'id' in metadata
-        assert 'name' in metadata
-        assert metadata['id']['type_name'] == 'integer'
-        assert metadata['name']['max_length'] == 100
-        assert not metadata['id']['is_nullable']
-
-        # Query again - should use cached data, not database
-        mock_select.reset_mock()
-        metadata2 = cache.get_column_metadata(mock_postgres_conn, 'users', connection_id='test_conn')
-        mock_select.assert_not_called()
-
-        # Verify same metadata is returned
-        assert metadata == metadata2
-
-
-def test_clear_cache():
-    """Test clearing the schema cache"""
-    cache = SchemaCache.get_instance()
-
-    # Get or create a connection cache
-    connection_cache = cache.get_or_create_connection_cache('test_clear')
+    # Get a schema cache for a connection
+    connection_cache = cache.get_schema_cache('test_conn')
     connection_cache['test_table'] = {'column1': {'name': 'column1', 'type_name': 'integer'}}
 
     # Verify the cache has our data
     assert 'test_table' in connection_cache
 
     # Clear all caches
-    cache.clear()
+    cache.clear_all()
 
     # Get the cache again - should be empty
-    connection_cache = cache.get_or_create_connection_cache('test_clear')
+    connection_cache = cache.get_schema_cache('test_conn')
     assert 'test_table' not in connection_cache
+
+
+def test_clear_for_table():
+    """Test clearing cache entries for a specific table"""
+    cache = Cache.get_instance()
+    cache.clear_all()
+
+    # Add entries for multiple tables
+    schema_cache = cache.get_schema_cache('test_conn')
+    schema_cache['table1'] = {'col1': {}}
+    schema_cache['table2'] = {'col2': {}}
+
+    # Clear only table1
+    cache.clear_for_table('table1')
+
+    # table1 should be cleared, table2 should remain
+    assert 'table1' not in schema_cache
+    assert 'table2' in schema_cache
 
 
 if __name__ == '__main__':

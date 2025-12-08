@@ -1,4 +1,4 @@
-from database.utils.sql import escape_percent_signs_in_literals
+from database.sql import escape_percent_signs_in_literals
 
 
 def test_escape_percent_signs_in_literals_basic():
@@ -51,31 +51,19 @@ def test_escape_percent_signs_in_literals_no_percents():
     assert result == sql
 
 
-def test_escape_percent_signs_in_literals_dynamic_patterns():
-    """Test real-world scenario with parameter and dynamic LIKE pattern"""
-    # Create mock connections for each database type
-
+def test_escape_percent_signs_in_literals_dynamic_patterns(create_simple_mock_connection):
+    """Test real-world scenario with parameter and dynamic LIKE pattern."""
     from database.utils.connection_utils import get_dialect_name
-    from tests.fixtures.mocks import _create_simple_mock_connection
 
-    # Create a proper mock connection
-    pg_conn = _create_simple_mock_connection('postgresql')
+    pg_conn = create_simple_mock_connection('postgresql')
 
-    # Original problematic query
     sql = "SELECT name, value FROM test_table WHERE name LIKE 'RetryTest%'"
 
-    # Apply our escaping function
     escaped_sql = escape_percent_signs_in_literals(sql)
 
-    # Verify it's properly escaped
     assert escaped_sql == "SELECT name, value FROM test_table WHERE name LIKE 'RetryTest%%'"
-
-    # Verify that after escaping it would work with the database
-    # (We can't actually execute it without a connection, but we can check the format)
     assert '%%' in escaped_sql
     assert '%%%' not in escaped_sql  # Ensure we don't over-escape
-
-    # Verify we can correctly identify the connection type
     assert get_dialect_name(pg_conn) == 'postgresql'
 
 
@@ -112,14 +100,12 @@ def test_regex_pattern_not_affected_by_escaping():
     assert r'\/?[UV]? ?(CN|US)?$' in result
 
 
-def test_full_query_with_regex_and_transaction():
-    """Test a full query with regex pattern in a transaction-like context"""
-    from database.utils.sql import process_query_parameters
-    from tests.fixtures.mocks import _create_simple_mock_connection
+def test_full_query_with_regex_and_transaction(create_simple_mock_connection):
+    """Test a full query with regex pattern in a transaction-like context."""
+    from database.sql import process_query_parameters
 
-    pg_conn = _create_simple_mock_connection('postgresql')
+    pg_conn = create_simple_mock_connection('postgresql')
 
-    # Complex query with regex patterns similar to the reported issue
     sql = r"""
     SELECT t1.id, t1.name,
            regexp_replace(t1.code, '\/?[UV]? ?(CN|US)?$', '') as clean_code
@@ -129,10 +115,8 @@ def test_full_query_with_regex_and_transaction():
     AND t2.status NOT IN ('inactive', 'deleted')
     """
 
-    # Process with the full parameter handling pipeline
     processed_sql, processed_args = process_query_parameters(pg_conn, sql, ['2023-01-01'])
 
-    # Verify regex pattern remains intact
     assert r'\/?[UV]? ?(CN|US)?$' in processed_sql
     assert '%s' in processed_sql  # Parameters should still be %s for postgres
 

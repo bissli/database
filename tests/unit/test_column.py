@@ -1,7 +1,6 @@
 from unittest.mock import patch
 
-from database.adapters.column_info import Column
-from database.adapters.column_info import columns_from_cursor_description
+from database.types import Column, columns_from_cursor_description
 
 
 def test_column_get_names():
@@ -74,7 +73,7 @@ def test_columns_from_cursor_description():
 
     cursor = MockCursor()
     # Mock the resolve_type function to avoid initialization errors
-    with patch('database.adapters.column_info.resolve_type', return_value=str):
+    with patch('database.types.resolve_type', return_value=str):
         columns = columns_from_cursor_description(cursor, 'sqlite')
 
     assert len(columns) == 2
@@ -87,17 +86,13 @@ def test_columns_from_cursor_description():
     assert columns == []
 
 
-def test_connection_type_mapping():
-    """Test mapping from connection detection to database type string"""
-
+def test_connection_type_mapping(create_simple_mock_connection):
+    """Test mapping from connection detection to database type string."""
     from database.utils.connection_utils import get_dialect_name
-    from tests.fixtures.mocks import _create_simple_mock_connection
 
-    # Create mock connections
-    pg_conn = _create_simple_mock_connection('postgresql')
-    sqlite_conn = _create_simple_mock_connection('sqlite')
+    pg_conn = create_simple_mock_connection('postgresql')
+    sqlite_conn = create_simple_mock_connection('sqlite')
 
-    # Use get_dialect_name to determine the database type
     assert get_dialect_name(pg_conn) == 'postgresql'
     assert get_dialect_name(sqlite_conn) == 'sqlite'
 

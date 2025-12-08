@@ -5,8 +5,8 @@ import datetime
 from decimal import Decimal
 from unittest.mock import patch
 
-from database.adapters.structure import PostgreSQLRowAdapter
-from database.adapters.structure import RowStructureAdapter, SQLiteRowAdapter
+from database.types import PostgreSQLRowAdapter, RowStructureAdapter
+from database.types import SQLiteRowAdapter
 
 
 def test_postgresql_row_adapter_no_conversion():

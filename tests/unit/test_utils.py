@@ -5,8 +5,8 @@ Unit tests for database utility functions.
 import logging
 
 import pytest
+from database.sql import quote_identifier, standardize_placeholders
 from database.utils.connection_utils import get_dialect_name, isconnection
-from database.utils.sql import quote_identifier, standardize_placeholders
 from database.utils.sql_generation import build_insert_sql
 
 logger = logging.getLogger(__name__)
