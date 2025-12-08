@@ -272,40 +272,6 @@ t.ordinal_position
 """
         return select_column(cn, sql, table)
 
-    def get_default_columns(self, cn, table, bypass_cache=False):
-        """Get columns suitable for general data display
-
-        Args:
-            cn: Database connection object
-            table: Table name to get default columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of column names suitable for general data representation
-        """
-        sql = f"""
-SELECT name FROM pragma_table_info('{table}')
-ORDER BY cid
-"""
-        return select_column(cn, sql)
-
-    def get_ordered_columns(self, cn, table, bypass_cache=False):
-        """Get all column names for a table ordered by their position
-
-        Args:
-            cn: Database connection object
-            table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of column names ordered by position
-        """
-        sql = f"""
-SELECT name FROM pragma_table_info('{table}')
-ORDER BY cid
-"""
-        return select_column(cn, sql)
-
     def find_sequence_column(self, cn, table, bypass_cache=False):
         """Find the best column to reset sequence for
 

@@ -10,10 +10,10 @@ def test_upsert_basic(sqlite_conn):
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
-    assert result[0]['name'] == 'Barry'
-    assert result[0]['value'] == 50
-    assert result[1]['name'] == 'Wallace'
-    assert result[1]['value'] == 92
+    assert result.iloc[0]['name'] == 'Barry'
+    assert result.iloc[0]['value'] == 50
+    assert result.iloc[1]['name'] == 'Wallace'
+    assert result.iloc[1]['value'] == 92
 
     rows = [{'name': 'Barry', 'value': 51}, {'name': 'Wallace', 'value': 93}]
     row_count = db.upsert_rows(sqlite_conn, 'test_table', rows, update_cols_always=['value'])
@@ -21,8 +21,8 @@ def test_upsert_basic(sqlite_conn):
     result = db.select(sqlite_conn, 'select name, value from test_table where name in (?, ?) order by name',
                        'Barry', 'Wallace')
     assert len(result) == 2
-    assert result[0]['value'] == 51
-    assert result[1]['value'] == 93
+    assert result.iloc[0]['value'] == 51
+    assert result.iloc[1]['value'] == 93
 
 
 def test_upsert_ifnull(sqlite_conn):
@@ -79,12 +79,12 @@ def test_upsert_mixed_operations(sqlite_conn):
     """, 'Alice', 'NewPerson1', 'NewPerson2')
 
     assert len(result) == 3
-    assert result[0]['name'] == 'Alice'
-    assert result[0]['value'] == 1000
-    assert result[1]['name'] == 'NewPerson1'
-    assert result[1]['value'] == 500
-    assert result[2]['name'] == 'NewPerson2'
-    assert result[2]['value'] == 600
+    assert result.iloc[0]['name'] == 'Alice'
+    assert result.iloc[0]['value'] == 1000
+    assert result.iloc[1]['name'] == 'NewPerson1'
+    assert result.iloc[1]['value'] == 500
+    assert result.iloc[2]['name'] == 'NewPerson2'
+    assert result.iloc[2]['value'] == 600
 
 
 def test_upsert_rowid(sqlite_conn):
@@ -96,6 +96,7 @@ def test_upsert_rowid(sqlite_conn):
         pass
 
     # Create a new table specifically for this test that relies on rowid
+    # Note: This table has no explicit PRIMARY KEY, only a UNIQUE constraint on name
     db.execute(sqlite_conn, """
 CREATE TEMPORARY TABLE test_rowid_table (
     name VARCHAR(50) UNIQUE NOT NULL,
@@ -111,13 +112,13 @@ CREATE TEMPORARY TABLE test_rowid_table (
     first_rowid = db.select_scalar(sqlite_conn, 'SELECT rowid FROM test_rowid_table WHERE name = ?', 'First')
     second_rowid = db.select_scalar(sqlite_conn, 'SELECT rowid FROM test_rowid_table WHERE name = ?', 'Second')
 
-    # Insert a new row using upsert
+    # Insert a new row using upsert (uses UNIQUE column 'name' for conflict detection)
     new_rows = [{'name': 'Third', 'value': 300}]
-    db.upsert_rows(sqlite_conn, 'test_rowid_table', new_rows, use_primary_key=True)
+    db.upsert_rows(sqlite_conn, 'test_rowid_table', new_rows)
 
-    # Update an existing row
+    # Update an existing row (uses UNIQUE column 'name' for conflict detection)
     update_rows = [{'name': 'First', 'value': 150}]
-    db.upsert_rows(sqlite_conn, 'test_rowid_table', update_rows, use_primary_key=True, update_cols_always=['value'])
+    db.upsert_rows(sqlite_conn, 'test_rowid_table', update_rows, update_cols_always=['value'])
 
     # Verify the rowid is preserved after update
     first_rowid_after = db.select_scalar(sqlite_conn, 'SELECT rowid FROM test_rowid_table WHERE name = ?', 'First')
@@ -245,10 +246,10 @@ def test_upsert_no_primary_keys(sqlite_conn):
     # Verify rows were inserted
     result = db.select(sqlite_conn, 'select name, value from test_no_pk order by name')
     assert len(result) == 2
-    assert result[0]['name'] == 'NoPK1'
-    assert result[0]['value'] == 100
-    assert result[1]['name'] == 'NoPK2'
-    assert result[1]['value'] == 200
+    assert result.iloc[0]['name'] == 'NoPK1'
+    assert result.iloc[0]['value'] == 100
+    assert result.iloc[1]['name'] == 'NoPK2'
+    assert result.iloc[1]['value'] == 200
 
     # Try "updating" with upsert again - without primary keys, this should insert new rows, not update
     rows = [
@@ -264,14 +265,14 @@ def test_upsert_no_primary_keys(sqlite_conn):
     assert len(result) == 4, 'table should have 4 rows total'
 
     # Verify both old and new rows exist
-    assert result[0]['name'] == 'NoPK1'
-    assert result[0]['value'] == 100
-    assert result[1]['name'] == 'NoPK1'
-    assert result[1]['value'] == 101
-    assert result[2]['name'] == 'NoPK2'
-    assert result[2]['value'] == 200
-    assert result[3]['name'] == 'NoPK2'
-    assert result[3]['value'] == 201
+    assert result.iloc[0]['name'] == 'NoPK1'
+    assert result.iloc[0]['value'] == 100
+    assert result.iloc[1]['name'] == 'NoPK1'
+    assert result.iloc[1]['value'] == 101
+    assert result.iloc[2]['name'] == 'NoPK2'
+    assert result.iloc[2]['value'] == 200
+    assert result.iloc[3]['name'] == 'NoPK2'
+    assert result.iloc[3]['value'] == 201
 
 
 if __name__ == '__main__':

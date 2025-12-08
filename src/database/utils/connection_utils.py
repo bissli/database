@@ -16,6 +16,7 @@ and SQLAlchemy's connection management system.
 """
 import atexit
 import logging
+import sqlite3
 import threading
 import time
 from functools import wraps
@@ -26,6 +27,7 @@ from sqlalchemy.pool import NullPool
 
 __all__ = [
     'isconnection',
+    'is_sqlite3_connection',
     'check_connection',
     'create_url_from_options',
     'get_engine_for_options',
@@ -49,6 +51,15 @@ def isconnection(obj):
     try:
         get_dialect_name(obj)
         return True
+    except:
+        return False
+
+
+def is_sqlite3_connection(obj):
+    """Check if object is a SQLite database connection"""
+    try:
+        dialect = get_dialect_name(obj)
+        return dialect == 'sqlite'
     except:
         return False
 
@@ -168,6 +179,12 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
         url = create_url_from_options(options)
 
         engine_kwargs = { 'echo':  False}
+
+        # Add SQLite-specific settings for type detection
+        if options.drivername == 'sqlite':
+            engine_kwargs['connect_args'] = {
+                'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+            }
 
         # Configure pooling based on use_pool parameter
         if not use_pool:

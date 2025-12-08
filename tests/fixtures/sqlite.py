@@ -5,7 +5,7 @@ import pytest
 @pytest.fixture
 def sqlite_conn():
     """Create an in-memory SQLite database for testing"""
-    # Create connection
+    # Create connection with default pandas data_loader
     conn = db.connect({
         'drivername': 'sqlite',
         'database': ':memory:'

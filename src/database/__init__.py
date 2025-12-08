@@ -42,7 +42,7 @@ from database.operations.upsert import upsert_rows
 # Options
 from database.options import DatabaseOptions
 # Connection utilities
-from database.utils.connection_utils import isconnection
+from database.utils.connection_utils import is_sqlite3_connection, isconnection
 
 # Define public exports
 __all__ = [
@@ -73,6 +73,7 @@ __all__ = [
     'cluster_table',
     # Connection utilities
     'isconnection',
+    'is_sqlite3_connection',
     # Options
     'DatabaseOptions',
     # Column information

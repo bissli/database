@@ -95,8 +95,18 @@ select name as column from pragma_table_info('{table}')
 
     def configure_connection(self, conn):
         """Configure connection settings for SQLite"""
+        import sqlite3
+
+        # Get the actual SQLite connection (may be wrapped by SQLAlchemy pool proxy)
+        sqlite_conn = conn
+        if hasattr(conn, 'dbapi_connection'):
+            sqlite_conn = conn.dbapi_connection
+
         # Enable foreign keys by default
-        conn.execute('PRAGMA foreign_keys = ON')
+        sqlite_conn.execute('PRAGMA foreign_keys = ON')
+
+        # Set row_factory so all cursors return Row objects (dict-like access)
+        sqlite_conn.row_factory = sqlite3.Row
 
         # Set auto-commit for SQLite connections
         enable_auto_commit(conn)
@@ -131,3 +141,80 @@ select name as column from pragma_table_info('{table}')
             'definition': f"UNIQUE ({', '.join(columns)})",
             'columns': columns
         }
+
+    def get_default_columns(self, cn, table, bypass_cache=False):
+        """Get columns suitable for general data display
+
+        Args:
+            cn: Database connection object
+            table: Table name to get default columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names suitable for general data representation
+        """
+        sql = f"""
+SELECT name FROM pragma_table_info('{table}')
+ORDER BY cid
+"""
+        return select_column(cn, sql)
+
+    def get_ordered_columns(self, cn, table, bypass_cache=False):
+        """Get all column names for a table ordered by their position
+
+        Args:
+            cn: Database connection object
+            table: Table name to get columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of column names ordered by position
+        """
+        sql = f"""
+SELECT name FROM pragma_table_info('{table}')
+ORDER BY cid
+"""
+        return select_column(cn, sql)
+
+    def find_sequence_column(self, cn, table, bypass_cache=False):
+        """Find the best column to reset sequence for
+
+        Args:
+            cn: Database connection object
+            table: Table name to analyze for sequence columns
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            str: Column name best suited for sequence resetting
+        """
+        # Use the common implementation from base class
+        return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
+
+    def get_unique_columns(self, cn, table, bypass_cache=False):
+        """Get columns that have UNIQUE constraints (excluding primary key)
+
+        Args:
+            cn: Database connection object
+            table: Table name to get unique columns for
+            bypass_cache: If True, bypass cache and query database directly, by default False
+
+        Returns
+            list: List of lists, each containing column names for a unique constraint
+        """
+        # Get index names for unique indexes
+        sql = f"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1"
+        index_names = select_column(cn, sql)
+
+        unique_columns = []
+        primary_keys = set(self.get_primary_keys(cn, table, bypass_cache=bypass_cache))
+
+        for idx_name in index_names:
+            # Get columns for this index
+            col_sql = f"SELECT name FROM pragma_index_info('{idx_name}')"
+            cols = select_column(cn, col_sql)
+
+            # Skip if this is the primary key index
+            if cols and set(cols) != primary_keys:
+                unique_columns.append(cols)
+
+        return unique_columns

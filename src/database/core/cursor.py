@@ -341,12 +341,27 @@ class PostgresqlCursor(AbstractCursor):
 class SqliteCursor(AbstractCursor):
     """SQLite cursor implementation."""
 
+    def _standardize_sql(self, sql: str) -> str:
+        """Convert %s placeholders to ? for SQLite."""
+        from database.utils.sql import standardize_placeholders
+        return standardize_placeholders(sql, dialect='sqlite')
+
+    def nextset(self) -> bool | None:
+        """Move to the next result set.
+
+        SQLite doesn't support multiple result sets, so this always returns None.
+        """
+        return None
+
     @convert_params
     @dumpsql
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation for SQLite."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
+
+        # Convert %s to ? for SQLite
+        operation = self._standardize_sql(operation)
 
         try:
             self._original_sql = operation
@@ -390,6 +405,9 @@ class SqliteCursor(AbstractCursor):
         """Execute the SQL statement against all parameter sequences for SQLite."""
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
+
+        # Convert %s to ? for SQLite
+        operation = self._standardize_sql(operation)
 
         if not seq_of_parameters:
             logger.warning('executemany called with no parameter sequences, skipping')
@@ -526,6 +544,8 @@ def get_dict_cursor(cn: Any) -> AbstractCursor:
     database dialect of the provided connection, with results formatted as
     dictionaries rather than tuples.
     """
+    import sqlite3
+
     if hasattr(cn, 'connection'):
         raw_conn = cn.connection
     else:
@@ -536,7 +556,13 @@ def get_dict_cursor(cn: Any) -> AbstractCursor:
         cursor = raw_conn.cursor(row_factory=DictRowFactory)
         return PostgresqlCursor(cursor, cn)
     if dialect_name == 'sqlite':
-        cursor = raw_conn.cursor()
+        # Get the actual SQLite connection (may be wrapped by SQLAlchemy pool proxy)
+        sqlite_conn = raw_conn
+        if hasattr(raw_conn, 'dbapi_connection'):
+            sqlite_conn = raw_conn.dbapi_connection
+        # Set row_factory for dict-like row access
+        sqlite_conn.row_factory = sqlite3.Row
+        cursor = sqlite_conn.cursor()
         return SqliteCursor(cursor, cn)
     raise ValueError('Unknown connection type')
 

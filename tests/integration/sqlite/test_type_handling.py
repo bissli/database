@@ -3,12 +3,10 @@ Integration tests for SQLite type handling.
 """
 import datetime
 import decimal
-import math
 
-import pytest
 import database as db
+import pytest
 from database.options import iterdict_data_loader
-from tests.fixtures.values import value_dict
 
 
 @pytest.mark.sqlite
@@ -53,6 +51,7 @@ def test_sqlite_type_consistency(sqlite_conn, value_dict):
             tx.execute('DELETE FROM type_test')
 
             # Insert test values
+            # Note: SQLite needs some types converted to strings
             tx.execute("""
             INSERT INTO type_test VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -67,9 +66,9 @@ def test_sqlite_type_consistency(sqlite_conn, value_dict):
                        value_dict['char_value'],
                        value_dict['varchar_value'],
                        value_dict['text_value'],
-                       value_dict['date_value'],
-                       value_dict['time_value'],
-                       value_dict['datetime_value'],
+                       value_dict['date_value'].isoformat(),  # Convert date to string for SQLite
+                       value_dict['time_value'].isoformat(),  # Convert time to string for SQLite
+                       value_dict['datetime_value'].isoformat(),  # Convert datetime to string for SQLite
                        value_dict['binary_value'],
                        value_dict['null_value'],
                        value_dict['json_value']

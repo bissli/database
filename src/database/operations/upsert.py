@@ -17,7 +17,6 @@ from database.utils.connection_utils import get_dialect_name
 from database.utils.sql import quote_identifier
 from database.utils.sql_generation import build_insert_sql
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +29,7 @@ def upsert_rows(
     update_cols_ifnull: list[str] | None = None,
     reset_sequence: bool = False,
     batch_size: int = 500,
+    use_primary_key: bool = False,
     **kw: Any
 ) -> int:
     """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows with configurable update behavior.
@@ -63,6 +63,10 @@ def upsert_rows(
             Useful after bulk loads to ensure next generated ID is correct.
 
         batch_size: Maximum rows per batch to process.
+
+        use_primary_key: Force using primary key columns for conflict detection.
+            If False (default), uses UNIQUE columns that are in the provided data when
+            primary key columns aren't in the data. Set to True to always use primary keys.
 
     Returns
         Number of rows affected by the operation.
@@ -116,6 +120,23 @@ def upsert_rows(
 
     key_cols = get_table_primary_keys(cn, table)
 
+    # Check if primary key columns are in the provided data
+    provided_cols_lower = {col.lower() for col in columns}
+    key_cols_in_data = key_cols and all(k.lower() in provided_cols_lower for k in key_cols)
+
+    # For SQLite: if primary key columns aren't in the data, look for UNIQUE columns
+    if dialect == 'sqlite' and not use_primary_key and not key_cols_in_data:
+        strategy = get_db_strategy(cn)
+        if hasattr(strategy, 'get_unique_columns'):
+            unique_constraints = strategy.get_unique_columns(cn, table)
+            # Find a unique constraint where all columns are in the provided data
+            for unique_cols in unique_constraints:
+                if all(u.lower() in provided_cols_lower for u in unique_cols):
+                    logger.debug(f'Using UNIQUE columns {unique_cols} instead of primary key for conflict detection')
+                    key_cols = unique_cols
+                    key_cols_in_data = True
+                    break
+
     if should_update and ((dialect != 'postgresql') or (dialect == 'postgresql' and not constraint_name)):
         if not key_cols:
             logger.debug(f'No primary keys found for {table}, falling back to INSERT')
@@ -148,8 +169,8 @@ def upsert_rows(
         if invalid_ifnull:
             logger.debug(f'Filtered invalid columns from update_cols_ifnull: {invalid_ifnull}')
 
-    if not key_cols and (dialect != 'postgresql' or not constraint_name):
-        logger.debug(f'No constraint or key columns provided for {dialect} upsert, falling back to INSERT')
+    if (not key_cols or not key_cols_in_data) and (dialect != 'postgresql' or not constraint_name):
+        logger.debug(f'No usable constraint or key columns for {dialect} upsert, falling back to INSERT')
         return insert_rows(cn, table, rows)
 
     match dialect:
