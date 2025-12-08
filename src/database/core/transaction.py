@@ -92,7 +92,7 @@ class Transaction:
         cursor = self.cursor
 
         # Single parameter processing point
-        processed_sql, processed_args = prepare_query(self.connection, sql, args)
+        processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
 
         cursor.execute(processed_sql, processed_args)
         rc = cursor.rowcount
@@ -126,7 +126,7 @@ class Transaction:
         cursor = self.cursor
 
         # Single parameter processing point
-        processed_sql, processed_args = prepare_query(self.connection, sql, args)
+        processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
 
         cursor.execute(processed_sql, processed_args)
         logger.debug(f'Executed query with {cursor.rowcount} rows affected')

@@ -145,6 +145,11 @@ class ConnectionWrapper:
         """
         return not isinstance(self.engine.pool, sa.pool.NullPool)
 
+    @property
+    def dialect(self) -> str:
+        """Return the dialect name ('postgresql' or 'sqlite')."""
+        return get_dialect_name(self.sa_connection)
+
     def commit(self) -> None:
         """Explicit commit that works regardless of auto-commit setting
 

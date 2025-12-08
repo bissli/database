@@ -1,7 +1,7 @@
 """Unit tests for SQL parameter processing.
 
 Tests the public API:
-- prepare_query(cn, sql, args) - Main entry point
+- prepare_query(sql, args, dialect) - Main entry point
 - quote_identifier(name, dialect) - Quote table/column names
 - has_placeholders(sql) - Check for parameter placeholders
 - standardize_placeholders(sql, dialect) - Convert %s <-> ?
@@ -20,60 +20,44 @@ from database.sql import standardize_placeholders
 class TestPrepareQueryBasic:
     """Test basic parameter handling through prepare_query."""
 
-    def test_basic_postgres_parameters(self, create_simple_mock_connection):
-        """Test basic parameter handling with PostgreSQL-style placeholders."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT foo FROM table WHERE date BETWEEN %s AND %s AND value > %s'
-        args = (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 100)
+    @pytest.mark.parametrize(('sql', 'args', 'dialect', 'expected_sql_check', 'expected_args_check'), [
+        # PostgreSQL basic
+        ('SELECT foo FROM table WHERE date BETWEEN %s AND %s AND value > %s',
+         (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 100),
+         'postgresql',
+         lambda s: 'BETWEEN %s AND %s' in s and 'value > %s' in s,
+         lambda a: a == (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 100)),
+        # SQLite placeholder conversion
+        ('SELECT * FROM users WHERE id = %s AND status = %s',
+         (1, 'active'),
+         'sqlite',
+         lambda s: '?' in s and '%s' not in s,
+         lambda a: a == (1, 'active')),
+        # Nested tuple unwrapping
+        ('SELECT * FROM users WHERE date BETWEEN %s AND %s AND status = %s',
+         [(datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 'active')],
+         'postgresql',
+         lambda s: True,
+         lambda a: a == (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 'active')),
+        # No placeholders passthrough
+        ('SELECT * FROM users WHERE active = TRUE',
+         None,
+         'postgresql',
+         lambda s: s == 'SELECT * FROM users WHERE active = TRUE',
+         lambda a: a is None),
+        # Empty args
+        ('SELECT * FROM users',
+         (),
+         'postgresql',
+         lambda s: s == 'SELECT * FROM users',
+         lambda a: True),
+    ], ids=['pg_basic', 'sqlite_conversion', 'nested_tuple', 'no_placeholders', 'empty_args'])
+    def test_basic_handling(self, sql, args, dialect, expected_sql_check, expected_args_check):
+        """Test basic parameter handling scenarios."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
 
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert 'BETWEEN %s AND %s' in result_sql
-        assert 'value > %s' in result_sql
-        assert result_args == args
-
-    def test_sqlite_placeholder_conversion(self, create_simple_mock_connection):
-        """Test conversion of %s to ? for SQLite."""
-        cn = create_simple_mock_connection('sqlite')
-        sql = 'SELECT * FROM users WHERE id = %s AND status = %s'
-        args = (1, 'active')
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert '?' in result_sql
-        assert '%s' not in result_sql
-        assert result_args == args
-
-    def test_nested_tuple_parameters(self, create_simple_mock_connection):
-        """Test unwrapping nested parameter tuples."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE date BETWEEN %s AND %s AND status = %s'
-        args = [(datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 'active')]
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert result_args == (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 'active')
-
-    def test_no_placeholders_passthrough(self, create_simple_mock_connection):
-        """Test SQL without placeholders passes through unchanged."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE active = TRUE'
-        args = None
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert result_sql == sql
-        assert result_args is None
-
-    def test_empty_args(self, create_simple_mock_connection):
-        """Test empty args handling."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users'
-        args = ()
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert result_sql == sql
+        assert expected_sql_check(result_sql), f'SQL check failed: {result_sql}'
+        assert expected_args_check(result_args), f'Args check failed: {result_args}'
 
 
 # =============================================================================
@@ -95,68 +79,62 @@ class TestPrepareQueryInClause:
         # Single item list
         ([101], 1, (101,)),
     ], ids=['tuple_in_list', 'single_tuple', 'direct_list', 'nested_list', 'single_item'])
-    def test_in_clause_expansion_formats(self, create_simple_mock_connection, args, expected_count, expected_args):
+    def test_in_clause_expansion_formats(self, args, expected_count, expected_args):
         """Test various IN clause parameter formats."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM users WHERE id IN %s'
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         placeholders = ', '.join(['%s'] * expected_count)
         assert f'IN ({placeholders})' in result_sql
         assert result_args == expected_args
 
-    def test_in_clause_empty_sequence(self, create_simple_mock_connection):
+    def test_in_clause_empty_sequence(self):
         """Test empty sequence becomes IN (NULL)."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM users WHERE id IN %s'
         args = [()]
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert 'IN (NULL)' in result_sql
         assert result_args == ()
 
-    def test_in_clause_with_other_params(self, create_simple_mock_connection):
+    def test_in_clause_with_other_params(self):
         """Test IN clause mixed with regular parameters."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM users WHERE date BETWEEN %s AND %s AND id IN %s'
         args = (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), (1, 2, 3))
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert 'BETWEEN %s AND %s' in result_sql
         assert 'IN (%s, %s, %s)' in result_sql
         assert result_args == (datetime.date(2025, 1, 1), datetime.date(2025, 3, 11), 1, 2, 3)
 
-    def test_multiple_in_clauses(self, create_simple_mock_connection):
+    def test_multiple_in_clauses(self):
         """Test multiple IN clauses in same query."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM users WHERE id IN %s AND status IN %s'
         args = [(1, 2, 3), ('active', 'pending')]
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert result_args == (1, 2, 3, 'active', 'pending')
 
-    def test_parenthesized_in_clause(self, create_simple_mock_connection):
+    def test_parenthesized_in_clause(self):
         """Test IN (%s) format doesn't get double parentheses."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM users WHERE id IN (%s)'
         args = ((1, 2, 3),)
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert '))' not in result_sql
         assert result_args == (1, 2, 3)
 
-    def test_in_clause_middle_position(self, create_simple_mock_connection):
+    def test_in_clause_middle_position(self):
         """Test IN clause between other parameters."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM t WHERE date = %s AND id IN (%s) AND user = %s'
         args = ('2025-01-01', [1, 2], 'USER_A')
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert result_args == ('2025-01-01', 1, 2, 'USER_A')
 
@@ -168,56 +146,36 @@ class TestPrepareQueryInClause:
 class TestPrepareQueryNamedParams:
     """Test named parameter handling."""
 
-    def test_basic_named_params(self, create_simple_mock_connection):
-        """Test basic named parameter handling."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE date BETWEEN %(start)s AND %(end)s'
-        args = {'start': datetime.date(2025, 1, 1), 'end': datetime.date(2025, 3, 11)}
+    @pytest.mark.parametrize(('sql', 'args', 'expected_sql_contains', 'expected_args_subset'), [
+        # Basic named params
+        ('SELECT * FROM users WHERE date BETWEEN %(start)s AND %(end)s',
+         {'start': datetime.date(2025, 1, 1), 'end': datetime.date(2025, 3, 11)},
+         'BETWEEN %(start)s AND %(end)s',
+         {'start': datetime.date(2025, 1, 1), 'end': datetime.date(2025, 3, 11)}),
+        # Named IN clause expansion
+        ('SELECT * FROM users WHERE id IN %(ids)s',
+         {'ids': (1, 2, 3)},
+         'IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)',
+         {'ids_0': 1, 'ids_1': 2, 'ids_2': 3}),
+        # Named IN with regular params
+        ('SELECT * FROM users WHERE id IN %(ids)s AND name = %(name)s',
+         {'ids': (1, 2), 'name': 'test'},
+         'IN (%(ids_0)s, %(ids_1)s)',
+         {'ids_0': 1, 'ids_1': 2, 'name': 'test'}),
+        # Dict in list unwrapped
+        ('SELECT * FROM users WHERE id = %(id)s',
+         [{'id': 1}],
+         '%(id)s',
+         {'id': 1}),
+    ], ids=['basic', 'in_clause', 'in_with_regular', 'dict_in_list'])
+    def test_named_params(self, sql, args, expected_sql_contains, expected_args_subset):
+        """Test named parameter handling scenarios."""
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert 'BETWEEN %(start)s AND %(end)s' in result_sql
-        assert result_args['start'] == datetime.date(2025, 1, 1)
-        assert result_args['end'] == datetime.date(2025, 3, 11)
-
-    def test_named_in_clause(self, create_simple_mock_connection):
-        """Test named parameter IN clause expansion."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE id IN %(ids)s'
-        args = {'ids': (1, 2, 3)}
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert 'IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)' in result_sql
-        assert result_args['ids_0'] == 1
-        assert result_args['ids_1'] == 2
-        assert result_args['ids_2'] == 3
-        assert 'ids' not in result_args
-
-    def test_named_in_clause_with_regular(self, create_simple_mock_connection):
-        """Test named IN clause alongside regular named params."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE id IN %(ids)s AND name = %(name)s'
-        args = {'ids': (1, 2), 'name': 'test'}
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert 'IN (%(ids_0)s, %(ids_1)s)' in result_sql
-        assert 'name = %(name)s' in result_sql
-        assert result_args['ids_0'] == 1
-        assert result_args['ids_1'] == 2
-        assert result_args['name'] == 'test'
-
-    def test_dict_in_list_unwrapped(self, create_simple_mock_connection):
-        """Test [dict] is unwrapped to dict."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = 'SELECT * FROM users WHERE id = %(id)s'
-        args = [{'id': 1}]
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
+        assert expected_sql_contains in result_sql
         assert isinstance(result_args, dict)
-        assert result_args['id'] == 1
+        for key, value in expected_args_subset.items():
+            assert result_args.get(key) == value, f'Key {key}: expected {value}, got {result_args.get(key)}'
 
 
 # =============================================================================
@@ -239,22 +197,19 @@ class TestPrepareQueryIsNull:
         # Non-NULL value unchanged
         ('SELECT * FROM t WHERE value IS %s', ('not_null',), 'IS %s', ('not_null',)),
     ], ids=['is_null', 'is_not_null', 'multiple', 'mixed', 'non_null'])
-    def test_positional_null_handling(self, create_simple_mock_connection, sql, args, expected_pattern, expected_args):
+    def test_positional_null_handling(self, sql, args, expected_pattern, expected_args):
         """Test IS NULL handling with positional parameters."""
-        cn = create_simple_mock_connection('postgresql')
-
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert expected_pattern in result_sql
         assert result_args == expected_args
 
-    def test_named_null_handling(self, create_simple_mock_connection):
+    def test_named_null_handling(self):
         """Test IS NULL handling with named parameters."""
-        cn = create_simple_mock_connection('postgresql')
         sql = 'SELECT * FROM t WHERE value IS %(val)s AND name = %(name)s'
         args = {'val': None, 'name': 'test'}
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert 'IS NULL' in result_sql
         assert 'val' not in result_args
@@ -272,52 +227,35 @@ class TestPrepareQueryPercentEscaping:
     Without placeholders, the driver doesn't parse for format specifiers.
     """
 
-    @pytest.mark.parametrize(('sql', 'args', 'expected_literal'), [
-        # With placeholder - percent gets escaped
-        ("SELECT * FROM t WHERE id = %s AND s = 'progress: 50%'", (1,), "'progress: 50%%'"),
-        ('SELECT * FROM t WHERE id = %s AND s = "Complete: 75%"', (1,), '"Complete: 75%%"'),
-        ("SELECT * FROM t WHERE id = %s AND s = 'It''s 100% done'", (1,), "'It''s 100%% done'"),
+    @pytest.mark.parametrize(('sql', 'args', 'dialect', 'expected_contains', 'expected_not_contains'), [
+        # PostgreSQL with placeholder - percent gets escaped
+        ("SELECT * FROM t WHERE id = %s AND s = 'progress: 50%'",
+         (1,), 'postgresql', "'progress: 50%%'", None),
+        ('SELECT * FROM t WHERE id = %s AND s = "Complete: 75%"',
+         (1,), 'postgresql', '"Complete: 75%%"', None),
+        ("SELECT * FROM t WHERE id = %s AND s = 'It''s 100% done'",
+         (1,), 'postgresql', "'It''s 100%% done'", None),
         # Already escaped stays escaped
-        ("SELECT * FROM t WHERE id = %s AND s LIKE 'pre%%post'", (1,), "'pre%%post'"),
-    ], ids=['single_quote', 'double_quote', 'escaped_quotes', 'already_escaped'])
-    def test_percent_in_literals_escaped(self, create_simple_mock_connection, sql, args, expected_literal):
-        """Test percent signs in string literals are escaped for PostgreSQL."""
-        cn = create_simple_mock_connection('postgresql')
+        ("SELECT * FROM t WHERE id = %s AND s LIKE 'pre%%post'",
+         (1,), 'postgresql', "'pre%%post'", None),
+        # No placeholders means no escaping
+        ("SELECT * FROM t WHERE s = 'progress: 50%'",
+         None, 'postgresql', "'progress: 50%'", '%%'),
+        # SQLite - no escaping even with placeholders
+        ("SELECT * FROM t WHERE id = %s AND s = 'progress: 50%'",
+         (1,), 'sqlite', "'progress: 50%'", '%%'),
+        # Placeholders not affected by escaping
+        ("SELECT * FROM t WHERE name = %s AND status = 'progress: 25%'",
+         ('test',), 'postgresql', 'name = %s', None),
+    ], ids=['pg_single_quote', 'pg_double_quote', 'pg_escaped_quotes', 'pg_already_escaped',
+            'pg_no_placeholders', 'sqlite_no_escape', 'pg_placeholder_preserved'])
+    def test_percent_escaping(self, sql, args, dialect, expected_contains, expected_not_contains):
+        """Test percent sign escaping in various scenarios."""
+        result_sql, _ = prepare_query(sql, args, dialect)
 
-        result_sql, _ = prepare_query(cn, sql, args)
-
-        assert expected_literal in result_sql
-
-    def test_percent_not_escaped_without_placeholders(self, create_simple_mock_connection):
-        """Test percent signs are NOT escaped when no placeholders present."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = "SELECT * FROM t WHERE s = 'progress: 50%'"
-
-        result_sql, _ = prepare_query(cn, sql, None)
-
-        # No placeholders means no escaping needed
-        assert "'progress: 50%'" in result_sql
-        assert '%%' not in result_sql
-
-    def test_percent_not_escaped_for_sqlite(self, create_simple_mock_connection):
-        """Test percent signs are NOT escaped for SQLite."""
-        cn = create_simple_mock_connection('sqlite')
-        sql = "SELECT * FROM t WHERE id = %s AND s = 'progress: 50%'"
-
-        result_sql, _ = prepare_query(cn, sql, (1,))
-
-        assert "'progress: 50%'" in result_sql
-        assert '%%' not in result_sql
-
-    def test_placeholders_not_escaped(self, create_simple_mock_connection):
-        """Test parameter placeholders are not affected by escaping."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = "SELECT * FROM t WHERE name = %s AND status = 'progress: 25%'"
-
-        result_sql, _ = prepare_query(cn, sql, ('test',))
-
-        assert 'name = %s' in result_sql
-        assert "'progress: 25%%'" in result_sql
+        assert expected_contains in result_sql
+        if expected_not_contains:
+            assert expected_not_contains not in result_sql
 
 
 # =============================================================================
@@ -327,28 +265,21 @@ class TestPrepareQueryPercentEscaping:
 class TestPrepareQueryRegexp:
     """Test regexp_replace patterns are preserved."""
 
-    def test_regexp_replace_preserved(self, create_simple_mock_connection):
+    @pytest.mark.parametrize(('sql', 'args', 'expected_preserved', 'expected_escaped'), [
+        # Regexp pattern preserved
+        (r"SELECT regexp_replace(code, '\/?[UV]? ?(CN|US)?$', '') FROM t WHERE id = %s",
+         (1,), r'\/?[UV]? ?(CN|US)?$', None),
+        # Regexp preserved while LIKE pattern escaped
+        (r"""SELECT * FROM t WHERE status LIKE 'act%' AND regexp_replace(code, '\/?[UV]?$', '') = 'ABC'""",
+         None, r'\/?[UV]?$', "LIKE 'act%%'"),
+    ], ids=['regexp_preserved', 'regexp_with_like'])
+    def test_regexp_protection(self, sql, args, expected_preserved, expected_escaped):
         """Test regexp_replace patterns are not modified."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = r"SELECT regexp_replace(code, '\/?[UV]? ?(CN|US)?$', '') FROM t WHERE id = %s"
+        result_sql, _ = prepare_query(sql, args, 'postgresql')
 
-        result_sql, _ = prepare_query(cn, sql, (1,))
-
-        assert r'\/?[UV]? ?(CN|US)?$' in result_sql
-
-    def test_regexp_with_like_pattern(self, create_simple_mock_connection):
-        """Test regexp and LIKE pattern in same query."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = r"""
-        SELECT * FROM t
-        WHERE status LIKE 'act%'
-        AND regexp_replace(code, '\/?[UV]?$', '') = 'ABC'
-        """
-
-        result_sql, _ = prepare_query(cn, sql, None)
-
-        assert "LIKE 'act%%'" in result_sql
-        assert r'\/?[UV]?$' in result_sql
+        assert expected_preserved in result_sql
+        if expected_escaped:
+            assert expected_escaped in result_sql
 
 
 # =============================================================================
@@ -418,45 +349,33 @@ class TestHasPlaceholders:
 class TestStandardizePlaceholders:
     """Test placeholder conversion between dialects."""
 
-    def test_convert_percent_to_qmark(self):
-        """Test converting %s to ? for SQLite."""
-        sql = 'SELECT * FROM users WHERE id = %s AND name = %s'
-
-        result = standardize_placeholders(sql, 'sqlite')
-
-        assert result == 'SELECT * FROM users WHERE id = ? AND name = ?'
-
-    def test_convert_qmark_to_percent(self):
-        """Test converting ? to %s for PostgreSQL."""
-        sql = 'SELECT * FROM users WHERE id = ? AND name = ?'
-
-        result = standardize_placeholders(sql, 'postgresql')
-
-        assert result == 'SELECT * FROM users WHERE id = %s AND name = %s'
-
-    def test_no_conversion_needed(self):
-        """Test no conversion when already correct for dialect."""
-        sql_postgres = 'SELECT * FROM users WHERE id = %s'
-        sql_sqlite = 'SELECT * FROM users WHERE id = ?'
-
-        assert standardize_placeholders(sql_postgres, 'postgresql') == sql_postgres
-        assert standardize_placeholders(sql_sqlite, 'sqlite') == sql_sqlite
+    @pytest.mark.parametrize(('sql', 'dialect', 'expected'), [
+        # %s to ? for SQLite
+        ('SELECT * FROM users WHERE id = %s AND name = %s', 'sqlite',
+         'SELECT * FROM users WHERE id = ? AND name = ?'),
+        # ? to %s for PostgreSQL
+        ('SELECT * FROM users WHERE id = ? AND name = ?', 'postgresql',
+         'SELECT * FROM users WHERE id = %s AND name = %s'),
+        # No conversion needed - already correct
+        ('SELECT * FROM users WHERE id = %s', 'postgresql',
+         'SELECT * FROM users WHERE id = %s'),
+        ('SELECT * FROM users WHERE id = ?', 'sqlite',
+         'SELECT * FROM users WHERE id = ?'),
+    ], ids=['percent_to_qmark', 'qmark_to_percent', 'pg_no_change', 'sqlite_no_change'])
+    def test_placeholder_conversion(self, sql, dialect, expected):
+        """Test placeholder conversion between dialects."""
+        assert standardize_placeholders(sql, dialect) == expected
 
     def test_named_params_unchanged(self):
         """Test named parameters are not converted."""
         sql = 'SELECT * FROM users WHERE id = %(id)s'
-
         result = standardize_placeholders(sql, 'sqlite')
-
         assert '%(id)s' in result
 
     def test_preserves_string_literals(self):
         """Test placeholders in string literals are preserved correctly."""
         sql = "SELECT * FROM t WHERE id = %s AND name = 'test %s value'"
-
         result = standardize_placeholders(sql, 'sqlite')
-
-        # First %s converted, literal preserved
         assert '?' in result
 
 
@@ -467,68 +386,34 @@ class TestStandardizePlaceholders:
 class TestFullPipeline:
     """Test complete query processing scenarios."""
 
-    def test_complex_query_postgres(self, create_simple_mock_connection):
-        """Test complex query with multiple features for PostgreSQL."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = """
-        SELECT * FROM users
-        WHERE created BETWEEN %s AND %s
-        AND id IN %s
-        AND status IS NOT %s
-        AND name LIKE 'test%'
-        """
-        args = (
-            datetime.date(2025, 1, 1),
-            datetime.date(2025, 12, 31),
-            (1, 2, 3),
-            None
-        )
+    @pytest.mark.parametrize(('sql', 'args', 'dialect', 'expected_sql_checks', 'expected_args'), [
+        # PostgreSQL complex query
+        ("SELECT * FROM users WHERE created BETWEEN %s AND %s AND id IN %s AND status IS NOT %s AND name LIKE 'test%'",
+         (datetime.date(2025, 1, 1), datetime.date(2025, 12, 31), (1, 2, 3), None),
+         'postgresql',
+         ['BETWEEN %s AND %s', 'IN (%s, %s, %s)', 'IS NOT NULL', "LIKE 'test%%'"],
+         (datetime.date(2025, 1, 1), datetime.date(2025, 12, 31), 1, 2, 3)),
+        # SQLite complex query
+        ('SELECT * FROM users WHERE id IN %s AND status = %s',
+         ((1, 2), 'active'),
+         'sqlite',
+         ['IN (?, ?)', 'status = ?'],
+         (1, 2, 'active')),
+    ], ids=['postgresql_complex', 'sqlite_complex'])
+    def test_complex_query(self, sql, args, dialect, expected_sql_checks, expected_args):
+        """Test complex query with multiple features."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        for check in expected_sql_checks:
+            assert check in result_sql, f'Expected {check!r} in {result_sql!r}'
+        assert result_args == expected_args
 
-        assert 'BETWEEN %s AND %s' in result_sql
-        assert 'IN (%s, %s, %s)' in result_sql
-        assert 'IS NOT NULL' in result_sql
-        assert "LIKE 'test%%'" in result_sql
-        assert result_args == (
-            datetime.date(2025, 1, 1),
-            datetime.date(2025, 12, 31),
-            1, 2, 3
-        )
-
-    def test_complex_query_sqlite(self, create_simple_mock_connection):
-        """Test complex query with multiple features for SQLite."""
-        cn = create_simple_mock_connection('sqlite')
-        sql = """
-        SELECT * FROM users
-        WHERE id IN %s
-        AND status = %s
-        """
-        args = ((1, 2), 'active')
-
-        result_sql, result_args = prepare_query(cn, sql, args)
-
-        assert 'IN (?, ?)' in result_sql
-        assert 'status = ?' in result_sql
-        assert '%s' not in result_sql
-        assert result_args == (1, 2, 'active')
-
-    def test_named_params_complex(self, create_simple_mock_connection):
+    def test_named_params_complex(self):
         """Test complex named parameter query."""
-        cn = create_simple_mock_connection('postgresql')
-        sql = """
-        SELECT * FROM items
-        WHERE item_id IN %(ids)s
-        AND date = %(date)s
-        AND user = %(user)s
-        """
-        args = {
-            'ids': ['ITM001', 'ITM002', 'ITM003'],
-            'date': '2025-08-08',
-            'user': 'USER_A'
-        }
+        sql = 'SELECT * FROM items WHERE item_id IN %(ids)s AND date = %(date)s AND user = %(user)s'
+        args = {'ids': ['ITM001', 'ITM002', 'ITM003'], 'date': '2025-08-08', 'user': 'USER_A'}
 
-        result_sql, result_args = prepare_query(cn, sql, args)
+        result_sql, result_args = prepare_query(sql, args, 'postgresql')
 
         assert 'IN (%(ids_0)s, %(ids_1)s, %(ids_2)s)' in result_sql
         assert result_args['ids_0'] == 'ITM001'
@@ -537,6 +422,181 @@ class TestFullPipeline:
         assert result_args['date'] == '2025-08-08'
         assert result_args['user'] == 'USER_A'
         assert 'ids' not in result_args
+
+
+# =============================================================================
+# Traceability Matrix - Explicit Input/Output Cases
+# =============================================================================
+
+class TestSQLMatrix:
+    """Traceability matrix with explicit input → output mappings.
+
+    Each case documents expected behavior for the clean rewrite.
+    Format: (case_id, sql, args, dialect, expected_sql_contains, expected_args)
+    """
+
+    # All test cases as explicit input → output pairs
+    POSITIONAL_CASES = [
+        # Basic PostgreSQL
+        ('pg_basic', 'SELECT * FROM t WHERE id = %s', (1,), 'postgresql',
+         '%s', (1,)),
+        ('pg_multi', 'SELECT * FROM t WHERE a = %s AND b = %s', (1, 2), 'postgresql',
+         '%s', (1, 2)),
+        # Basic SQLite conversion
+        ('sqlite_basic', 'SELECT * FROM t WHERE id = %s', (1,), 'sqlite',
+         '?', (1,)),
+        ('sqlite_multi', 'SELECT * FROM t WHERE a = %s AND b = %s', (1, 2), 'sqlite',
+         '?', (1, 2)),
+    ]
+
+    IN_CLAUSE_CASES = [
+        # IN clause expansion - various input formats
+        ('in_tuple_in_list', 'WHERE id IN %s', [(1, 2, 3)], 'postgresql',
+         'IN (%s, %s, %s)', (1, 2, 3)),
+        ('in_direct_list', 'WHERE id IN %s', [1, 2, 3], 'postgresql',
+         'IN (%s, %s, %s)', (1, 2, 3)),
+        ('in_nested_list', 'WHERE id IN %s', [[1, 2, 3]], 'postgresql',
+         'IN (%s, %s, %s)', (1, 2, 3)),
+        ('in_single_item', 'WHERE id IN %s', [101], 'postgresql',
+         'IN (%s)', (101,)),
+        ('in_single_tuple', 'WHERE id IN %s', [(42,)], 'postgresql',
+         'IN (%s)', (42,)),
+        ('in_empty', 'WHERE id IN %s', [()], 'postgresql',
+         'IN (NULL)', ()),
+        # IN clause with existing parens (no double parens)
+        ('in_parens', 'WHERE id IN (%s)', ((1, 2, 3),), 'postgresql',
+         '%s, %s, %s', (1, 2, 3)),
+        # IN clause SQLite
+        ('in_sqlite', 'WHERE id IN %s', [(1, 2)], 'sqlite',
+         'IN (?, ?)', (1, 2)),
+    ]
+
+    MIXED_CASES = [
+        # IN clause with other params
+        ('mixed_in_after', 'WHERE a = %s AND id IN %s', ('x', (1, 2)), 'postgresql',
+         'IN (%s, %s)', ('x', 1, 2)),
+        ('mixed_in_middle', 'WHERE a = %s AND id IN (%s) AND b = %s', ('x', [1, 2], 'y'), 'postgresql',
+         '%s, %s', ('x', 1, 2, 'y')),
+        # Multiple IN clauses
+        ('multi_in', 'WHERE id IN %s AND status IN %s', [(1, 2), ('a', 'b')], 'postgresql',
+         'IN (%s, %s)', (1, 2, 'a', 'b')),
+    ]
+
+    IS_NULL_CASES = [
+        # IS NULL transformations
+        ('is_null', 'WHERE v IS %s', (None,), 'postgresql',
+         'IS NULL', ()),
+        ('is_not_null', 'WHERE v IS NOT %s', (None,), 'postgresql',
+         'IS NOT NULL', ()),
+        ('is_null_mixed', 'WHERE v IS %s AND x = %s', (None, 'test'), 'postgresql',
+         'IS NULL', ('test',)),
+        ('is_non_null', 'WHERE v IS %s', ('val',), 'postgresql',
+         'IS %s', ('val',)),
+    ]
+
+    NAMED_CASES = [
+        # Named parameters
+        ('named_basic', 'WHERE id = %(id)s', {'id': 1}, 'postgresql',
+         '%(id)s', {'id': 1}),
+        ('named_multi', 'WHERE a = %(a)s AND b = %(b)s', {'a': 1, 'b': 2}, 'postgresql',
+         '%(a)s', {'a': 1, 'b': 2}),
+        # Named IN clause
+        ('named_in', 'WHERE id IN %(ids)s', {'ids': (1, 2, 3)}, 'postgresql',
+         '%(ids_0)s', {'ids_0': 1, 'ids_1': 2, 'ids_2': 3}),
+        # Named IS NULL
+        ('named_is_null', 'WHERE v IS %(v)s AND x = %(x)s', {'v': None, 'x': 'test'}, 'postgresql',
+         'IS NULL', {'x': 'test'}),
+        # Dict in list unwrap
+        ('dict_in_list', 'WHERE id = %(id)s', [{'id': 1}], 'postgresql',
+         '%(id)s', {'id': 1}),
+    ]
+
+    NORMALIZATION_CASES = [
+        # Arg normalization edge cases
+        ('norm_nested_tuple', 'WHERE a = %s AND b = %s AND c = %s',
+         [(1, 2, 3)], 'postgresql', '%s', (1, 2, 3)),
+        ('norm_empty_args', 'SELECT 1', (), 'postgresql',
+         'SELECT 1', ()),
+        ('norm_none_args', 'SELECT 1', None, 'postgresql',
+         'SELECT 1', None),
+    ]
+
+    ESCAPE_CASES = [
+        # Percent escaping in literals (PostgreSQL only)
+        ('esc_single_quote', "WHERE s = 'foo%' AND id = %s", (1,), 'postgresql',
+         "'foo%%'", (1,)),
+        ('esc_double_quote', 'WHERE s = "foo%" AND id = %s', (1,), 'postgresql',
+         '"foo%%"', (1,)),
+        ('esc_already', "WHERE s LIKE 'foo%%' AND id = %s", (1,), 'postgresql',
+         "'foo%%'", (1,)),
+        # No escaping for SQLite
+        ('esc_sqlite_none', "WHERE s = 'foo%' AND id = %s", (1,), 'sqlite',
+         "'foo%'", (1,)),
+        # No escaping without placeholders
+        ('esc_no_ph', "WHERE s = 'foo%'", None, 'postgresql',
+         "'foo%'", None),
+    ]
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             POSITIONAL_CASES, ids=[c[0] for c in POSITIONAL_CASES])
+    def test_positional(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test positional parameter cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             IN_CLAUSE_CASES, ids=[c[0] for c in IN_CLAUSE_CASES])
+    def test_in_clause(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test IN clause expansion cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             MIXED_CASES, ids=[c[0] for c in MIXED_CASES])
+    def test_mixed(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test mixed parameter cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             IS_NULL_CASES, ids=[c[0] for c in IS_NULL_CASES])
+    def test_is_null(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test IS NULL handling cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             NAMED_CASES, ids=[c[0] for c in NAMED_CASES])
+    def test_named(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test named parameter cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        # For dicts, check subset (named IN adds keys)
+        if isinstance(expected_args, dict):
+            for k, v in expected_args.items():
+                assert result_args.get(k) == v, f'{case_id}: {k} mismatch'
+        else:
+            assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             NORMALIZATION_CASES, ids=[c[0] for c in NORMALIZATION_CASES])
+    def test_normalization(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test argument normalization cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
+
+    @pytest.mark.parametrize(('case_id', 'sql', 'args', 'dialect', 'expected_contains', 'expected_args'),
+                             ESCAPE_CASES, ids=[c[0] for c in ESCAPE_CASES])
+    def test_escaping(self, case_id, sql, args, dialect, expected_contains, expected_args):
+        """Test percent escaping cases."""
+        result_sql, result_args = prepare_query(sql, args, dialect)
+        assert expected_contains in result_sql, f'{case_id}: expected {expected_contains!r} in {result_sql!r}'
+        assert result_args == expected_args, f'{case_id}: args mismatch'
 
 
 if __name__ == '__main__':

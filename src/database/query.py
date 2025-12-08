@@ -51,7 +51,7 @@ def execute(cn: object, sql: str, *args: object) -> int:
     cursor = cn.cursor()
     try:
         # Single parameter processing point
-        processed_sql, processed_args = prepare_query(cn, sql, args)
+        processed_sql, processed_args = prepare_query(sql, args, cn.dialect)
 
         cursor.execute(processed_sql, processed_args)
         logger.debug(f'Executed query with {len(processed_args) if processed_args else 0} parameters: {processed_sql[:60]}...')
@@ -90,7 +90,7 @@ def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs) -> ResultSet |
         or list of DataFrames (when return_all=True)
     """
     # Single parameter processing point
-    processed_sql, processed_args = prepare_query(cn, sql, args)
+    processed_sql, processed_args = prepare_query(sql, args, cn.dialect)
 
     cursor = cn.cursor()
 
