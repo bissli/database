@@ -502,10 +502,10 @@ class ConnectionWrapper:
         """
 
         with Transaction(self) as tx:
-            rc = tx.execute(update_sql, args)
+            rc = tx.execute(update_sql, *args)
             if rc:
                 return rc
-            rc = tx.execute(insert_sql, args)
+            rc = tx.execute(insert_sql, *args)
             return rc
 
     def filter_table_columns(self, table: str,
