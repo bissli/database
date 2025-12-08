@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from database.cache import cacheable_strategy
+from database.sql import quote_identifier as sql_quote_identifier
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -187,8 +188,7 @@ class DatabaseStrategy(ABC):
         Returns
             str: Properly quoted identifier according to database-specific rules
         """
-        from database.sql import quote_identifier
-        return quote_identifier(identifier)
+        return sql_quote_identifier(identifier)
 
     @abstractmethod
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,

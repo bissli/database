@@ -3,10 +3,10 @@ Database strategy factory for database-specific operations.
 """
 from functools import lru_cache
 
-from database.connection import get_dialect_name
 from database.strategy.base import DatabaseStrategy as DatabaseStrategy
 from database.strategy.postgres import PostgresStrategy
 from database.strategy.sqlite import SQLiteStrategy
+from database.utils import get_dialect_name
 
 
 @lru_cache(maxsize=4)

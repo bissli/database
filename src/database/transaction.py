@@ -6,10 +6,10 @@ import threading
 from typing import Any
 
 import pandas as pd
-from database.connection import _get_raw_connection
 from database.cursor import get_dict_cursor
 from database.sql import prepare_query
-from database.types import RowAdapter
+from database.strategy import get_db_strategy
+from database.utils import get_raw_connection
 
 from libb import attrdict, isiterable
 
@@ -22,10 +22,9 @@ _local = threading.local()
 def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
     """Try to use strategy for autocommit. Returns True if successful."""
     try:
-        from database.strategy import get_db_strategy
         if hasattr(connection, 'dialect'):
             strategy = get_db_strategy(connection)
-            raw_conn = _get_raw_connection(connection)
+            raw_conn = get_raw_connection(connection)
             if enable:
                 strategy.enable_autocommit(raw_conn)
             else:
@@ -54,7 +53,7 @@ def enable_auto_commit(connection: Any) -> None:
     if _try_strategy_autocommit(connection, enable=True):
         return
 
-    raw_conn = _get_raw_connection(connection)
+    raw_conn = get_raw_connection(connection)
 
     if hasattr(raw_conn, 'autocommit'):
         try:
@@ -82,7 +81,7 @@ def disable_auto_commit(connection: Any) -> None:
     if _try_strategy_autocommit(connection, enable=False):
         return
 
-    raw_conn = _get_raw_connection(connection)
+    raw_conn = get_raw_connection(connection)
 
     if hasattr(raw_conn, 'autocommit'):
         try:
@@ -113,7 +112,7 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
 
     info['is_sqlalchemy'] = hasattr(conn, 'sa_connection')
 
-    raw_conn = _get_raw_connection(conn)
+    raw_conn = get_raw_connection(conn)
 
     info['closed'] = getattr(conn, 'closed', False)
 
@@ -125,97 +124,6 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
         info['in_transaction'] = conn.in_transaction
 
     return info
-
-
-def extract_column_info(cursor: 'Any', table_name: str | None = None) -> list['Any']:
-    """Extract column information from cursor description based on database type.
-    """
-    from database.types import columns_from_cursor_description
-
-    if cursor.description is None:
-        return []
-
-    connection_type = cursor.connwrapper.dialect
-    connection = cursor.connwrapper
-
-    columns = columns_from_cursor_description(
-        cursor,
-        connection_type,
-        table_name,
-        connection
-    )
-
-    cursor.columns = columns
-
-    return columns
-
-
-def load_data(cursor: 'Any', columns: list['Any'] | None = None,
-              **kwargs: Any) -> Any:
-    """Data loader callable that processes cursor results into the configured format.
-    """
-    if columns is None:
-        columns = extract_column_info(cursor)
-
-    data = cursor.fetchall()
-
-    if not data:
-        data_loader = cursor.connwrapper.options.data_loader
-        return data_loader([], columns, **kwargs)
-
-    adapted_data = []
-    for row in data:
-        adapter = RowAdapter.create(cursor.connwrapper, row)
-        if hasattr(adapter, 'cursor'):
-            adapter.cursor = cursor
-        adapted_data.append(adapter.to_dict())
-    data = adapted_data
-
-    data_loader = cursor.connwrapper.options.data_loader
-    return data_loader(data, columns, **kwargs)
-
-
-def process_multiple_result_sets(cursor: 'Any', return_all: bool = False,
-                                 prefer_first: bool = False, **kwargs: Any) -> list[Any] | Any:
-    """Process multiple result sets from a query or stored procedure.
-    """
-    result_sets: list[Any] = []
-    columns_sets: list[list[Any]] = []
-    largest_result = None
-    largest_size = 0
-
-    columns = extract_column_info(cursor)
-    columns_sets.append(columns)
-
-    result = load_data(cursor, columns=columns, **kwargs)
-    if result is not None:
-        result_sets.append(result)
-        largest_result = result
-        largest_size = len(result)
-
-    while cursor.nextset():
-        columns = extract_column_info(cursor)
-        columns_sets.append(columns)
-
-        result = load_data(cursor, columns=columns, **kwargs)
-        if result is not None:
-            result_sets.append(result)
-            if len(result) > largest_size:
-                largest_result = result
-                largest_size = len(result)
-
-    if return_all:
-        if not result_sets:
-            return []
-        return result_sets
-
-    if prefer_first and result_sets:
-        return result_sets[0]
-
-    if not result_sets:
-        return []
-
-    return largest_result
 
 
 class Transaction:
@@ -281,78 +189,55 @@ class Transaction:
             logger.debug(f'Transaction cleanup complete for connection {id(self.connection)}')
 
     def execute(self, sql: str, *args, returnid: str | list[str] | None = None) -> Any:
-        """Execute SQL within transaction context"""
-        from database.connection import check_connection
+        """Execute SQL within transaction context.
+        """
+        if not returnid:
+            return self.connection.execute(sql, *args)
 
-        @check_connection
-        def _execute(sql: str, *args, returnid: str | list[str] | None = None) -> Any:
-            cursor = self.cursor
-
-            processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
-            cursor.execute(processed_sql, processed_args)
-            rc = cursor.rowcount
-
-            if not returnid:
-                return rc
-
-            results = None
-            try:
-                results = cursor.fetchall()
-            except Exception as e:
-                logger.debug(f'No results to return: {e}')
-            finally:
-                if not results:
-                    return
-
-            if len(results) == 1:
-                result = results[0]
-                if isiterable(returnid):
-                    return [result[r] for r in returnid]
-                else:
-                    return result[returnid]
-            else:
-                if isiterable(returnid):
-                    return [[row[r] for r in returnid] for row in results]
-                else:
-                    return [row[returnid] for row in results]
-
-        return _execute(sql, *args, returnid=returnid)
-
-    def select(self, sql: str, *args, **kwargs) -> pd.DataFrame:
-        """Execute SELECT query or procedure within transaction context"""
         cursor = self.cursor
-
         processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
         cursor.execute(processed_sql, processed_args)
-        logger.debug(f'Executed query with {cursor.rowcount} rows affected')
 
-        is_procedure = any(kw in processed_sql.upper() for kw in ['EXEC ', 'CALL ', 'EXECUTE '])
-        return_all = kwargs.pop('return_all', False)
-        prefer_first = kwargs.pop('prefer_first', False)
+        results = None
+        try:
+            results = cursor.fetchall()
+        except Exception as e:
+            logger.debug(f'No results to return: {e}')
 
-        if not is_procedure and not return_all and not cursor.nextset():
-            columns = extract_column_info(cursor)
-            result = load_data(cursor, columns=columns, **kwargs)
-            logger.debug(f'Query returned {len(result)} rows in single result set')
-            return result
-        return process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
+        if not results:
+            return None
+
+        if len(results) == 1:
+            result = results[0]
+            if isiterable(returnid):
+                return [result[r] for r in returnid]
+            return result[returnid]
+
+        if isiterable(returnid):
+            return [[row[r] for r in returnid] for row in results]
+        return [row[returnid] for row in results]
+
+    def select(self, sql: str, *args, **kwargs) -> pd.DataFrame:
+        """Execute SELECT query within transaction context.
+        """
+        return self.connection.select(sql, *args, **kwargs)
 
     def select_column(self, sql: str, *args) -> list[Any]:
-        """Execute a query and return a single column as a list."""
-        from database.query import select_column
-        return select_column(self.connection, sql, *args)
+        """Execute a query and return a single column as a list.
+        """
+        return self.connection.select_column(sql, *args)
 
     def select_row(self, sql: str, *args) -> attrdict:
-        """Execute a query and return a single row."""
-        from database.query import select_row
-        return select_row(self.connection, sql, *args)
+        """Execute a query and return a single row.
+        """
+        return self.connection.select_row(sql, *args)
 
     def select_row_or_none(self, sql: str, *args) -> attrdict | None:
-        """Execute a query and return a single row or None if no rows found."""
-        from database.query import select_row_or_none
-        return select_row_or_none(self.connection, sql, *args)
+        """Execute a query and return a single row or None if no rows found.
+        """
+        return self.connection.select_row_or_none(sql, *args)
 
     def select_scalar(self, sql: str, *args) -> Any:
-        """Execute a query and return a single scalar value."""
-        from database.query import select_scalar
-        return select_scalar(self.connection, sql, *args)
+        """Execute a query and return a single scalar value.
+        """
+        return self.connection.select_scalar(sql, *args)

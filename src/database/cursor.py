@@ -12,9 +12,11 @@ from functools import wraps
 from numbers import Number
 from typing import Any
 
-from database.connection import ensure_commit
 from database.sql import has_placeholders
-from database.types import TypeConverter, postgres_types
+from database.strategy import get_db_strategy
+from database.types import RowAdapter, TypeConverter
+from database.types import columns_from_cursor_description, postgres_types
+from database.utils import ensure_commit
 
 from libb import collapse
 
@@ -88,7 +90,6 @@ class Cursor:
     def strategy(self) -> Any:
         """Get the database strategy, lazily initializing if needed."""
         if self._strategy is None:
-            from database.strategy import get_db_strategy
             self._strategy = get_db_strategy(self.connwrapper)
         return self._strategy
 
@@ -292,8 +293,6 @@ class DictRowFactory:
 
 def get_dict_cursor(cn: Any) -> Cursor:
     """Get cursor that returns rows as dictionaries."""
-    from database.strategy import get_db_strategy
-
     raw_conn = cn.connection if hasattr(cn, 'connection') else cn
     strategy = get_db_strategy(cn)
 
@@ -310,3 +309,89 @@ def get_dict_cursor(cn: Any) -> Cursor:
         return Cursor(cursor, cn, strategy)
 
     raise ValueError(f'Unknown connection type: {cn.dialect}')
+
+
+def extract_column_info(cursor: 'Any', table_name: str | None = None) -> list['Any']:
+    """Extract column information from cursor description based on database type."""
+    if cursor.description is None:
+        return []
+
+    connection_type = cursor.connwrapper.dialect
+    connection = cursor.connwrapper
+
+    columns = columns_from_cursor_description(
+        cursor,
+        connection_type,
+        table_name,
+        connection
+    )
+
+    cursor.columns = columns
+
+    return columns
+
+
+def load_data(cursor: 'Any', columns: list['Any'] | None = None,
+              **kwargs: Any) -> Any:
+    """Data loader callable that processes cursor results into the configured format."""
+    if columns is None:
+        columns = extract_column_info(cursor)
+
+    data = cursor.fetchall()
+
+    if not data:
+        data_loader = cursor.connwrapper.options.data_loader
+        return data_loader([], columns, **kwargs)
+
+    adapted_data = []
+    for row in data:
+        adapter = RowAdapter.create(cursor.connwrapper, row)
+        if hasattr(adapter, 'cursor'):
+            adapter.cursor = cursor
+        adapted_data.append(adapter.to_dict())
+    data = adapted_data
+
+    data_loader = cursor.connwrapper.options.data_loader
+    return data_loader(data, columns, **kwargs)
+
+
+def process_multiple_result_sets(cursor: 'Any', return_all: bool = False,
+                                 prefer_first: bool = False, **kwargs: Any) -> list[Any] | Any:
+    """Process multiple result sets from a query or stored procedure."""
+    result_sets: list[Any] = []
+    columns_sets: list[list[Any]] = []
+    largest_result = None
+    largest_size = 0
+
+    columns = extract_column_info(cursor)
+    columns_sets.append(columns)
+
+    result = load_data(cursor, columns=columns, **kwargs)
+    if result is not None:
+        result_sets.append(result)
+        largest_result = result
+        largest_size = len(result)
+
+    while cursor.nextset():
+        columns = extract_column_info(cursor)
+        columns_sets.append(columns)
+
+        result = load_data(cursor, columns=columns, **kwargs)
+        if result is not None:
+            result_sets.append(result)
+            if len(result) > largest_size:
+                largest_result = result
+                largest_size = len(result)
+
+    if return_all:
+        if not result_sets:
+            return []
+        return result_sets
+
+    if prefer_first and result_sets:
+        return result_sets[0]
+
+    if not result_sets:
+        return []
+
+    return largest_result
