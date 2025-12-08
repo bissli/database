@@ -6,7 +6,7 @@ based on constraint violations, with configurable update behavior for existing r
 import logging
 from typing import Any
 
-from database.data import insert_rows
+from database.data import filter_table_columns, insert_rows
 from database.schema import get_table_columns, get_table_primary_keys
 from database.schema import reset_table_sequence
 from database.strategy import get_db_strategy
@@ -79,27 +79,16 @@ def upsert_rows(
     if dialect != 'postgresql':
         constraint_name = None
 
-    table_columns = get_table_columns(cn, table)
-    case_map = {col.lower(): col for col in table_columns}
-    table_columns_lower = set(case_map.keys())
-
-    filtered_rows = []
-    for row in rows:
-        row_lower = {k.lower(): v for k, v in row.items()}
-        corrected_row = {col: row_lower[col.lower()] for col in table_columns if col.lower() in row_lower}
-        if corrected_row:
-            filtered_rows.append(corrected_row)
-
+    # Filter rows to only include valid table columns with correct casing
+    filtered_rows = filter_table_columns(cn, table, list(rows))
     if not filtered_rows:
         logger.debug(f'No valid columns found for {table} after filtering')
         return 0
-
     rows = tuple(filtered_rows)
 
-    invalid_columns = [col for col in list(set().union(*(r.keys() for r in rows))) if
-                       col.lower() not in table_columns_lower]
-    if invalid_columns:
-        logger.debug(f'Ignoring columns not present in the table schema: {invalid_columns}')
+    # Build case map for later update column correction
+    table_columns = get_table_columns(cn, table)
+    case_map = {col.lower(): col for col in table_columns}
 
     provided_keys = {key for row in rows for key in row}
     columns = tuple(col for col in table_columns if col in provided_keys)

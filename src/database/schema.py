@@ -2,8 +2,8 @@
 Schema and maintenance operations for database tables.
 
 This module provides high-level functions for working with database table schemas
-and performing maintenance operations. It uses the strategy pattern to delegate
-database-specific implementations while providing a consistent interface.
+and performing maintenance operations. It uses SQLAlchemy Inspector for standard
+schema queries and delegates database-specific operations to strategies.
 
 Functions in this module handle:
 - Schema information retrieval (columns, primary keys, sequences)
@@ -18,11 +18,15 @@ import logging
 from typing import TYPE_CHECKING
 
 from database.strategy import get_db_strategy
+from sqlalchemy import inspect
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
 
 logger = logging.getLogger(__name__)
+
+# Simple TTL-less cache for schema info (cleared on bypass_cache=True)
+_schema_cache: dict[tuple, list[str]] = {}
 
 
 def reset_table_sequence(cn: 'ConnectionWrapper', table: str,
@@ -69,18 +73,33 @@ def cluster_table(cn: 'ConnectionWrapper', table: str,
 
 def get_table_columns(cn: 'ConnectionWrapper', table: str,
                       bypass_cache: bool = False) -> list[str]:
-    """Get all column names for a table.
+    """Get all column names for a table using SQLAlchemy Inspector.
     """
-    strategy = get_db_strategy(cn)
-    return strategy.get_columns(cn, table, bypass_cache=bypass_cache)
+    cache_key = ('columns', id(cn.engine), table)
+    if not bypass_cache and cache_key in _schema_cache:
+        return _schema_cache[cache_key]
+
+    # Use connection to see uncommitted schema changes within transactions
+    inspector = inspect(cn.sa_connection)
+    columns = [col['name'] for col in inspector.get_columns(table)]
+    _schema_cache[cache_key] = columns
+    return columns
 
 
 def get_table_primary_keys(cn: 'ConnectionWrapper', table: str,
                            bypass_cache: bool = False) -> list[str]:
-    """Get primary key columns for a table.
+    """Get primary key columns for a table using SQLAlchemy Inspector.
     """
-    strategy = get_db_strategy(cn)
-    return strategy.get_primary_keys(cn, table, bypass_cache=bypass_cache)
+    cache_key = ('primary_keys', id(cn.engine), table)
+    if not bypass_cache and cache_key in _schema_cache:
+        return _schema_cache[cache_key]
+
+    # Use connection to see uncommitted schema changes within transactions
+    inspector = inspect(cn.sa_connection)
+    pk_constraint = inspector.get_pk_constraint(table)
+    primary_keys = pk_constraint.get('constrained_columns', [])
+    _schema_cache[cache_key] = primary_keys
+    return primary_keys
 
 
 def get_sequence_columns(cn: 'ConnectionWrapper', table: str,
@@ -108,6 +127,8 @@ def find_sequence_column(cn: 'ConnectionWrapper', table: str,
 def table_fields(cn: 'ConnectionWrapper', table: str,
                  bypass_cache: bool = False) -> list[str]:
     """Get all column names for a table ordered by their position.
+
+    Uses SQLAlchemy Inspector which returns columns in ordinal position.
     """
-    strategy = get_db_strategy(cn)
-    return strategy.get_ordered_columns(cn, table, bypass_cache=bypass_cache)
+    # Inspector.get_columns returns columns in ordinal position order
+    return get_table_columns(cn, table, bypass_cache=bypass_cache)
