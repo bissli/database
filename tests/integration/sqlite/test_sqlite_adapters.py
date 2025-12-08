@@ -1,5 +1,6 @@
 import database as db
 import pytest
+from database.exceptions import ValidationError
 from database.types import RowAdapter
 
 
@@ -55,8 +56,8 @@ def test_sqlite_adapter_in_select_scalar(sl_conn):
     value = db.select_scalar(sl_conn, 'SELECT value FROM test_table WHERE id = 1')
     assert value == 10
 
-    # Test with no results should fail with assertion error
-    with pytest.raises(AssertionError):
+    # Test with no results should fail with validation error
+    with pytest.raises(ValidationError):
         db.select_scalar(sl_conn, 'SELECT name FROM test_table WHERE id = 999')
 
 
@@ -67,8 +68,8 @@ def test_sqlite_adapter_in_select_row(sl_conn):
     assert row.name == 'Alice'
     assert row.value == 10
 
-    # Test with no results should fail with assertion error
-    with pytest.raises(AssertionError):
+    # Test with no results should fail with validation error
+    with pytest.raises(ValidationError):
         db.select_row(sl_conn, 'SELECT * FROM test_table WHERE id = 999')
 
 

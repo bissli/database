@@ -116,15 +116,17 @@ class DatabaseOptions(ConfigOptions):
     pool_wait_timeout: int = 30
 
     def __post_init__(self):
-        assert self.drivername in {'postgresql', 'sqlite'}, \
-            'drivername must be `postgresql` or `sqlite`'
+        if self.drivername not in {'postgresql', 'sqlite'}:
+            raise ValueError('drivername must be `postgresql` or `sqlite`')
         self.appname = self.appname or scriptname() or 'python_console'
         if self.drivername == 'postgresql':
             for field in ('hostname', 'username', 'password', 'database',
                           'port', 'timeout'):
-                assert getattr(self, field), f'field {field} cannot be None or 0'
+                if not getattr(self, field):
+                    raise ValueError(f'field {field} cannot be None or 0')
         if self.drivername == 'sqlite':
-            assert self.database, 'field database cannot be None'
+            if not self.database:
+                raise ValueError('field database cannot be None')
         if self.data_loader is None:
             self.data_loader = pandas_numpy_data_loader
 

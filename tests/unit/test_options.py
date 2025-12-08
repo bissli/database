@@ -49,7 +49,7 @@ def test_pooling_options():
 
 def test_validation():
     """Test validation rules"""
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         DatabaseOptions(
             drivername='invalid',
             hostname='testhost',
@@ -60,7 +60,7 @@ def test_validation():
             timeout=30
         )
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         DatabaseOptions(drivername='postgresql', hostname='testhost')
 
 
@@ -73,7 +73,7 @@ def test_sqlite_options():
     assert options.drivername == 'sqlite'
     assert options.database == 'test.db'
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         DatabaseOptions(drivername='sqlite')
 
 

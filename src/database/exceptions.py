@@ -31,6 +31,11 @@ class IntegrityViolationError(DatabaseError):
     """
 
 
+class ValidationError(DatabaseError):
+    """Error in input validation.
+    """
+
+
 DbConnectionError = (
     psycopg.OperationalError,
     psycopg.InterfaceError,

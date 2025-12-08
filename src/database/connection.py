@@ -28,7 +28,7 @@ import pandas as pd
 import sqlalchemy as sa
 from database.cursor import extract_column_info, get_dict_cursor, load_data
 from database.cursor import process_multiple_result_sets
-from database.exceptions import DbConnectionError
+from database.exceptions import DbConnectionError, ValidationError
 from database.options import DatabaseOptions, use_iterdict_data_loader
 from database.sql import make_placeholders, prepare_query, quote_identifier
 from database.strategy import get_db_strategy
@@ -332,10 +332,11 @@ class ConnectionWrapper:
     def select_row(self, sql: str, *args: Any) -> attrdict:
         """Execute a query and return a single row as an attribute dictionary.
 
-        Raises AssertionError if the query returns zero or multiple rows.
+        Raises ValidationError if the query returns zero or multiple rows.
         """
         data = self.select(sql, *args)
-        assert len(data) == 1, f'Expected one row, got {len(data)}'
+        if len(data) != 1:
+            raise ValidationError(f'Expected one row, got {len(data)}')
         return RowAdapter.create(self, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
@@ -351,10 +352,11 @@ class ConnectionWrapper:
     def select_scalar(self, sql: str, *args: Any) -> Any:
         """Execute a query and return a single scalar value.
 
-        Raises AssertionError if the query returns zero or multiple rows.
+        Raises ValidationError if the query returns zero or multiple rows.
         """
         data = self.select(sql, *args)
-        assert len(data) == 1, f'Expected one row, got {len(data)}'
+        if len(data) != 1:
+            raise ValidationError(f'Expected one row, got {len(data)}')
         result = RowAdapter.create(self, data[0]).get_value()
         logger.debug(f'Scalar query returned value of type {type(result).__name__}')
         return result
@@ -367,7 +369,7 @@ class ConnectionWrapper:
             if not is_null(val):
                 return val
             return None
-        except AssertionError:
+        except ValidationError:
             return None
 
     def get_table_columns(self, table: str, bypass_cache: bool = False) -> list[str]:
@@ -439,7 +441,8 @@ class ConnectionWrapper:
     def insert_row(self, table: str, fields: list[str], values: list[Any]) -> int:
         """Insert a row into a table using the supplied list of fields and values.
         """
-        assert len(fields) == len(values), 'fields must be same length as values'
+        if len(fields) != len(values):
+            raise ValidationError('fields must be same length as values')
 
         quoted_table = quote_identifier(table, self.dialect)
         quoted_columns = ', '.join(quote_identifier(col, self.dialect) for col in fields)
@@ -483,11 +486,14 @@ class ConnectionWrapper:
         """Update the specified datafields to the supplied datavalues in a table row
         identified by the keyfields and keyvalues.
         """
-        assert len(keyfields) == len(keyvalues), 'keyfields must be same length as keyvalues'
-        assert len(datafields) == len(datavalues), 'datafields must be same length as datavalues'
+        if len(keyfields) != len(keyvalues):
+            raise ValidationError('keyfields must be same length as keyvalues')
+        if len(datafields) != len(datavalues):
+            raise ValidationError('datafields must be same length as datavalues')
 
         for kf in keyfields:
-            assert kf not in datafields, f'keyfield {kf} cannot be in datafields'
+            if kf in datafields:
+                raise ValidationError(f'keyfield {kf} cannot be in datafields')
 
         quoted_table = quote_identifier(table, self.dialect)
         keycols = ' and '.join([f'{quote_identifier(f, self.dialect)}=%s' for f in keyfields])
