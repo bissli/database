@@ -26,8 +26,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 
 __all__ = [
-    'isconnection',
-    'is_sqlite3_connection',
     'check_connection',
     'create_url_from_options',
     'get_engine_for_options',
@@ -40,28 +38,6 @@ logger = logging.getLogger(__name__)
 # Thread-safe engine registry
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
-
-
-def isconnection(obj):
-    """Check if object is any supported database connection"""
-    # Driver connection is a direct indicator of a connection
-    if hasattr(obj, 'driver_connection'):
-        return True
-    # Otherwise check if it has a recognized dialect
-    try:
-        get_dialect_name(obj)
-        return True
-    except:
-        return False
-
-
-def is_sqlite3_connection(obj):
-    """Check if object is a SQLite database connection"""
-    try:
-        dialect = get_dialect_name(obj)
-        return dialect == 'sqlite'
-    except:
-        return False
 
 
 def create_url_from_options(options, url_creator=sa.URL.create):
@@ -210,20 +186,6 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
         return engine
 
 
-def dispose_engine(options):
-    """Dispose of the engine associated with the given options.
-
-    Args:
-        options: DatabaseOptions object
-    """
-    with _engine_registry_lock:
-        for key in list(_engine_registry.keys()):
-            if str(options) in key:
-                _engine_registry[key].dispose()
-                del _engine_registry[key]
-                logger.debug(f'Disposed engine for {options.drivername}')
-
-
 def dispose_all_engines():
     """Dispose all engines in the registry."""
     with _engine_registry_lock:
@@ -237,61 +199,43 @@ def dispose_all_engines():
 atexit.register(dispose_all_engines)
 
 
-def get_dialect_name(obj):
-    """Get the dialect name for a database connection or engine.
-
-    Works with:
-    - SQLAlchemy engines
-    - SQLAlchemy connections
-    - DBAPI connections (psycopg, sqlite3)
-    - Connection wrappers
+def get_dialect_name(obj) -> str:
+    """Get dialect name for a database connection or engine.
 
     Args:
-        obj: Connection object or engine
+        obj: Connection object, engine, or wrapper
 
     Returns
-        str: Dialect name ('postgresql', 'sqlite') or None if not recognized
+        str: Dialect name ('postgresql' or 'sqlite')
+
+    Raises
+        AttributeError: If dialect cannot be determined
     """
-    # Track seen objects to prevent cycles
-    seen = set()
+    # SQLAlchemy engine or connection with dialect
+    if hasattr(obj, 'dialect'):
+        dialect = obj.dialect
+        # Handle case where dialect is already a string (e.g., ConnectionWrapper)
+        if isinstance(dialect, str):
+            return dialect.lower()
+        return str(dialect.name).lower()
 
-    def _get_dialect_name_internal(obj):
-        if id(obj) in seen:
-            return None
+    # SQLAlchemy connection (has engine.dialect)
+    if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
+        return str(obj.engine.dialect.name).lower()
 
-        seen.add(id(obj))
+    # ConnectionWrapper (has sa_connection)
+    if hasattr(obj, 'sa_connection') and hasattr(obj.sa_connection, 'engine'):
+        return str(obj.sa_connection.engine.dialect.name).lower()
 
-        # Direct check for SQLAlchemy dialect
-        if hasattr(obj, 'dialect'):
-            return str(obj.dialect.name).lower()
+    # SQLAlchemy pool wrapper (_ConnectionFairy) - unwrap to DBAPI connection
+    if hasattr(obj, 'dbapi_connection'):
+        return get_dialect_name(obj.dbapi_connection)
 
-        # SQLAlchemy connections have engine attribute
-        if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
-            return str(obj.engine.dialect.name).lower()
+    # Raw DBAPI connection - check type name
+    type_name = f'{type(obj).__module__}.{type(obj).__name__}'
+    if 'psycopg' in type_name:
+        return 'postgresql'
+    if 'sqlite3' in type_name:
+        return 'sqlite'
 
-        # Check for SQLAlchemy 2.0 driver_connection attribute
-        if hasattr(obj, 'driver_connection'):
-            driver_conn = obj.driver_connection
-            if driver_conn is not obj:  # Prevent infinite recursion
-                result = _get_dialect_name_internal(driver_conn)
-                if result:
-                    return result
-
-        # Check ConnectionWrapper objects
-        if hasattr(obj, 'connection'):
-            conn = obj.connection
-            if conn is not obj:  # Prevent infinite recursion
-                result = _get_dialect_name_internal(conn)
-                if result:
-                    return result
-
-        # Direct connection type checks
-        obj_type = str(type(obj))
-        if 'psycopg.Connection' in obj_type:
-            return 'postgresql'
-        if 'sqlite3.Connection' in obj_type:
-            return 'sqlite'
-
-        raise AttributeError(f'Unable to determine connection type for {obj_type} in `get_dialect_name`')
-
-    return _get_dialect_name_internal(obj)
+    raise AttributeError(f'Cannot determine dialect for {type(obj)}')
