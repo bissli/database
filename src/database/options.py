@@ -3,6 +3,7 @@ from functools import wraps
 
 import pandas as pd
 import pyarrow as pa
+from database.types import Column
 
 from libb import ConfigOptions, scriptname
 
@@ -22,18 +23,15 @@ def use_iterdict_data_loader(func):
     def inner(*args, **kwargs):
         cn = args[0]
 
-        # For Transaction objects, get options from the connection
         if hasattr(cn, 'connection') and not hasattr(cn, 'options'):
             cn = cn.connection
 
-        # Save original data loader and temporarily switch to iterdict_data_loader
         original_data_loader = cn.options.data_loader
         cn.options.data_loader = iterdict_data_loader
 
         try:
             return func(*args, **kwargs)
         finally:
-            # Restore the original data loader
             cn.options.data_loader = original_data_loader
 
     return inner
@@ -57,17 +55,13 @@ def pandas_numpy_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     Always returns a DataFrame, never None, with columns preserved for empty results.
     Includes type information in the DataFrame.attrs attribute.
     """
-    from database.types import Column
-
     if not data:
         df = pd.DataFrame(columns=Column.get_names(columns))
-        # Save column type information in DataFrame attributes
         df.attrs['column_types'] = Column.get_column_types_dict(columns)
         return df
 
     df = pd.DataFrame.from_records(list(data), columns=Column.get_names(columns))
 
-    # Save column type information in DataFrame attributes
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
 
     return df
@@ -78,11 +72,8 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
 
     Always returns a DataFrame, never None, with columns preserved for empty results.
     """
-    from database.types import Column
-
     if not data:
         df = pd.DataFrame(columns=Column.get_names(columns))
-        # Save column type information
         df.attrs['column_types'] = Column.get_column_types_dict(columns)
         return df
 
@@ -90,7 +81,6 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     dataT = [[row[col] for row in data] for col in column_names]  # list of cols
     df = pa.table(dataT, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
 
-    # Save column type information
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
 
     return df

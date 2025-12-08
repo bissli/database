@@ -5,6 +5,9 @@ import datetime
 import decimal
 
 import database as db
+import numpy as np
+import pandas as pd
+from database.cursor import get_dict_cursor
 
 
 def test_postgres_type_consistency(psql_docker, pg_conn, value_dict):
@@ -166,10 +169,6 @@ def test_postgres_nan_nat_handling(psql_docker, pg_conn):
     Verifies that Python's float('nan'), NumPy NaN, Pandas NaT, and similar
     special values are properly converted to NULL when sent to the database.
     """
-
-    import numpy as np
-    import pandas as pd
-
     # Create a test table with integer column (to ensure NaN/NaT gets converted to NULL)
     with db.transaction(pg_conn) as tx:
         # Drop table if it exists
@@ -230,10 +229,6 @@ def test_postgres_cursor_executemany(psql_docker, pg_conn):
     Tests how multiple insertions of NaN, NaT and similar special values are handled
     when using the low-level cursor directly instead of the transaction interface.
     """
-    import numpy as np
-    import pandas as pd
-    from database.cursor import get_dict_cursor
-
     with db.transaction(pg_conn) as tx:
         tx.execute('DROP TABLE IF EXISTS executemany_test')
 

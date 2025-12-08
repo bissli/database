@@ -2,24 +2,20 @@
 Common query utilities used by both transaction and query operations.
 """
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from database.types import RowStructureAdapter, columns_from_cursor_description
+
+if TYPE_CHECKING:
+    from database.adapters.column_info import Column
+    from database.core.cursor import AbstractCursor
 
 logger = logging.getLogger(__name__)
 
 
-def extract_column_info(cursor: any, table_name: str = None) -> list:
+def extract_column_info(cursor: 'AbstractCursor',
+                        table_name: str | None = None) -> list['Column']:
     """Extract column information from cursor description based on database type.
-
-    Gets column metadata from cursor and converts it to a standardized format.
-
-    Args:
-        cursor: Database cursor with active result set
-        table_name: Optional table name to associate with columns
-
-    Returns
-        List of column information objects
     """
     if cursor.description is None:
         return []
@@ -39,19 +35,12 @@ def extract_column_info(cursor: any, table_name: str = None) -> list:
     return columns
 
 
-def load_data(cursor: any, columns: list = None, **kwargs: dict) -> any:
+def load_data(cursor: 'AbstractCursor', columns: list['Column'] | None = None,
+              **kwargs: Any) -> Any:
     """Data loader callable that processes cursor results into the configured format.
 
     Converts raw database rows to a standardized format using the connection's
     configured data loader (typically DataFrame or dict list).
-
-    Args:
-        cursor: Database cursor with active result set
-        columns: Column metadata list (will be extracted if None)
-        **kwargs: Additional options passed to the data loader
-
-    Returns
-        Loaded data in the format specified by the connection's data_loader
     """
     if columns is None:
         columns = extract_column_info(cursor)
@@ -74,25 +63,15 @@ def load_data(cursor: any, columns: list = None, **kwargs: dict) -> any:
     return data_loader(data, columns, **kwargs)
 
 
-def process_multiple_result_sets(cursor: any, return_all: bool = False,
-                                 prefer_first: bool = False, **kwargs: dict) -> list | Any:
-    """
-    Process multiple result sets from a query or stored procedure.
+def process_multiple_result_sets(cursor: 'AbstractCursor', return_all: bool = False,
+                                 prefer_first: bool = False, **kwargs: Any) -> list[Any] | Any:
+    """Process multiple result sets from a query or stored procedure.
 
     This is a common function used by both the Transaction.select and the
     select function to handle multiple result sets consistently.
-
-    Args:
-        cursor: Database cursor with results
-        return_all: If True, returns all result sets as a list
-        prefer_first: If True, returns the first result set instead of the largest
-        **kwargs: Additional options for the data loader
-
-    Returns
-        List of result sets or the largest/first result set based on options
     """
-    result_sets = []
-    columns_sets = []
+    result_sets: list[Any] = []
+    columns_sets: list[list[Column]] = []
     largest_result = None
     largest_size = 0
 

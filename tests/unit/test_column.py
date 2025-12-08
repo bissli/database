@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from database.types import Column, columns_from_cursor_description
+from database.utils.connection_utils import get_dialect_name
 
 
 def test_column_get_names():
@@ -28,7 +29,6 @@ def test_column_get_column_by_name():
     assert col.name == 'name'
     assert col.python_type == str
 
-    # Column not found
     col = Column.get_column_by_name(columns, 'nonexistent')
     assert col is None
 
@@ -88,8 +88,6 @@ def test_columns_from_cursor_description():
 
 def test_connection_type_mapping(create_simple_mock_connection):
     """Test mapping from connection detection to database type string."""
-    from database.utils.connection_utils import get_dialect_name
-
     pg_conn = create_simple_mock_connection('postgresql')
     sqlite_conn = create_simple_mock_connection('sqlite')
 

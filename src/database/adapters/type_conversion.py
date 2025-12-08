@@ -34,25 +34,20 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Type definitions for cleaner type hinting
 SQLiteConnection = TypeVar('SQLiteConnection')
 PostgresConnection = TypeVar('PostgresConnection')
 
-# Constants
 SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
 
-# NumPy type constants
 NUMPY_FLOAT_TYPES = (np.floating,)
 NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
 
-# Pandas nullable type constants
 PANDAS_NULLABLE_TYPES = (
     pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
     pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
-    pd.Float64Dtype
-)
+    pd.Float64Dtype,
+    )
 
-# PyArrow scalar type constants
 PYARROW_FLOAT_TYPES = (
     (pa.FloatScalar, pa.DoubleScalar, pa.Int8Scalar, pa.Int16Scalar,
      pa.Int32Scalar, pa.Int64Scalar, pa.UInt8Scalar, pa.UInt16Scalar,
@@ -85,35 +80,27 @@ def _convert_pyarrow_value(value: Any) -> Any:
     Returns
         Converted Python value or None
     """
-    # If PyArrow is not available, return value as is
     if not PYARROW_AVAILABLE:
         return value
 
-    # Early return for None
     if value is None:
         return None
 
-    # Check if the value is a null value
     try:
         if pa.compute.is_null(value).as_py():
             return None
     except (AttributeError, TypeError, ValueError) as e:
         logger.debug(f'PyArrow is_null check failed: {e}')
-        # Continue with other conversion methods
 
-    # Try as_py method first (most reliable)
     if hasattr(value, 'as_py'):
         try:
             py_value = value.as_py()
-            # Handle special string cases
             if isinstance(py_value, str) and _check_special_string(py_value) is None:
                 return None
             return py_value
         except Exception as e:
             logger.debug(f'PyArrow as_py conversion failed: {e}')
-            # Fall through to next method
 
-    # Try direct value access for Scalar objects
     if pa and isinstance(value, pa.Scalar):
         try:
             py_value = value.value
@@ -122,25 +109,19 @@ def _convert_pyarrow_value(value: Any) -> Any:
             return py_value
         except Exception as e:
             logger.debug(f'PyArrow Scalar.value access failed: {e}')
-            # Fall through to fallback
 
-    # Handle PyArrow arrays
     if pa and isinstance(value, pa.Array | pa.ChunkedArray):
         try:
             return value.to_pylist()
         except Exception as e:
             logger.debug(f'PyArrow array to_pylist failed: {e}')
-            # Continue to fallback
 
-    # Handle PyArrow tables
     if pa and isinstance(value, pa.Table):
         try:
             return value.to_pandas()
         except Exception as e:
             logger.debug(f'PyArrow table to_pandas failed: {e}')
-            # Continue to fallback
 
-    # Fallback for other types
     try:
         logger.debug(f'Using fallback for PyArrow type: {type(value)}')
         return str(value)
@@ -165,11 +146,9 @@ def _convert_numpy_value(val: Any) -> float | int | datetime.datetime | None:
     if val is None:
         return None
 
-    # Handle NaN values from floating point types
     if isinstance(val, np.floating) and np.isnan(val):
         return None
 
-    # Handle NaT (Not a Time) values
     if isinstance(val, np.datetime64) and np.isnat(val):
         return None
 
@@ -204,7 +183,8 @@ def _convert_pandas_nullable(val: Any) -> Any:
 
 
 class TypeConverter:
-    """Universal type conversion for database parameters"""
+    """Universal type conversion for database parameters.
+    """
 
     @staticmethod
     def convert_value(value: Any) -> Any:
@@ -228,35 +208,27 @@ class TypeConverter:
         if value is None:
             return None
 
-        # Handle NaN and special values
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
 
-        # Handle pandas.NaT
         if pd and hasattr(pd, 'NaT') and isinstance(value, type(pd.NaT)):
             return None
 
-        # Handle string special values
         if isinstance(value, str) and _check_special_string(value) is None:
             return None
 
-        # NumPy numeric types
         if isinstance(value, (*NUMPY_FLOAT_TYPES, *NUMPY_INT_TYPES, np.datetime64)):
             return _convert_numpy_value(value)
 
-        # Pandas basic NA handling
         if pd.api.types.is_scalar(value) and pd.isna(value):
             return None
 
-        # Handle object dtype
         if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object') and pd.isna(value):
             return None
 
-        # Pandas nullable types
         if isinstance(value, PANDAS_NULLABLE_TYPES):
             return _convert_pandas_nullable(value)
 
-        # PyArrow values
         if PYARROW_AVAILABLE:
             if isinstance(value, PYARROW_FLOAT_TYPES):
                 return _convert_pyarrow_value(value)
@@ -291,20 +263,21 @@ class TypeConverter:
         return TypeConverter.convert_value(params)
 
 
-# SQLite converter functions
-
 def convert_date(val: bytes) -> datetime.date:
-    """Convert ISO 8601 date string to date object"""
+    """Convert ISO 8601 date string to date object.
+    """
     return dateutil.parser.isoparse(val.decode()).date()
 
 
 def convert_datetime(val: bytes) -> datetime.datetime:
-    """Convert ISO 8601 datetime string to datetime object"""
+    """Convert ISO 8601 datetime string to datetime object.
+    """
     return dateutil.parser.isoparse(val.decode())
 
 
 class AdapterRegistry:
-    """Registry for database-specific type adapters with SQLAlchemy integration"""
+    """Registry for database-specific type adapters with SQLAlchemy integration.
+    """
 
     def sqlite(self, connection: SQLiteConnection) -> None:
         """Register SQLite converters for a connection
@@ -316,10 +289,7 @@ class AdapterRegistry:
             Due to SQLite's architecture, converters are registered globally
             rather than per-connection.
         """
-        # Ensure connection is established
         connection.execute('SELECT 1')
-
-        # Register date/time converters - these convert database values TO Python objects
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
 

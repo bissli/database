@@ -6,6 +6,7 @@ import logging
 
 import database as db
 import pandas as pd
+from database.options import iterdict_data_loader
 from database.types import Column
 
 logger = logging.getLogger(__name__)
@@ -18,8 +19,6 @@ def debug_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     This verifies that the date column is properly handled as a string by the database driver
     and type resolution system, rather than being converted to a datetime type.
     """
-    from database.options import iterdict_data_loader
-
     # Extract column info for debugging
     column_names = Column.get_names(columns)
     column_types = Column.get_types(columns)

@@ -9,15 +9,20 @@ Each concrete strategy implements operations with database-specific SQL and tech
 but clients can work with any database through this consistent interface.
 """
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any
 
 from database.cache import cacheable_strategy
 
+if TYPE_CHECKING:
+    from database.core.connection import ConnectionWrapper
+
 
 class DatabaseStrategy(ABC):
-    """Base class for database-specific operations"""
+    """Base class for database-specific operations.
+    """
 
     @abstractmethod
-    def vacuum_table(self, cn, table):
+    def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table by reclaiming space
 
         Args:
@@ -26,8 +31,8 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    def reindex_table(self, cn, table):
-        """Rebuild indexes for a table
+    def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
+        """Rebuild indexes for a table.
 
         Args:
             cn: Database connection object
@@ -35,8 +40,9 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    def cluster_table(self, cn, table, index=None):
-        """Order table data according to an index
+    def cluster_table(self, cn: 'ConnectionWrapper', table: str,
+                      index: str | None = None) -> None:
+        """Order table data according to an index.
 
         Args:
             cn: Database connection object
@@ -45,18 +51,20 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    def reset_sequence(self, cn, table, identity=None):
-        """Reset the sequence for a table
+    def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
+                       identity: str | None = None) -> None:
+        """Reset the sequence for a table.
 
         Args:
             cn: Database connection object
             table: Name of the table with the sequence
-            identity: Name of the identity column, by default None which triggers auto-detection
+            identity: Name of the identity column, by default None
         """
 
     @abstractmethod
     @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
-    def get_primary_keys(self, cn, table, bypass_cache=False):
+    def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
+                         bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table
 
         Args:
@@ -70,13 +78,14 @@ class DatabaseStrategy(ABC):
 
     @abstractmethod
     @cacheable_strategy('table_columns', ttl=300, maxsize=50)
-    def get_columns(self, cn, table, bypass_cache=False):
-        """Get all columns for a table
+    def get_columns(self, cn: 'ConnectionWrapper', table: str,
+                    bypass_cache: bool = False) -> list[str]:
+        """Get all columns for a table.
 
         Args:
             cn: Database connection object
             table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
+            bypass_cache: If True, bypass cache and query database directly
 
         Returns
             list: List of column names for the specified table
@@ -84,40 +93,42 @@ class DatabaseStrategy(ABC):
 
     @abstractmethod
     @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
-    def get_sequence_columns(self, cn, table, bypass_cache=False):
-        """Get columns with sequences/identities
+    def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
+                             bypass_cache: bool = False) -> list[str]:
+        """Get columns with sequences/identities.
 
         Args:
             cn: Database connection object
             table: Table name to get sequence columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
+            bypass_cache: If True, bypass cache and query database directly
 
         Returns
             list: List of sequence/identity column names for the specified table
         """
 
     @abstractmethod
-    def configure_connection(self, conn):
-        """Configure connection settings
+    def configure_connection(self, conn: Any) -> None:
+        """Configure connection settings.
 
         Args:
             conn: Database connection to configure with database-specific settings
         """
 
     @abstractmethod
-    def quote_identifier(self, identifier):
-        """Quote a database identifier
+    def quote_identifier(self, identifier: str) -> str:
+        """Quote a database identifier.
 
         Args:
-            identifier: Database identifier to be quoted (table name, column name, etc.)
+            identifier: Database identifier to be quoted
 
         Returns
             str: Properly quoted identifier according to database-specific rules
         """
 
     @abstractmethod
-    def get_constraint_definition(self, cn, table, constraint_name):
-        """Get the definition of a constraint by name
+    def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
+                                  constraint_name: str) -> dict[str, Any] | str:
+        """Get the definition of a constraint by name.
 
         Args:
             cn: Database connection object
@@ -125,51 +136,54 @@ class DatabaseStrategy(ABC):
             constraint_name: Name of the constraint
 
         Returns
-            dict: Constraint information including columns and definition
+            Constraint information including columns and definition
         """
 
     @abstractmethod
-    def get_default_columns(self, cn, table, bypass_cache=False):
-        """Get columns suitable for general data display
+    def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
+                            bypass_cache: bool = False) -> list[str]:
+        """Get columns suitable for general data display.
 
         Args:
             cn: Database connection object
             table: Table name to get default columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
+            bypass_cache: If True, bypass cache and query database directly
 
         Returns
             list: List of column names suitable for general data representation
         """
 
     @abstractmethod
-    def get_ordered_columns(self, cn, table, bypass_cache=False):
-        """Get all column names for a table ordered by their position
+    def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
+                            bypass_cache: bool = False) -> list[str]:
+        """Get all column names for a table ordered by their position.
 
         Args:
             cn: Database connection object
             table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
+            bypass_cache: If True, bypass cache and query database directly
 
         Returns
             list: List of column names ordered by position
         """
 
     @abstractmethod
-    def find_sequence_column(self, cn, table, bypass_cache=False):
+    def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
+                             bypass_cache: bool = False) -> str:
         """Find the best column to reset sequence for.
 
         Args:
             cn: Database connection object
             table: Table name to analyze for sequence columns
-            bypass_cache: If True, bypass cache and query database directly, by default False
+            bypass_cache: If True, bypass cache and query database directly
 
         Returns
             str: Column name best suited for sequence resetting
         """
 
-    # Common implementation shared by all strategies
     @cacheable_strategy('sequence_column_finder', ttl=300, maxsize=50)
-    def _find_sequence_column_impl(self, cn, table, bypass_cache=False):
+    def _find_sequence_column_impl(self, cn: 'ConnectionWrapper', table: str,
+                                   bypass_cache: bool = False) -> str:
         """Find the best column to reset sequence for.
 
         Common implementation shared by all database strategies that determines the
@@ -190,31 +204,24 @@ class DatabaseStrategy(ABC):
         sequence_cols = self.get_sequence_columns(cn, table, bypass_cache=bypass_cache)
         primary_keys = self.get_primary_keys(cn, table, bypass_cache=bypass_cache)
 
-        # Find columns that are both PK and sequence columns
         pk_sequence_cols = [col for col in sequence_cols if col in primary_keys]
 
         if pk_sequence_cols:
-            # Among PK sequence columns, prefer ones with 'id' in the name
             id_cols = [col for col in pk_sequence_cols if 'id' in col.lower()]
             if id_cols:
                 return id_cols[0]
             return pk_sequence_cols[0]
 
-        # If no PK sequence columns, try sequence columns
         if sequence_cols:
-            # Among sequence columns, prefer ones with 'id' in the name
             id_cols = [col for col in sequence_cols if 'id' in col.lower()]
             if id_cols:
                 return id_cols[0]
             return sequence_cols[0]
 
-        # If no sequence columns, try primary keys
         if primary_keys:
-            # Among primary keys, prefer ones with 'id' in the name
             id_cols = [col for col in primary_keys if 'id' in col.lower()]
             if id_cols:
                 return id_cols[0]
             return primary_keys[0]
 
-        # Default fallback
         return 'id'

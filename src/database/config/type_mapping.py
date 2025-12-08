@@ -4,6 +4,7 @@ Configuration for database column type mappings.
 import json
 import logging
 import pathlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,6 @@ class TypeMappingConfig:
             return columns[column_name.lower()]
 
         # Fall back to patterns
-        import re
         patterns = self._pattern_mappings[db_type]['patterns']
 
         for pattern, dtype in patterns.items():

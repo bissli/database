@@ -19,11 +19,16 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from functools import wraps
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
+
+if TYPE_CHECKING:
+    from database.options import DatabaseOptions
 
 __all__ = [
     'check_connection',
@@ -35,30 +40,22 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Thread-safe engine registry
+T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
 
 
-def create_url_from_options(options, url_creator=sa.URL.create):
+def create_url_from_options(options: 'DatabaseOptions',
+                            url_creator: Callable[..., sa.URL] = sa.URL.create) -> sa.URL:
     """Convert DatabaseOptions to SQLAlchemy URL.
-
-    Args:
-        options: DatabaseOptions object with connection parameters
-        url_creator: Function used to create URL objects (default: sqlalchemy.URL.create)
-
-    Returns
-        sqlalchemy.URL: SQLAlchemy URL object for database connection
     """
     if options.drivername == 'sqlite':
-        # SQLite connection string is simple
         return url_creator(
             drivername='sqlite',
             database=options.database
         )
 
     elif options.drivername == 'postgresql':
-        # PostgreSQL connection with psycopg driver (SQLAlchemy 2.0 preferred driver)
         query = {}
         if options.timeout:
             query['connect_timeout'] = str(options.timeout)
@@ -76,29 +73,20 @@ def create_url_from_options(options, url_creator=sa.URL.create):
     raise ValueError(f'Unsupported database type: {options.drivername}')
 
 
-def check_connection(func=None, *, max_retries=3, retry_delay=1,
-                     retry_errors=None, retry_backoff=1.5, sleep_func=time.sleep):
-    """Connection retry decorator with backoff
+def check_connection(func: Callable[..., T] | None = None, *, max_retries: int = 3,
+                     retry_delay: float = 1, retry_errors: type | tuple[type, ...] | None = None,
+                     retry_backoff: float = 1.5,
+                     sleep_func: Callable[[float], None] = time.sleep) -> Callable[..., T]:
+    """Connection retry decorator with backoff.
 
     Decorator that handles connection errors by automatically retrying the operation.
     It has configurable retry parameters and supports exponential backoff.
 
-    Supports both @check_connection and @check_connection() syntax
-
-    Args:
-        func: The function to decorate
-        max_retries: Maximum number of retry attempts
-        retry_delay: Initial delay between retries in seconds
-        retry_errors: Exception types that trigger a retry (default: DbConnectionError)
-        retry_backoff: Multiplier for delay between retries (exponential backoff)
-        sleep_func: Function to use for delay between retries (default: time.sleep)
-
-    Returns
-        Decorated function with retry logic
+    Supports both @check_connection and @check_connection() syntax.
     """
-    def decorator(f):
+    def decorator(f: Callable[..., T]) -> Callable[..., T]:
         @wraps(f)
-        def inner(*args, **kwargs):
+        def inner(*args: Any, **kwargs: Any) -> T:
             if retry_errors is None:
                 from database import DbConnectionError
                 error_types = DbConnectionError
@@ -126,24 +114,13 @@ def check_connection(func=None, *, max_retries=3, retry_delay=1,
     return decorator(func)
 
 
-def get_engine_for_options(options, use_pool=False, pool_size=5,
-                           pool_recycle=300, pool_timeout=30,
-                           engine_factory=sa.create_engine, **kwargs):
+def get_engine_for_options(options: 'DatabaseOptions', use_pool: bool = False,
+                           pool_size: int = 5, pool_recycle: int = 300,
+                           pool_timeout: int = 30,
+                           engine_factory: Callable[..., Engine] = sa.create_engine,
+                           **kwargs: Any) -> Engine:
     """Get or create a SQLAlchemy engine for the given options.
-
-    Args:
-        options: DatabaseOptions object
-        use_pool: Whether to use connection pooling
-        pool_size: Maximum number of connections in the pool (default 5)
-        pool_recycle: Number of seconds after which a connection is recycled
-        pool_timeout: Number of seconds to wait for a connection from the pool
-        engine_factory: Function to create engines (defaults to sqlalchemy.create_engine)
-        **kwargs: Additional arguments passed to engine factory
-
-    Returns
-        sqlalchemy.engine.Engine: SQLAlchemy engine
     """
-    # Create a key based on options and pool settings
     key = f'{str(options)}_{use_pool}_{pool_size}_{pool_recycle}_{pool_timeout}'
 
     with _engine_registry_lock:
@@ -151,18 +128,15 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
             logger.debug(f'Using existing engine for {options.drivername}')
             return _engine_registry[key]
 
-        # Create a new engine with provided settings
         url = create_url_from_options(options)
 
-        engine_kwargs = { 'echo':  False}
+        engine_kwargs: dict[str, Any] = {'echo': False}
 
-        # Add SQLite-specific settings for type detection
         if options.drivername == 'sqlite':
             engine_kwargs['connect_args'] = {
                 'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
             }
 
-        # Configure pooling based on use_pool parameter
         if not use_pool:
             engine_kwargs['poolclass'] = NullPool
         else:
@@ -171,23 +145,21 @@ def get_engine_for_options(options, use_pool=False, pool_size=5,
             engine_kwargs['pool_timeout'] = pool_timeout
             engine_kwargs['max_overflow'] = 10
             engine_kwargs['pool_pre_ping'] = True
-            engine_kwargs['pool_reset_on_return']= 'rollback'
+            engine_kwargs['pool_reset_on_return'] = 'rollback'
 
-        # Add any additional engine parameters
         engine_kwargs.update(kwargs)
 
-        # Create the engine using the factory
         engine = engine_factory(url, **engine_kwargs)
 
-        # Store in registry
         _engine_registry[key] = engine
         logger.debug(f'Created new engine for {options.drivername}')
 
         return engine
 
 
-def dispose_all_engines():
-    """Dispose all engines in the registry."""
+def dispose_all_engines() -> None:
+    """Dispose all engines in the registry.
+    """
     with _engine_registry_lock:
         for key, engine in list(_engine_registry.items()):
             engine.dispose()
@@ -195,43 +167,27 @@ def dispose_all_engines():
         logger.debug('All database engines disposed')
 
 
-# Register cleanup function to run at program exit
 atexit.register(dispose_all_engines)
 
 
-def get_dialect_name(obj) -> str:
+def get_dialect_name(obj: Any) -> str:
     """Get dialect name for a database connection or engine.
-
-    Args:
-        obj: Connection object, engine, or wrapper
-
-    Returns
-        str: Dialect name ('postgresql' or 'sqlite')
-
-    Raises
-        AttributeError: If dialect cannot be determined
     """
-    # SQLAlchemy engine or connection with dialect
     if hasattr(obj, 'dialect'):
         dialect = obj.dialect
-        # Handle case where dialect is already a string (e.g., ConnectionWrapper)
         if isinstance(dialect, str):
             return dialect.lower()
         return str(dialect.name).lower()
 
-    # SQLAlchemy connection (has engine.dialect)
     if hasattr(obj, 'engine') and hasattr(obj.engine, 'dialect'):
         return str(obj.engine.dialect.name).lower()
 
-    # ConnectionWrapper (has sa_connection)
     if hasattr(obj, 'sa_connection') and hasattr(obj.sa_connection, 'engine'):
         return str(obj.sa_connection.engine.dialect.name).lower()
 
-    # SQLAlchemy pool wrapper (_ConnectionFairy) - unwrap to DBAPI connection
     if hasattr(obj, 'dbapi_connection'):
         return get_dialect_name(obj.dbapi_connection)
 
-    # Raw DBAPI connection - check type name
     type_name = f'{type(obj).__module__}.{type(obj).__name__}'
     if 'psycopg' in type_name:
         return 'postgresql'

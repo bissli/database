@@ -5,6 +5,7 @@ Implements Python DB-API 2.0 specification (PEP-249).
 """
 import logging
 import re
+import sqlite3
 import time
 from collections.abc import Iterator, Sequence
 from numbers import Number
@@ -94,11 +95,9 @@ class PostgresqlCursor(Cursor):
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
-        # Convert parameters
         if args:
             args = tuple(TypeConverter.convert_params(arg) for arg in args)
 
-        # Log query
         logger.debug(f'SQL:\n{operation}\nargs: {args}')
 
         try:
@@ -121,13 +120,11 @@ class PostgresqlCursor(Cursor):
         """Execute PostgreSQL query with parameter handling."""
         self._original_sql = sql
 
-        # No args or no placeholders
         if args and not has_placeholders(sql):
             self.dbapi_cursor.execute(sql)
             logger.debug('Executed query without placeholders (ignoring args)')
             return
 
-        # Handle dict parameters
         for arg in collapse(args):
             if isinstance(arg, dict):
                 if self._is_multi_statement(sql):
@@ -136,7 +133,6 @@ class PostgresqlCursor(Cursor):
                     self.dbapi_cursor.execute(sql, arg)
                 return
 
-        # Handle multi-statement with positional params
         if self._is_multi_statement(sql) and args:
             self._execute_multi_statement(sql, args)
             return
@@ -189,14 +185,12 @@ class PostgresqlCursor(Cursor):
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
-        # Convert parameters
         seq_of_parameters = [TypeConverter.convert_params(p) for p in seq_of_parameters]
 
         logger.debug(f'SQL:\n{operation}\nparams: {len(seq_of_parameters)} rows')
 
         total_rowcount = 0
         try:
-            # Batch if needed
             if len(seq_of_parameters) <= batch_size:
                 self.dbapi_cursor.executemany(operation, seq_of_parameters)
                 total_rowcount = self.dbapi_cursor.rowcount
@@ -230,11 +224,9 @@ class SqliteCursor(Cursor):
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
-        # Convert %s to ? for SQLite
         operation = standardize_placeholders(operation, dialect='sqlite')
         self._original_sql = operation
 
-        # Convert parameters
         if args:
             args = tuple(TypeConverter.convert_params(arg) for arg in args)
 
@@ -280,17 +272,14 @@ class SqliteCursor(Cursor):
         start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
-        # Convert %s to ? for SQLite
         operation = standardize_placeholders(operation, dialect='sqlite')
 
-        # Convert parameters
         seq_of_parameters = [TypeConverter.convert_params(p) for p in seq_of_parameters]
 
         logger.debug(f'SQL:\n{operation}\nparams: {len(seq_of_parameters)} rows')
 
         total_rowcount = 0
         try:
-            # Batch if needed
             if len(seq_of_parameters) <= batch_size:
                 self.dbapi_cursor.executemany(operation, seq_of_parameters)
                 total_rowcount = self.dbapi_cursor.rowcount
@@ -412,8 +401,6 @@ class DictRowFactory:
 
 def get_dict_cursor(cn: Any) -> Cursor:
     """Get cursor that returns rows as dictionaries."""
-    import sqlite3
-
     raw_conn = cn.connection if hasattr(cn, 'connection') else cn
 
     if cn.dialect == 'postgresql':

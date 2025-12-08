@@ -83,24 +83,13 @@ Each mock provides:
 import datetime
 import json
 import logging
+import uuid
 from collections import UserDict
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 logger = logging.getLogger(__name__)
-
-""" TODO: each mock should have one of these with the proper values set for the driver.
-
-    # Mock dialect name detection to prevent recursion
-    def mock_get_dialect_name(obj):
-        if obj is my_mock_conn:
-            return 'postgresql'  # or 'sqlite'
-        return None
-
-    mocker.patch('database.utils.connection_utils.get_dialect_name',
-                side_effect=mock_get_dialect_name)
-"""
 
 
 def _create_simple_mock_connection(connection_type='postgresql'):
@@ -117,16 +106,13 @@ def _create_simple_mock_connection(connection_type='postgresql'):
     Returns
         Simple mock connection object that will pass type detection
     """
-    # Create the base mock connection
     class MockConn:
         def __init__(self):
             pass
 
     conn = MockConn()
 
-    # Define a dynamic class name to match what we want
     if connection_type == 'postgresql':
-        # Creates a class that shows up as 'psycopg.Connection' in str(type(obj))
         conn.__class__.__module__ = 'psycopg'
         conn.__class__.__qualname__ = 'Connection'
         conn.__class__.__name__ = 'Connection'
@@ -157,7 +143,6 @@ def _create_simple_mock_transaction(connection):
     Returns
         Simple mock transaction with a connection attribute
     """
-    # Simple object with just the connection attribute
     class MockTransaction:
         def __init__(self, conn):
             self.connection = conn
@@ -298,40 +283,33 @@ def _setup_mock_conn(conn_type, type_str):
     mock_conn = MagicMock()
     conn_mock = MagicMock()
 
-    # Set essential methods needed for testing
     essential_methods = ['cursor', 'commit', 'rollback', 'close']
     for method_name in essential_methods:
         setattr(conn_mock, method_name, MagicMock())
 
-    # Add common exception types
     common_exceptions = [
         'DataError', 'IntegrityError', 'OperationalError', 'ProgrammingError',
-        'DatabaseError', 'Error', 'InterfaceError'
+        'DatabaseError', 'Error', 'InterfaceError',
     ]
     for exc_name in common_exceptions:
         setattr(conn_mock, exc_name, type(exc_name, (Exception,), {}))
 
     mock_conn.connection = conn_mock
 
-    # Set string representation for type detection
     mock_conn.connection.__str__ = MagicMock(return_value=f"<class '{type_str}'>")
 
-    # Configure driver type
-    mock_conn.driver_type = conn_type  # Used by newer code
-    mock_conn._driver_type = conn_type  # For property support (legacy code)
+    mock_conn.driver_type = conn_type
+    mock_conn._driver_type = conn_type
 
-    # Set database-specific autocommit properties
     if conn_type == 'postgresql':
         conn_mock.autocommit = False
     elif conn_type == 'sqlite':
         conn_mock.isolation_level = 'DEFERRED'
 
-    # Add SQLAlchemy-specific attributes needed for auto-commit testing
     mock_conn.sa_connection = MagicMock()
     mock_conn.sa_connection.connection = conn_mock
     mock_conn.sa_connection.execution_options = MagicMock()
 
-    # Add transaction tracking attribute
     mock_conn.in_transaction = False
 
     return mock_conn
@@ -358,11 +336,9 @@ def _create_enhanced_column_info(name, python_type, type_code=None, **kwargs):
     column.python_type = python_type
     column.type_code = type_code
 
-    # Set additional attributes
     for key, value in kwargs.items():
         setattr(column, key, value)
 
-    # Add to_dict method that includes all attributes
     def to_dict():
         result = {
             'name': name,
@@ -423,7 +399,6 @@ def _setup_cursor(mock_conn, description, result_values=None):
 
     result_values = result_values or [('value1', 'value2')]
 
-    # Core cursor methods
     cursor.execute = MagicMock()
     cursor.executemany = MagicMock()
     cursor.fetchall = MagicMock(return_value=result_values)
@@ -433,7 +408,6 @@ def _setup_cursor(mock_conn, description, result_values=None):
     cursor.rowcount = 1
     cursor.nextset = MagicMock(return_value=None)
 
-    # Store SQL and params for test inspection
     def mock_execute(sql, params=None):
         cursor.last_sql = sql
         cursor.last_params = params
@@ -441,8 +415,6 @@ def _setup_cursor(mock_conn, description, result_values=None):
 
     cursor.execute.side_effect = mock_execute
 
-    # Make cursor() function return this cursor directly
-    # This ensures both cursor() and cursor.return_value work in tests
     def cursor_func(*args, **kwargs):
         return cursor
 
@@ -466,15 +438,12 @@ def _setup_multiple_resultsets(cursor, result_sets):
     Returns
         Function to update result sets during tests
     """
-    # Store original implementations
     original_fetchall = cursor.fetchall
     original_fetchone = cursor.fetchone
 
-    # Track the current result set
     current_resultset = [0]
 
     def mock_nextset():
-        """Simulate moving to the next result set"""
         current_resultset[0] += 1
         if current_resultset[0] < len(result_sets):
             # Update the cursor's description to match the new result set
@@ -483,34 +452,28 @@ def _setup_multiple_resultsets(cursor, result_sets):
         return None
 
     def mock_fetchall():
-        """Return the current result set data"""
         if 0 <= current_resultset[0] < len(result_sets):
             return result_sets[current_resultset[0]]['data']
         return []
 
     def mock_fetchone():
-        """Return the first row of current result set"""
         if 0 <= current_resultset[0] < len(result_sets) and result_sets[current_resultset[0]]['data']:
             return result_sets[current_resultset[0]]['data'][0]
         return None
 
     def reset_resultsets():
-        """Reset to the first result set"""
         current_resultset[0] = 0
         if result_sets:
             cursor.description = result_sets[0]['description']
 
-    # Set initial description
     if result_sets:
         cursor.description = result_sets[0]['description']
 
-    # Override cursor methods
     cursor.nextset.side_effect = mock_nextset
     cursor.fetchall.side_effect = mock_fetchall
     cursor.fetchone.side_effect = mock_fetchone
     cursor.reset_resultsets = reset_resultsets
 
-    # Return a function to change result sets
     def set_result_sets(new_result_sets):
         nonlocal result_sets
         result_sets = new_result_sets
@@ -703,8 +666,6 @@ def _setup_special_data_types(mock_conn, db_type):
     Returns
         None
     """
-    import uuid
-
     # Define type conversions
     type_converters = {}
 

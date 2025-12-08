@@ -11,7 +11,7 @@ import pandas as pd
 from database.core.connection import ConnectionWrapper
 from database.options import use_iterdict_data_loader
 from database.sql import prepare_query
-from database.types import Column, RowStructureAdapter
+from database.types import RowStructureAdapter
 from database.utils.connection_utils import check_connection
 from database.utils.query_utils import extract_column_info, load_data
 from database.utils.query_utils import process_multiple_result_sets
@@ -27,18 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 @check_connection
-def execute(cn: object, sql: str, *args: object) -> int:
+def execute(cn: Any, sql: str, *args: Any) -> int:
     """Execute a SQL query with the given parameters and return affected row count.
 
     Handles various SQL dialects and parameter styles.
-
-    Args:
-        cn: Database connection object
-        sql: SQL query string to execute
-        *args: Query parameters to be bound to the SQL
-
-    Returns
-        Number of affected rows (for modification queries).
 
     >>> import sqlite3
     >>> conn = sqlite3.connect(':memory:')
@@ -50,7 +42,6 @@ def execute(cn: object, sql: str, *args: object) -> int:
     """
     cursor = cn.cursor()
     try:
-        # Single parameter processing point
         processed_sql, processed_args = prepare_query(sql, args, cn.dialect)
 
         cursor.execute(processed_sql, processed_args)
@@ -68,35 +59,18 @@ def execute(cn: object, sql: str, *args: object) -> int:
 
 
 @check_connection
-def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs) -> ResultSet | pd.DataFrame | list[pd.DataFrame]:
+def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs: Any) -> ResultSet | pd.DataFrame | list[pd.DataFrame]:
     """Execute a SELECT query or stored procedure.
 
     This function handles both regular SELECT queries and stored procedures.
     For stored procedures, it can process multiple result sets.
-
-    Args:
-        cn: Database connection object
-        sql: SQL query string or stored procedure call
-        *args: Query parameters for parameterized queries
-        **kwargs: Additional options:
-            - return_all: If True, returns a list of all result sets (for procedures)
-            - prefer_first: If True, returns the first result set instead of the largest
-            - as_dataframe: If True, return pandas DataFrame (default for most operations)
-            - Other options are passed to the data loader
-
-    Returns
-        Result data as a pandas DataFrame (default),
-        a list of dictionaries (when as_dataframe=False),
-        or list of DataFrames (when return_all=True)
     """
-    # Single parameter processing point
     processed_sql, processed_args = prepare_query(sql, args, cn.dialect)
 
     cursor = cn.cursor()
 
     cursor.execute(processed_sql, processed_args)
 
-    # Check for procedure execution (EXEC/CALL) or multiple result sets
     is_procedure = any(kw in processed_sql.upper() for kw in ['EXEC ', 'CALL ', 'EXECUTE '])
 
     return_all = kwargs.pop('return_all', False)
@@ -110,12 +84,6 @@ def select(cn: ConnectionWrapper, sql: str, *args: Any, **kwargs) -> ResultSet |
     result = process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
     logger.debug(f"Procedure returned {len(result) if isinstance(result, list) else 'single'} result set(s)")
     return result
-
-
-def _extract_columns(cursor: Any) -> list[str]:
-    """Extract column names from cursor description based on database type"""
-    columns = extract_column_info(cursor)
-    return Column.get_names(columns)
 
 
 @use_iterdict_data_loader

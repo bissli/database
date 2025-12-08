@@ -119,13 +119,11 @@ def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) 
 
     Excludes connection objects (detected by cursor/driver_connection attributes).
     """
-    # Skip self/cls by starting from index 1, exclude connection-like objects
     args_str = ':'.join(
         repr(arg) for arg in method_args[1:]
         if not hasattr(arg, 'cursor') and not hasattr(arg, 'driver_connection')
     )
 
-    # Sort kwargs, exclude bypass_cache and connection-like objects
     kwargs_str = ':'.join(
         f'{k}={repr(v)}' for k, v in sorted(method_kwargs.items())
         if k != 'bypass_cache'

@@ -81,12 +81,10 @@ def upsert_rows(
     if dialect != 'postgresql':
         constraint_name = None
 
-    # Get table columns and create case mapping once
     table_columns = get_table_columns(cn, table)
     case_map = {col.lower(): col for col in table_columns}
     table_columns_lower = set(case_map.keys())
 
-    # Filter and correct column cases for each row, preserving table column order
     filtered_rows = []
     for row in rows:
         row_lower = {k.lower(): v for k, v in row.items()}
@@ -116,16 +114,13 @@ def upsert_rows(
 
     key_cols = get_table_primary_keys(cn, table)
 
-    # Check if primary key columns are in the provided data
     provided_cols_lower = {col.lower() for col in columns}
     key_cols_in_data = key_cols and all(k.lower() in provided_cols_lower for k in key_cols)
 
-    # For SQLite: if primary key columns aren't in the data, look for UNIQUE columns
     if dialect == 'sqlite' and not use_primary_key and not key_cols_in_data:
         strategy = get_db_strategy(cn)
         if hasattr(strategy, 'get_unique_columns'):
             unique_constraints = strategy.get_unique_columns(cn, table)
-            # Find a unique constraint where all columns are in the provided data
             for unique_cols in unique_constraints:
                 if all(u.lower() in provided_cols_lower for u in unique_cols):
                     logger.debug(f'Using UNIQUE columns {unique_cols} instead of primary key for conflict detection')
@@ -341,7 +336,6 @@ def _upsert_sqlite(
     if isinstance(rc, int) and rc != len(rows):
         logger.debug(f'{len(rows) - rc} rows skipped')
     elif not isinstance(rc, int):
-        # Some drivers don't return row count
         logger.debug('Unknown count affected')
 
     if reset_sequence:

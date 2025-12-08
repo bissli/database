@@ -192,7 +192,6 @@ def configure_connection(sa_connection: sa.engine.Connection) -> None:
     strategy = get_db_strategy(sa_connection)
     strategy.configure_connection(sa_connection.connection)
 
-    # Register appropriate adapters for the database type
     from database import adapter_registry
     dialect_name = get_dialect_name(sa_connection)
     if dialect_name == 'sqlite':
@@ -241,5 +240,4 @@ def connect(options: DatabaseOptions | dict[str, Any] | str,
     sa_connection = engine.connect()
     configure_connection(sa_connection)
 
-    # Return wrapped connection
     return ConnectionWrapper(sa_connection, options)

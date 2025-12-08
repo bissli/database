@@ -41,22 +41,20 @@ class Transaction:
         self.connection = cn
         self.sa_connection = getattr(cn, 'sa_connection', None)
 
-        # Initialize thread-local storage if needed
         if not hasattr(_local, 'active_transactions'):
             _local.active_transactions = {}
 
-        # Check for nested transactions in the current thread
         connection_id = id(cn)
         if connection_id in _local.active_transactions:
             raise RuntimeError('Nested transactions are not supported')
 
-        # Mark the connection as being in a transaction
         if hasattr(cn, 'in_transaction'):
             cn.in_transaction = True
 
     @property
     def cursor(self) -> Any:
-        """Lazy cursor wrapped with timing and error handling"""
+        """Lazy cursor wrapped with timing and error handling.
+        """
         return get_dict_cursor(self.connection)
 
     def __enter__(self):
@@ -91,9 +89,7 @@ class Transaction:
         """Execute SQL within transaction context with connection retry"""
         cursor = self.cursor
 
-        # Single parameter processing point
         processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
-
         cursor.execute(processed_sql, processed_args)
         rc = cursor.rowcount
 
@@ -125,9 +121,7 @@ class Transaction:
         """Execute SELECT query or procedure within transaction context"""
         cursor = self.cursor
 
-        # Single parameter processing point
         processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
-
         cursor.execute(processed_sql, processed_args)
         logger.debug(f'Executed query with {cursor.rowcount} rows affected')
 

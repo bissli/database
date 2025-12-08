@@ -22,13 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 class TypeHandler:
-    """Base class for database type handlers"""
+    """Base class for database type handlers.
+    """
 
-    def __init__(self, python_type: type):
+    def __init__(self, python_type: type) -> None:
         self.python_type = python_type
 
     def handles_type(self, type_code: Any, type_name: str | None = None) -> bool:
-        """Check if this handler can handle the given type code/name"""
+        """Check if this handler can handle the given type code/name.
+        """
         return False
 
     def convert_value(self, value: Any) -> Any:
@@ -81,17 +83,18 @@ class TypeHandlerRegistry:
     _instance = None
 
     @classmethod
-    def get_instance(cls):
-        """Get singleton instance"""
+    def get_instance(cls) -> 'TypeHandlerRegistry':
+        """Get singleton instance.
+        """
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._handlers: dict[str, list[TypeHandler]] = {
             'postgresql': [],
-            'sqlite': []
-        }
+            'sqlite': [],
+            }
 
     def get_type_from_type_code(self, db_type: str, type_code: Any) -> type | None:
         """Find a Python type based strictly on the database type code.
@@ -107,7 +110,6 @@ class TypeHandlerRegistry:
         Returns
             Python type or None if no handler matches just the type code
         """
-        # Fast path for already-Python types
         if isinstance(type_code, type):
             return type_code
 
@@ -115,15 +117,14 @@ class TypeHandlerRegistry:
             return None
 
         for handler in self._handlers.get(db_type, []):
-            # Call handles_type with type_name=None to test if the handler
-            # can determine the type based solely on the type_code
             if handler.handles_type(type_code, None):
                 return handler.python_type
 
         return None
 
-    def register_handler(self, db_type: str, handler: TypeHandler):
-        """Register a new type handler"""
+    def register_handler(self, db_type: str, handler: TypeHandler) -> None:
+        """Register a new type handler.
+        """
         if db_type not in self._handlers:
             self._handlers[db_type] = []
         self._handlers[db_type].append(handler)
@@ -135,19 +136,16 @@ class TypeHandlerRegistry:
         This method only identifies the appropriate Python type for a database type.
         It does not perform any conversion of values.
         """
-        # Fast path for already-Python types
         if isinstance(type_code, type):
             return type_code
 
         handlers = self._handlers.get(db_type, [])
 
-        # Try each handler in order
         for handler in handlers:
             if handler.handles_type(type_code, type_name):
                 return handler.python_type
 
-        # Use default handler if no specific handler found
-        return str  # Default to string for unknown types
+        return str
 
     def convert_value(self, db_type: str, value: Any,
                       type_code: Any, type_name: str | None = None) -> Any:
@@ -160,14 +158,11 @@ class TypeHandlerRegistry:
         if value is None:
             return None
 
-        # Pass-through the value without conversion
         return value
 
 
-# Import database type mappings
 from psycopg.postgres import types
 
-# PostgreSQL type mapping
 oid = lambda x: types.get(x).oid
 aoid = lambda x: types.get(x).array_oid
 
@@ -221,7 +216,6 @@ for k in tuple(postgres_types):
     postgres_types[aoid(k)] = tuple
 
 
-# SQLite type mappings
 sqlite_types = {
     'INTEGER': int,
     'REAL': float,
@@ -232,7 +226,7 @@ sqlite_types = {
     'DATE': datetime.date,
     'DATETIME': datetime.datetime,
     'TIME': datetime.time,
-}
+    }
 
 
 class TypeResolver:
@@ -251,18 +245,21 @@ class TypeResolver:
     5. Built-in type maps for each database
     """
 
-    def __init__(self):
-        """Initialize the type resolver with empty type maps."""
+    def __init__(self) -> None:
+        """Initialize the type resolver with empty type maps.
+        """
         self._type_maps: dict[str, dict[Any, type]] = {}
         self._registry = TypeHandlerRegistry.get_instance()
         self._initialize_type_maps()
 
     def _is_python_type(self, type_code: Any) -> bool:
-        """Check if the type_code is already a Python type."""
+        """Check if the type_code is already a Python type.
+        """
         return isinstance(type_code, type)
 
     def _use_type_directly_if_python_type(self, type_code: Any) -> type | None:
-        """Return type_code if it's already a Python type, otherwise None."""
+        """Return type_code if it's already a Python type, otherwise None.
+        """
         return type_code if self._is_python_type(type_code) else None
 
     def get_type_from_type_code(self, db_type: str, type_code: Any) -> type | None:
@@ -279,36 +276,30 @@ class TypeResolver:
         Returns
             Python type or None if unmappable
         """
-        # Fast path: If type_code is already a Python type, use it directly
         direct_type = self._use_type_directly_if_python_type(type_code)
         if direct_type:
             return direct_type
 
-        # Check direct mappings from type maps first (fastest lookup)
         if db_type in self._type_maps and type_code in self._type_maps[db_type]:
             return self._type_maps[db_type][type_code]
 
-        # Fall back to type handler registry but only use handlers
-        # that make decisions purely on type_code
         return self._registry.get_type_from_type_code(db_type, type_code)
 
-    def _initialize_type_maps(self):
-        """Load type mapping dictionaries for supported database systems."""
+    def _initialize_type_maps(self) -> None:
+        """Load type mapping dictionaries for supported database systems.
+        """
         self._type_maps = {
             'postgresql': postgres_types,
             'sqlite': sqlite_types,
-        }
+            }
 
-        # Register handlers for PostgreSQL based on type maps
         for type_code, python_type in self._type_maps['postgresql'].items():
-            # Use the factory to create PostgreSQL handlers
             postgres_handler = create_simple_handler(
                 f'PostgreSQL_{type_code}',
                 python_type,
                 {type_code},
-                None
-            )
-            # Register with registry
+                None,
+                )
             self._registry.register_handler('postgresql', postgres_handler)
 
     def _resolve_type_with_context(
@@ -333,7 +324,6 @@ class TypeResolver:
         Returns
             Python type
         """
-        # Check configuration first if column_name available
         if column_name:
             config = TypeMappingConfig.get_instance()
             config_type = config.get_type_for_column(db_type, table_name, column_name)
@@ -342,17 +332,14 @@ class TypeResolver:
                 if python_type:
                     return python_type
 
-        # Check column name patterns
         if column_name:
             python_type = self._resolve_by_column_name(column_name, type_code, table_name, db_type)
             if python_type:
                 return python_type
 
-        # Use type map if provided
         if type_map and type_code in type_map:
             return type_map[type_code]
 
-        # Default fallback
         return str
 
     def resolve_python_type(
@@ -383,23 +370,19 @@ class TypeResolver:
         Returns
             Python type (e.g., int, str, datetime.date)
         """
-        # Fast path: If type_code is already a Python type, use it directly
         direct_type = self._use_type_directly_if_python_type(type_code)
         if direct_type:
             return direct_type
 
-        # Try the handler registry first
         python_type = self._registry.get_python_type(db_type, type_code, None)
-        if python_type != str:  # If not default
+        if python_type != str:
             return python_type
 
-        # Delegate to database-specific resolvers
         if db_type == 'postgresql':
             return self._resolve_postgresql_type(type_code, column_name, column_size, precision, scale, table_name)
         elif db_type == 'sqlite':
             return self._resolve_sqlite_type(type_code, column_name, column_size, precision, scale, table_name)
 
-        # Unknown database type
         logger.warning(f'Unknown database type: {db_type}')
         return str
 
@@ -454,7 +437,6 @@ class TypeResolver:
         Returns
             Python type
         """
-        # Handle string type codes with parameters before using common resolution logic
         if isinstance(type_code, str):
             base_type = type_code.split('(')[0].upper()
             if base_type in self._type_maps['sqlite']:
@@ -475,46 +457,34 @@ class TypeResolver:
         Returns
             Python type or None if no mapping found
         """
-        # This map is centralized here to avoid duplication
         type_map = {
-            # Integer types
             'int': int,
             'integer': int,
             'bigint': int,
             'smallint': int,
             'tinyint': int,
-
-            # Floating point types
             'float': float,
             'real': float,
             'double': float,
             'decimal': float,
             'numeric': float,
             'money': float,
-
-            # Boolean type
             'bit': bool,
             'boolean': bool,
-
-            # Date/time types
             'date': datetime.date,
             'datetime': datetime.datetime,
             'timestamp': datetime.datetime,
             'time': datetime.time,
-
-            # String types
             'varchar': str,
             'char': str,
             'text': str,
             'nvarchar': str,
             'nchar': str,
             'ntext': str,
-
-            # Binary types
             'binary': bytes,
             'varbinary': bytes,
-            'blob': bytes
-        }
+            'blob': bytes,
+            }
         return type_map.get(config_type.lower())
 
     def _resolve_by_column_name(
@@ -539,7 +509,6 @@ class TypeResolver:
         Returns
             Python type or None if no match found
         """
-        # First check configuration
         config = TypeMappingConfig.get_instance()
         config_type = config.get_type_for_column(db_type, table_name, column_name)
 
@@ -548,42 +517,28 @@ class TypeResolver:
             if mapped_type:
                 return mapped_type
 
-        # Fall back to hard-coded patterns for column names
         name_lower = column_name.lower()
 
-        # Column name pattern matching - centralized here to reduce duplication
         patterns = {
-            # ID columns are typically integers
             'id_pattern': (lambda n: n.endswith('_id') or n == 'id', int),
-
-            # Date columns
             'date_pattern': (lambda n: n.endswith('_date') or n == 'date', datetime.date),
-
-            # DateTime columns
             'datetime_pattern': (
                 lambda n: (n.endswith(('_datetime', '_at', '_timestamp')) or n == 'timestamp'),
-                datetime.datetime
-            ),
-
-            # Time columns
+                datetime.datetime,
+                ),
             'time_pattern': (lambda n: n.endswith('_time') or n == 'time', datetime.time),
-
-            # Boolean indicators
             'bool_pattern': (
                 lambda n: (n.startswith('is_') or n.endswith('_flag') or
                            n in {'active', 'enabled', 'disabled', 'is_deleted'}),
-                bool
-            ),
-
-            # Money/currency columns
+                bool,
+                ),
             'money_pattern': (
                 lambda n: (n.endswith(('_price', '_cost', '_amount')) or
                            n.startswith(('price_', 'cost_', 'amount_'))),
-                float
-            )
-        }
+                float,
+                ),
+            }
 
-        # Check each pattern
         for (matcher, python_type) in patterns.values():
             if matcher(name_lower):
                 return python_type
@@ -618,22 +573,17 @@ def resolve_type(
     Returns
         Python type (e.g., int, str, datetime.date)
     """
-    # Use a global instance of the resolver
     global _global_resolver
     if '_global_resolver' not in globals() or _global_resolver is None:
         _global_resolver = TypeResolver()
 
-    # First check if type_code is already a Python type (fastest path)
     if isinstance(type_code, type):
         return type_code
 
-    # Try to resolve based strictly on the database type code
-    # This ensures we trust the database's type system first
     python_type = _global_resolver.get_type_from_type_code(db_type, type_code)
     if python_type is not None:
         return python_type
 
-    # Fall back to the full resolution process if type code-only resolution fails
     return _global_resolver.resolve_python_type(
         db_type,
         type_code,

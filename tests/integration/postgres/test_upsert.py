@@ -1,4 +1,5 @@
 import datetime
+import time
 
 import database as db
 import pytest
@@ -146,8 +147,6 @@ def test_upsert_empty_rows(psql_docker, pg_conn):
 
 def test_upsert_large_batch(psql_docker, pg_conn):
     """Test upsert with a large number of rows that exceeds parameter limits"""
-    import time
-
     # Create a temporary table for this test with a simple structure
     db.execute(pg_conn, """
     CREATE TEMPORARY TABLE test_large_batch (

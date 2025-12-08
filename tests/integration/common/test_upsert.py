@@ -4,6 +4,8 @@ Database-agnostic tests for UPSERT operations.
 These tests run against both PostgreSQL and SQLite to verify
 consistent upsert behavior across database backends.
 """
+import time
+
 import database as db
 import pytest
 from tests.integration.common.conftest import row
@@ -186,8 +188,6 @@ class TestUpsertLargeBatch:
 
     def test_upsert_large_batch(self, db_conn, dialect):
         """Test upsert with a large number of rows."""
-        import time
-
         # Create test table
         if dialect == 'postgresql':
             db.execute(db_conn, 'DROP TABLE IF EXISTS test_large_batch')

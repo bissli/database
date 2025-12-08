@@ -17,7 +17,8 @@ import dateutil.parser
 import numpy as np
 import pandas as pd
 
-# Optional PyArrow import
+from libb import attrdict
+
 try:
     import pyarrow as pa
     PYARROW_AVAILABLE = True
@@ -47,9 +48,7 @@ PYARROW_FLOAT_TYPES = (
 )
 
 
-# =============================================================================
 # Type Converter - Handles Python -> Database value conversion
-# =============================================================================
 
 def _check_special_string(value: str) -> None:
     """Check if a string value should be converted to NULL."""
@@ -194,56 +193,43 @@ class TypeConverter:
         return TypeConverter.convert_value(params)
 
 
-# =============================================================================
 # Type Resolution - Database type codes -> Python types
-# =============================================================================
 
-# Import PostgreSQL type mappings
 from psycopg.postgres import types as pg_types
 
 _oid = lambda x: pg_types.get(x).oid
 _aoid = lambda x: pg_types.get(x).array_oid
 
-# PostgreSQL type code -> Python type
 postgres_types: dict[int, type] = {}
 
-# String types
 for v in [_oid('"char"'), _oid('bpchar'), _oid('character varying'), _oid('character'),
           _oid('json'), _oid('name'), _oid('text'), _oid('uuid'), _oid('varchar')]:
     postgres_types[v] = str
 
-# Integer types
 for v in [_oid('bigint'), _oid('int2'), _oid('int4'), _oid('int8'), _oid('integer')]:
     postgres_types[v] = int
 
-# Float types
 for v in [_oid('float4'), _oid('float8'), _oid('double precision'), _oid('numeric')]:
     postgres_types[v] = float
 
-# Date type
 postgres_types[_oid('date')] = datetime.date
 
-# DateTime types
 for v in [_oid('time'), _oid('time with time zone'), _oid('time without time zone'),
           _oid('timestamp with time zone'), _oid('timestamp without time zone'),
           _oid('timestamptz'), _oid('timetz'), _oid('timestamp')]:
     postgres_types[v] = datetime.datetime
 
-# Boolean types
 for v in [_oid('bool'), _oid('boolean')]:
     postgres_types[v] = bool
 
-# Binary types
 for v in [_oid('bytea'), _oid('jsonb')]:
     postgres_types[v] = bytes
 
-# Array types
 postgres_types[_aoid('int2vector')] = tuple
 for k in tuple(postgres_types):
     postgres_types[_aoid(k)] = tuple
 
 
-# SQLite type name -> Python type
 sqlite_types: dict[str, type] = {
     'INTEGER': int,
     'REAL': float,
@@ -281,16 +267,13 @@ def resolve_type(
     Returns
         Python type
     """
-    # Fast path: already a Python type
     if isinstance(type_code, type):
         return type_code
 
-    # Direct lookup
     if db_type == 'postgresql':
         if type_code in postgres_types:
             return postgres_types[type_code]
     elif db_type == 'sqlite':
-        # Handle string type codes with parameters
         if isinstance(type_code, str):
             base_type = type_code.split('(')[0].upper()
             if base_type in sqlite_types:
@@ -298,42 +281,33 @@ def resolve_type(
         if type_code in sqlite_types:
             return sqlite_types[type_code]
 
-    # Column name pattern matching
     if column_name:
         name_lower = column_name.lower()
 
-        # ID columns
         if name_lower.endswith('_id') or name_lower == 'id':
             return int
 
-        # DateTime columns
         if name_lower.endswith(('_datetime', '_at', '_timestamp')) or name_lower == 'timestamp':
             return datetime.datetime
 
-        # Date columns
         if name_lower.endswith('_date') or name_lower == 'date':
             return datetime.date
 
-        # Time columns
         if name_lower.endswith('_time') or name_lower == 'time':
             return datetime.time
 
-        # Boolean columns
         if (name_lower.startswith('is_') or name_lower.endswith('_flag') or
-            name_lower in {'active', 'enabled', 'disabled', 'is_deleted'}):
+                name_lower in {'active', 'enabled', 'disabled', 'is_deleted'}):
             return bool
 
-        # Money/currency columns
         if (name_lower.endswith(('_price', '_cost', '_amount')) or
-            name_lower.startswith(('price_', 'cost_', 'amount_'))):
+                name_lower.startswith(('price_', 'cost_', 'amount_'))):
             return float
 
     return str
 
 
-# =============================================================================
 # Column - Metadata from cursor descriptions
-# =============================================================================
 
 class Column:
     """Database column metadata."""
@@ -464,12 +438,7 @@ def columns_from_cursor_description(cursor: Any, connection_type: str,
             for desc in cursor.description]
 
 
-# =============================================================================
 # Row Adapters - Convert database rows to dictionaries
-# =============================================================================
-
-from libb import attrdict
-
 
 class RowAdapter:
     """Simple row adapter for converting database rows to dictionaries."""
@@ -481,7 +450,7 @@ class RowAdapter:
         """Convert row to dictionary."""
         # sqlite3.Row
         if hasattr(self.row, 'keys') and callable(self.row.keys):
-            return {key: self.row[key] for key in self.row.keys()}
+            return {key: self.row[key] for key in self.row.keys()}  # noqa: SIM118
         # Already a dict
         if isinstance(self.row, dict):
             return self.row
@@ -536,9 +505,7 @@ PostgreSQLRowAdapter = RowAdapter
 SQLiteRowAdapter = RowAdapter
 
 
-# =============================================================================
 # SQLite Adapters - Database value converters
-# =============================================================================
 
 def convert_date(val: bytes) -> datetime.date:
     """Convert ISO 8601 date string to date object."""

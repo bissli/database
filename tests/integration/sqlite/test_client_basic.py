@@ -1,3 +1,5 @@
+import datetime
+
 import database as db
 import pandas as pd
 
@@ -95,8 +97,6 @@ def test_sqlite_file_database(sqlite_file_conn):
 
 def test_sqlite_adapters(sl_conn):
     """Test SQLite adapter functionality"""
-    import datetime
-
     # Create table with various types
     db.execute(sl_conn, """
     CREATE TABLE adapter_test (

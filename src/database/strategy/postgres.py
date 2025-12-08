@@ -11,49 +11,51 @@ It handles PostgreSQL's unique features such as:
 """
 import logging
 import re
+from typing import TYPE_CHECKING, Any
 
 from database.core.transaction import Transaction
 from database.query import execute, select, select_column
 from database.strategy.base import DatabaseStrategy
 from database.utils.auto_commit import enable_auto_commit
 
+if TYPE_CHECKING:
+    from database.core.connection import ConnectionWrapper
+
 logger = logging.getLogger(__name__)
 
 
 class PostgresStrategy(DatabaseStrategy):
-    """PostgreSQL-specific operations"""
+    """PostgreSQL-specific operations.
+    """
 
-    def vacuum_table(self, cn, table):
-        """Optimize a table with VACUUM"""
-        # Save current autocommit state
+    def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
+        """Optimize a table with VACUUM.
+        """
         original_autocommit = cn.connection.autocommit
         try:
-            # Set autocommit to True for VACUUM
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
             execute(cn, f'vacuum (full, analyze) {quoted_table}')
         finally:
-            # Restore original autocommit state
             cn.connection.autocommit = original_autocommit
 
-    def reindex_table(self, cn, table):
-        """Rebuild indexes for a table"""
-        # Save current autocommit state
+    def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
+        """Rebuild indexes for a table.
+        """
         original_autocommit = cn.connection.autocommit
         try:
-            # Set autocommit to True for REINDEX
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
             execute(cn, f'reindex table {quoted_table}')
         finally:
-            # Restore original autocommit state
             cn.connection.autocommit = original_autocommit
 
-    def cluster_table(self, cn, table, index=None):
-        """Order table data according to an index"""
+    def cluster_table(self, cn: 'ConnectionWrapper', table: str,
+                      index: str | None = None) -> None:
+        """Order table data according to an index.
+        """
         original_autocommit = cn.connection.autocommit
         try:
-            # Set autocommit to True for CLUSTER
             cn.connection.autocommit = True
             quoted_table = self.quote_identifier(table)
 
@@ -65,8 +67,10 @@ class PostgresStrategy(DatabaseStrategy):
         finally:
             cn.connection.autocommit = original_autocommit
 
-    def reset_sequence(self, cn, table, identity=None):
-        """Reset the sequence for a table"""
+    def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
+                       identity: str | None = None) -> None:
+        """Reset the sequence for a table.
+        """
         if identity is None:
             identity = self.find_sequence_column(cn, table)
 
@@ -86,16 +90,9 @@ from
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
 
-    def get_primary_keys(self, cn, table, bypass_cache=False):
-        """Get primary key columns for a table
-
-        Args:
-            cn: Database connection object
-            table: Table name to get primary keys for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of primary key column names
+    def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
+                         bypass_cache: bool = False) -> list[str]:
+        """Get primary key columns for a table.
         """
         sql = """
 select a.attname as column
@@ -105,33 +102,18 @@ where i.indrelid = %s::regclass and i.indisprimary
 """
         return select_column(cn, sql, table)
 
-    def get_columns(self, cn, table, bypass_cache=False):
-        """Get all columns for a table
-
-        Args:
-            cn: Database connection object
-            table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of column names for the specified table
+    def get_columns(self, cn: 'ConnectionWrapper', table: str,
+                    bypass_cache: bool = False) -> list[str]:
+        """Get all columns for a table.
         """
-        # This PostgreSQL-specific query gives all columns
         sql = f"""
 select skeys(hstore(null::{table})) as column
     """
         return select_column(cn, sql)
 
-    def get_sequence_columns(self, cn, table, bypass_cache=False):
-        """Get columns with sequences
-
-        Args:
-            cn: Database connection object
-            table: Table name to get sequence columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of sequence/identity column names for the specified table
+    def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
+                             bypass_cache: bool = False) -> list[str]:
+        """Get columns with sequences.
         """
         sql = """
         SELECT column_name as column
@@ -141,35 +123,24 @@ select skeys(hstore(null::{table})) as column
         """
         return select_column(cn, sql, table)
 
-    def configure_connection(self, conn):
-        """Configure connection settings for PostgreSQL"""
-
-        # Set auto-commit for PostgreSQL connections
+    def configure_connection(self, conn: Any) -> None:
+        """Configure connection settings for PostgreSQL.
+        """
         enable_auto_commit(conn)
 
-    def quote_identifier(self, identifier):
-        """Quote an identifier for PostgreSQL"""
+    def quote_identifier(self, identifier: str) -> str:
+        """Quote an identifier for PostgreSQL.
+        """
         return '"' + identifier.replace('"', '""') + '"'
 
-    def get_constraint_definition(self, cn, table, constraint_name):
-        """Get the definition of a constraint or unique index by name
-
-        Args:
-            cn: Database connection object
-            table: The table containing the constraint
-            constraint_name: Name of the constraint or unique index
-
-        Returns
-            str: SQL expression defining the constraint for use in ON CONFLICT
+    def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
+                                  constraint_name: str) -> dict[str, Any] | str:
+        """Get the definition of a constraint or unique index by name.
         """
-        # Extract table and schema names
         parts = table.split('.')
-        schema_name = parts[0].strip('"') if len(parts) > 1 else 'public'
         table_name = parts[-1].strip('"')
 
-        # Use a UNION query to check both constraints and indexes in one go
         union_query = """
-        -- Check for indexes
         SELECT
             indexdef AS definition,
             'index' AS source
@@ -182,7 +153,6 @@ select skeys(hstore(null::{table})) as column
 
         UNION ALL
 
-        -- Check for primary key
         SELECT
             pg_get_constraintdef(c.oid) AS definition,
             'constraint' AS source
@@ -202,38 +172,26 @@ select skeys(hstore(null::{table})) as column
         if not result:
             raise ValueError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
 
-        # Process result based on source
         definition = result[0]['definition']
         source = result[0]['source']
 
         definition = definition.strip()
 
         if source == 'constraint':
-            # For constraints, extract column list from UNIQUE/PRIMARY KEY constraint
             match = re.search(r'(?:UNIQUE|PRIMARY KEY)\s*\(([^)]+)\)', definition, re.IGNORECASE)
             if match:
                 return match.group(1)
-            # For complex constraints with expressions, try to extract the column list
-            # This handles cases with COALESCE or other expressions
             match = re.search(r'\(([^)]+)\)', definition)
             if match:
                 return match.group(1)
         else:
-            # For indexes, extract column list from CREATE INDEX statement
             return extract_index_definition(definition)
 
         raise ValueError(f'Failed to extract regex from definition: {definition}')
 
-    def get_default_columns(self, cn, table, bypass_cache=False):
-        """Get columns suitable for general data display
-
-        Args:
-            cn: Database connection object
-            table: Table name to get default columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of column names suitable for general data representation
+    def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
+                            bypass_cache: bool = False) -> list[str]:
+        """Get columns suitable for general data display.
         """
         sql = """
 select
@@ -249,16 +207,9 @@ t.ordinal_position
 """
         return select_column(cn, sql, table)
 
-    def get_ordered_columns(self, cn, table, bypass_cache=False):
-        """Get all column names for a table ordered by their position
-
-        Args:
-            cn: Database connection object
-            table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            list: List of column names ordered by position
+    def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
+                            bypass_cache: bool = False) -> list[str]:
+        """Get all column names for a table ordered by their position.
         """
         sql = """
 select
@@ -271,44 +222,20 @@ t.ordinal_position
 """
         return select_column(cn, sql, table)
 
-    def find_sequence_column(self, cn, table, bypass_cache=False):
-        """Find the best column to reset sequence for
-
-        Args:
-            cn: Database connection object
-            table: Table name to analyze for sequence columns
-            bypass_cache: If True, bypass cache and query database directly, by default False
-
-        Returns
-            str: Column name best suited for sequence resetting
+    def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
+                             bypass_cache: bool = False) -> str:
+        """Find the best column to reset sequence for.
         """
-        # Use the common implementation from base class
         return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
 
 
-def extract_index_definition(definition):
+def extract_index_definition(definition: str) -> str:
     """Extract column list and WHERE clause from a PostgreSQL unique index definition.
 
     This function parses PostgreSQL CREATE UNIQUE INDEX statements to extract:
     1. The column specification, which may include functions like COALESCE
     2. Any WHERE clause that makes the uniqueness conditional
-
-    Args:
-        definition: The full CREATE UNIQUE INDEX statement
-
-    Returns
-        str: Column specification with optional WHERE clause for use in ON CONFLICT
-
-    Raises
-        ValueError: If the column definition cannot be extracted
     """
-    # Pattern to extract column list and optional WHERE clause from index definitions
-    # This handles complex cases including:
-    # - Schema-qualified tables
-    # - Different index types (btree, hash, etc.)
-    # - Complex column expressions with functions like COALESCE
-    # - WHERE clauses for partial indexes
-    # - NULLS NOT DISTINCT option
     pattern = r'CREATE\s+UNIQUE\s+INDEX\s+\w+\s+ON\s+(?:[a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+(?:\s+USING\s+\w+)?\s+(\(.*?\))(?:\s+NULLS\s+NOT\s+DISTINCT)?(?:\s+WHERE\s+(.*?))?$'
 
     match = re.search(pattern, definition)
@@ -320,13 +247,10 @@ def extract_index_definition(definition):
         else:
             return column_clause
 
-    # If regex didn't match, try a simpler fallback approach
-    # Look for parentheses that likely contain the column definitions
     paren_match = re.search(r'\(([^()]*(?:\([^()]*\)[^()]*)*)\)', definition)
     if paren_match:
-        column_def = paren_match.group(0)  # Get the entire parenthetical expression
+        column_def = paren_match.group(0)
 
-        # Check for WHERE clause after the column definition
         where_match = re.search(r'\)\s+WHERE\s+(.*?)(?:\s*$|\s+NULLS)', definition)
         if where_match:
             return f'{column_def} WHERE {where_match.group(1)}'
