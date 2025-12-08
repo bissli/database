@@ -5,13 +5,12 @@ import datetime
 from decimal import Decimal
 from unittest.mock import patch
 
-from database.types import PostgreSQLRowAdapter, RowStructureAdapter
-from database.types import SQLiteRowAdapter
+from database.types import RowAdapter
 
 
-def test_postgresql_row_adapter_no_conversion():
-    """Test that PostgreSQLRowAdapter doesn't convert values"""
-    # Create sample data
+def test_row_adapter_postgresql_no_conversion():
+    """Test that RowAdapter doesn't convert values for PostgreSQL rows"""
+    # Create sample data (dict, like psycopg returns)
     row_data = {
         'int_col': 123,
         'decimal_col': Decimal('123.45'),
@@ -19,7 +18,7 @@ def test_postgresql_row_adapter_no_conversion():
     }
 
     # Create adapter
-    adapter = PostgreSQLRowAdapter(row_data)
+    adapter = RowAdapter(row_data)
 
     # Test to_dict() doesn't modify values
     result = adapter.to_dict()
@@ -34,8 +33,8 @@ def test_postgresql_row_adapter_no_conversion():
     assert isinstance(adapter.get_value('decimal_col'), Decimal), 'Decimal type should be preserved'
 
 
-def test_sqlite_row_adapter_no_conversion():
-    """Test that SQLiteRowAdapter doesn't convert values"""
+def test_row_adapter_sqlite_no_conversion():
+    """Test that RowAdapter doesn't convert values for SQLite rows"""
     # Mock a SQLite Row object (which behaves like both a dict and a tuple)
     class MockSQLiteRow(dict):
         def __getitem__(self, key):
@@ -53,7 +52,7 @@ def test_sqlite_row_adapter_no_conversion():
     })
 
     # Create adapter
-    adapter = SQLiteRowAdapter(row_data)
+    adapter = RowAdapter(row_data)
 
     # Test to_dict() doesn't modify values
     result = adapter.to_dict()
@@ -68,8 +67,8 @@ def test_sqlite_row_adapter_no_conversion():
     assert adapter.get_value() is list(row_data.values())[0]
 
 
-def test_database_row_adapter_factory(create_simple_mock_connection):
-    """Test DatabaseRowAdapter.create() factory method with simplified adapters"""
+def test_row_adapter_factory(create_simple_mock_connection):
+    """Test RowAdapter.create() factory method"""
     row_data = {'id': 1, 'name': 'test'}
 
     pg_conn = create_simple_mock_connection('postgresql')
@@ -77,13 +76,15 @@ def test_database_row_adapter_factory(create_simple_mock_connection):
 
     # Test with PostgreSQL
     with patch('database.utils.connection_utils.get_dialect_name', return_value='postgresql'):
-        adapter = RowStructureAdapter.create(pg_conn, row_data)
-        assert isinstance(adapter, PostgreSQLRowAdapter)
+        adapter = RowAdapter.create(pg_conn, row_data)
+        assert isinstance(adapter, RowAdapter)
+        assert adapter.to_dict() == row_data
 
     # Test with SQLite
     with patch('database.utils.connection_utils.get_dialect_name', return_value='sqlite'):
-        adapter = RowStructureAdapter.create(sqlite_conn, row_data)
-        assert isinstance(adapter, SQLiteRowAdapter)
+        adapter = RowAdapter.create(sqlite_conn, row_data)
+        assert isinstance(adapter, RowAdapter)
+        assert adapter.to_dict() == row_data
 
 
 if __name__ == '__main__':

@@ -33,17 +33,6 @@ def test_circular_dependencies():
         'database.core.transaction',
         'database.core.query',
 
-        # Adapters
-        'database.adapters',
-        'database.adapters.column_info',
-        'database.adapters.structure',
-        'database.adapters.type_conversion',
-        'database.adapters.type_mapping',
-
-        # Config
-        'database.config',
-        'database.config.type_mapping',
-
         # Strategy
         'database.strategy',
         'database.strategy.base',

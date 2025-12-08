@@ -1,6 +1,6 @@
 import database as db
 import pytest
-from database.types import RowStructureAdapter
+from database.types import RowAdapter
 
 
 def test_sqlite_row_adapter(sl_conn):
@@ -11,7 +11,7 @@ def test_sqlite_row_adapter(sl_conn):
     sqlite_row = cursor.fetchone()
 
     # Use the adapter
-    adapter = RowStructureAdapter.create(sl_conn, sqlite_row)
+    adapter = RowAdapter.create(sl_conn, sqlite_row)
 
     # Test to_dict
     row_dict = adapter.to_dict()
