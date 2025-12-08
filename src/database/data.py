@@ -4,9 +4,9 @@ Data operations for database access (INSERT, UPDATE, DELETE).
 import logging
 from typing import TYPE_CHECKING, Any
 
-from database.query import execute, select
+from database.query import select
 from database.schema import get_table_columns
-from database.sql import quote_identifier
+from database.sql import make_placeholders, quote_identifier
 from database.strategy import get_db_strategy
 from database.transaction import Transaction
 
@@ -50,16 +50,9 @@ def build_insert_sql(dialect: str, table: str, columns: list[str]) -> str:
     """
     quoted_table = quote_identifier(table, dialect)
     quoted_columns = ', '.join(quote_identifier(col, dialect) for col in columns)
-
-    if dialect == 'postgresql':
-        placeholders = ', '.join(['%s'] * len(columns))
-    else:
-        placeholders = ', '.join(['?'] * len(columns))
+    placeholders = make_placeholders(len(columns), dialect)
 
     return f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'
-
-
-insert = update = delete = execute
 
 
 def update_or_insert(cn: 'ConnectionWrapper', update_sql: str, insert_sql: str,
@@ -110,7 +103,7 @@ def insert_rows(cn: 'ConnectionWrapper', table: str,
         quoted_table = table
         quoted_cols = ','.join(cols)
 
-    placeholders = ','.join(['%s'] * len(cols))
+    placeholders = make_placeholders(len(cols), dialect)
     sql = f'INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})'
 
     all_params = [tuple(row.values()) for row in rows]

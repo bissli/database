@@ -6,8 +6,8 @@ import threading
 from typing import Any
 
 import pandas as pd
+from database.connection import _get_raw_connection
 from database.cursor import get_dict_cursor
-from database.options import use_iterdict_data_loader
 from database.sql import prepare_query
 from database.types import RowAdapter
 
@@ -17,14 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 _local = threading.local()
-
-
-def _get_raw_connection(connection: Any) -> Any:
-    """Extract the raw DBAPI connection from a wrapper."""
-    raw_conn = connection
-    if hasattr(connection, 'driver_connection'):
-        raw_conn = connection.driver_connection
-    return raw_conn
 
 
 def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
@@ -346,32 +338,21 @@ class Transaction:
         return process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
 
     def select_column(self, sql: str, *args) -> list[Any]:
-        """Execute a query and return a single column as a list
-        """
-        data = self.select(sql, *args)
-        return [RowAdapter.create(self.connection, row).get_value() for row in data]
+        """Execute a query and return a single column as a list."""
+        from database.query import select_column
+        return select_column(self.connection, sql, *args)
 
-    @use_iterdict_data_loader
     def select_row(self, sql: str, *args) -> attrdict:
-        """Execute a query and return a single row
-        """
-        data = self.select(sql, *args)
-        assert len(data) == 1, f'Expected one row, got {len(data)}'
-        return RowAdapter.create(self.connection, data[0]).to_attrdict()
+        """Execute a query and return a single row."""
+        from database.query import select_row
+        return select_row(self.connection, sql, *args)
 
-    @use_iterdict_data_loader
     def select_row_or_none(self, sql: str, *args) -> attrdict | None:
-        """Execute a query and return a single row or None if no rows found"""
-        data = self.select(sql, *args)
-        if not data or len(data) == 0:
-            return None
+        """Execute a query and return a single row or None if no rows found."""
+        from database.query import select_row_or_none
+        return select_row_or_none(self.connection, sql, *args)
 
-        return RowAdapter.create(self.connection, data[0]).to_attrdict()
-
-    @use_iterdict_data_loader
     def select_scalar(self, sql: str, *args) -> Any:
-        """Execute a query and return a single scalar value
-        """
-        data = self.select(sql, *args)
-        assert len(data) == 1, f'Expected one row, got {len(data)}'
-        return RowAdapter.create(self.connection, data[0]).get_value()
+        """Execute a query and return a single scalar value."""
+        from database.query import select_scalar
+        return select_scalar(self.connection, sql, *args)
