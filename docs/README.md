@@ -1346,14 +1346,6 @@ The following is a complete reference of the public API functions and types.
 | `table_fields(cn, table)` | Get ordered list of all table columns | `cn`: Database connection<br>`table`: Table name | List of column names |
 | `table_data(cn, table, columns=[])` | Get table data by columns | `cn`: Database connection<br>`table`: Table name<br>`columns`: Optional list of column names | DataFrame with table data |
 
-### Connection Utilities
-
-| Function | Description | Parameters | Returns |
-|----------|-------------|------------|---------|
-| `isconnection(obj)` | Check if object is a database connection | `obj`: Object to check | Boolean |
-| `is_psycopg_connection(obj)` | Check if PostgreSQL connection | `obj`: Object to check | Boolean |
-| `is_sqlite3_connection(obj)` | Check if SQLite connection | `obj`: Object to check | Boolean |
-
 ### Exception Types
 
 | Exception | Description |
