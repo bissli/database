@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from collections.abc import Iterator, Sequence
+from functools import wraps
 from numbers import Number
 from typing import Any
 
@@ -18,6 +19,48 @@ from database.types import TypeConverter, postgres_types
 from libb import collapse
 
 logger = logging.getLogger(__name__)
+
+
+def dumpsql(func):
+    """Decorator for logging SQL queries and parameters."""
+    @wraps(func)
+    def wrapper(self, operation: str, *args: Any, **kwargs: Any):
+        start = time.time()
+        logger.debug(f'SQL:\n{operation}\nargs: {args}')
+        try:
+            result = func(self, operation, *args, **kwargs)
+            if hasattr(self.dbapi_cursor, 'statusmessage'):
+                logger.debug(f'Query result: {self.dbapi_cursor.statusmessage}')
+            return result
+        except Exception:
+            logger.error(f'Error with query:\nSQL:\n{operation}\nargs: {args}')
+            raise
+        finally:
+            elapsed = time.time() - start
+            self.connwrapper.addcall(elapsed)
+            logger.debug(f'Query time: {elapsed:.4f}s')
+    return wrapper
+
+
+def dumpsql_many(func):
+    """Decorator for logging executemany operations."""
+    @wraps(func)
+    def wrapper(self, operation: str, seq_of_parameters: Sequence, *args: Any, **kwargs: Any):
+        start = time.time()
+        logger.debug(f'SQL:\n{operation}\nparams: {len(seq_of_parameters)} rows')
+        try:
+            result = func(self, operation, seq_of_parameters, *args, **kwargs)
+            if hasattr(self.dbapi_cursor, 'statusmessage'):
+                logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
+            return result
+        except Exception:
+            logger.error(f'Error with executemany:\nSQL:\n{operation}')
+            raise
+        finally:
+            elapsed = time.time() - start
+            self.connwrapper.addcall(elapsed)
+            logger.debug(f'Executemany time: {elapsed:.4f}s')
+    return wrapper
 
 
 class Cursor:
@@ -109,9 +152,9 @@ class Cursor:
             return self.dbapi_cursor.nextset()
         return None
 
+    @dumpsql
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation."""
-        start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)
@@ -120,19 +163,7 @@ class Cursor:
         if args:
             args = tuple(TypeConverter.convert_params(arg) for arg in args)
 
-        logger.debug(f'SQL:\n{operation}\nargs: {args}')
-
-        try:
-            self._execute_query(operation, args)
-            if hasattr(self.dbapi_cursor, 'statusmessage'):
-                logger.debug(f'Query result: {self.dbapi_cursor.statusmessage}')
-        except Exception:
-            logger.error(f'Error with query:\nSQL:\n{operation}\nargs: {args}')
-            raise
-        finally:
-            elapsed = time.time() - start
-            self.connwrapper.addcall(elapsed)
-            logger.debug(f'Query time: {elapsed:.4f}s')
+        self._execute_query(operation, args)
 
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
@@ -203,6 +234,7 @@ class Cursor:
             else:
                 self.dbapi_cursor.execute(stmt)
 
+    @dumpsql_many
     def executemany(self, operation: str, seq_of_parameters: Sequence,
                     batch_size: int = 500, **kwargs: Any) -> int:
         """Execute against all parameter sequences."""
@@ -210,36 +242,22 @@ class Cursor:
             logger.warning('executemany called with no parameter sequences')
             return 0
 
-        start = time.time()
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)
 
         seq_of_parameters = [TypeConverter.convert_params(p) for p in seq_of_parameters]
 
-        logger.debug(f'SQL:\n{operation}\nparams: {len(seq_of_parameters)} rows')
-
         total_rowcount = 0
-        try:
-            if len(seq_of_parameters) <= batch_size:
-                self.dbapi_cursor.executemany(operation, seq_of_parameters)
-                total_rowcount = self.dbapi_cursor.rowcount
-            else:
-                logger.debug(f'Batching {len(seq_of_parameters)} rows into chunks of {batch_size}')
-                for i in range(0, len(seq_of_parameters), batch_size):
-                    chunk = seq_of_parameters[i:i + batch_size]
-                    self.dbapi_cursor.executemany(operation, chunk)
-                    total_rowcount += self.dbapi_cursor.rowcount
-
-            if hasattr(self.dbapi_cursor, 'statusmessage'):
-                logger.debug(f'Executemany result: {self.dbapi_cursor.statusmessage}')
-        except Exception:
-            logger.error(f'Error with executemany:\nSQL:\n{operation}')
-            raise
-        finally:
-            elapsed = time.time() - start
-            self.connwrapper.addcall(elapsed)
-            logger.debug(f'Executemany time: {elapsed:.4f}s')
+        if len(seq_of_parameters) <= batch_size:
+            self.dbapi_cursor.executemany(operation, seq_of_parameters)
+            total_rowcount = self.dbapi_cursor.rowcount
+        else:
+            logger.debug(f'Batching {len(seq_of_parameters)} rows into chunks of {batch_size}')
+            for i in range(0, len(seq_of_parameters), batch_size):
+                chunk = seq_of_parameters[i:i + batch_size]
+                self.dbapi_cursor.executemany(operation, chunk)
+                total_rowcount += self.dbapi_cursor.rowcount
 
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
             ensure_commit(self.connwrapper)
