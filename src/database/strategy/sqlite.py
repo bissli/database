@@ -13,7 +13,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from database.sql import make_placeholders, standardize_placeholders
+from database.sql import make_placeholders, quote_identifier, standardize_placeholders
 from database.strategy.base import DatabaseStrategy
 
 if TYPE_CHECKING:
@@ -55,8 +55,9 @@ class SQLiteStrategy(DatabaseStrategy):
                          bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table.
         """
+        quoted_table = quote_identifier(table, 'sqlite')
         sql = f"""
-select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
+select l.name as column from pragma_table_info({quoted_table}) as l where l.pk <> 0
 """
         return self._select_column_raw(cn, sql)
 
@@ -64,8 +65,9 @@ select l.name as column from pragma_table_info('{table}') as l where l.pk <> 0
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
         """
+        quoted_table = quote_identifier(table, 'sqlite')
         sql = f"""
-select name as column from pragma_table_info('{table}')
+select name as column from pragma_table_info({quoted_table})
     """
         return self._select_column_raw(cn, sql)
 
@@ -111,7 +113,8 @@ select name as column from pragma_table_info('{table}')
         """Get the definition of a constraint by name (SQLite implementation).
         """
         logger.warning("SQLite doesn't fully support constraint definition retrieval")
-        sql = f"PRAGMA index_info('{constraint_name}')"
+        quoted_constraint = quote_identifier(constraint_name, 'sqlite')
+        sql = f"PRAGMA index_info({quoted_constraint})"
         result = self._select_raw(cn, sql)
 
         if not result:
@@ -128,8 +131,9 @@ select name as column from pragma_table_info('{table}')
                             bypass_cache: bool = False) -> list[str]:
         """Get columns suitable for general data display.
         """
+        quoted_table = quote_identifier(table, 'sqlite')
         sql = f"""
-SELECT name FROM pragma_table_info('{table}')
+SELECT name FROM pragma_table_info({quoted_table})
 ORDER BY cid
 """
         return self._select_column_raw(cn, sql)
@@ -138,8 +142,9 @@ ORDER BY cid
                             bypass_cache: bool = False) -> list[str]:
         """Get all column names for a table ordered by their position.
         """
+        quoted_table = quote_identifier(table, 'sqlite')
         sql = f"""
-SELECT name FROM pragma_table_info('{table}')
+SELECT name FROM pragma_table_info({quoted_table})
 ORDER BY cid
 """
         return self._select_column_raw(cn, sql)
@@ -154,14 +159,16 @@ ORDER BY cid
                            bypass_cache: bool = False) -> list[list[str]]:
         """Get columns that have UNIQUE constraints (excluding primary key).
         """
-        sql = f"SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1"
+        quoted_table = quote_identifier(table, 'sqlite')
+        sql = f"SELECT name FROM pragma_index_list({quoted_table}) WHERE \"unique\" = 1"
         index_names = self._select_column_raw(cn, sql)
 
         unique_columns = []
         primary_keys = set(self.get_primary_keys(cn, table, bypass_cache=bypass_cache))
 
         for idx_name in index_names:
-            col_sql = f"SELECT name FROM pragma_index_info('{idx_name}')"
+            quoted_idx = quote_identifier(idx_name, 'sqlite')
+            col_sql = f"SELECT name FROM pragma_index_info({quoted_idx})"
             cols = self._select_column_raw(cn, col_sql)
 
             if cols and set(cols) != primary_keys:

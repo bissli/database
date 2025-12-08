@@ -489,9 +489,10 @@ class ConnectionWrapper:
         for kf in keyfields:
             assert kf not in datafields, f'keyfield {kf} cannot be in datafields'
 
-        keycols = ' and '.join([f'{f}=%s' for f in keyfields])
-        datacols = ','.join([f'{f}=%s' for f in datafields])
-        sql = f'update {table} set {datacols} where {keycols}'
+        quoted_table = quote_identifier(table, self.dialect)
+        keycols = ' and '.join([f'{quote_identifier(f, self.dialect)}=%s' for f in keyfields])
+        datacols = ','.join([f'{quote_identifier(f, self.dialect)}=%s' for f in datafields])
+        sql = f'update {quoted_table} set {datacols} where {keycols}'
 
         values = tuple(datavalues) + tuple(keyvalues)
         return self.execute(sql, *values)
@@ -544,8 +545,12 @@ class ConnectionWrapper:
             strategy = get_db_strategy(self)
             columns = strategy.get_default_columns(self, table, bypass_cache=bypass_cache)
 
-        columns = [f'{col} as {alias}' for col, alias in peel(columns)]
-        return self.select(f"select {','.join(columns)} from {table}")
+        quoted_table = quote_identifier(table, self.dialect)
+        quoted_columns = [
+            f'{quote_identifier(col, self.dialect)} as {quote_identifier(alias, self.dialect)}'
+            for col, alias in peel(columns)
+        ]
+        return self.select(f"select {','.join(quoted_columns)} from {quoted_table}")
 
     def upsert_rows(
         self,

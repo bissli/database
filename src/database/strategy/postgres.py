@@ -13,8 +13,13 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from database.sql import make_placeholders
+from database.sql import make_placeholders, quote_identifier
 from database.strategy.base import DatabaseStrategy
+
+
+def _escape_string_literal(s: str) -> str:
+    """Escape a string for use as a PostgreSQL string literal."""
+    return s.replace("'", "''")
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -74,10 +79,12 @@ class PostgresStrategy(DatabaseStrategy):
 
         quoted_table = self.quote_identifier(table)
         quoted_identity = self.quote_identifier(identity)
+        escaped_table = _escape_string_literal(table)
+        escaped_identity = _escape_string_literal(identity)
 
         sql = f"""
 select
-    setval(pg_get_serial_sequence('{table}', '{identity}'), coalesce(max({quoted_identity}),0)+1, false)
+    setval(pg_get_serial_sequence('{escaped_table}', '{escaped_identity}'), coalesce(max({quoted_identity}),0)+1, false)
 from
 {quoted_table}
 """
@@ -103,8 +110,9 @@ where i.indrelid = %s::regclass and i.indisprimary
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
         """
+        quoted_table = quote_identifier(table)
         sql = f"""
-select skeys(hstore(null::{table})) as column
+select skeys(hstore(null::{quoted_table})) as column
     """
         return self._select_column_raw(cn, sql)
 
