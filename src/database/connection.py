@@ -307,7 +307,10 @@ class ConnectionWrapper:
         cursor = self.cursor()
         cursor.execute(processed_sql, processed_args)
 
-        is_procedure = any(kw in processed_sql.upper() for kw in ['EXEC ', 'CALL ', 'EXECUTE '])
+        normalized_sql = processed_sql.strip().upper()
+        is_procedure = (normalized_sql.startswith('EXEC ') or
+                        normalized_sql.startswith('CALL ') or
+                        normalized_sql.startswith('EXECUTE '))
         return_all = kwargs.pop('return_all', False)
         prefer_first = kwargs.pop('prefer_first', False)
 
