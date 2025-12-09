@@ -213,37 +213,56 @@ class TypeConverter:
 
 from psycopg.postgres import types as pg_types
 
-_oid = lambda x: pg_types.get(x).oid
-_aoid = lambda x: pg_types.get(x).array_oid
 
-postgres_types: dict[int, type] = {}
+def _safe_oid(type_name: str) -> int | None:
+    """Get OID for a PostgreSQL type name, returning None if not found."""
+    type_info = pg_types.get(type_name)
+    return type_info.oid if type_info else None
 
-for v in [_oid('"char"'), _oid('bpchar'), _oid('character varying'), _oid('character'),
-          _oid('json'), _oid('name'), _oid('text'), _oid('uuid'), _oid('varchar')]:
-    postgres_types[v] = str
 
-for v in [_oid('bigint'), _oid('int2'), _oid('int4'), _oid('int8'), _oid('integer')]:
-    postgres_types[v] = int
+def _safe_array_oid(type_name: str) -> int | None:
+    """Get array OID for a PostgreSQL type name, returning None if not found."""
+    type_info = pg_types.get(type_name)
+    return type_info.array_oid if type_info else None
 
-for v in [_oid('float4'), _oid('float8'), _oid('double precision'), _oid('numeric')]:
-    postgres_types[v] = float
 
-postgres_types[_oid('date')] = datetime.date
+def _build_postgres_types() -> dict[int, type]:
+    """Build PostgreSQL type code to Python type mapping."""
+    types: dict[int, type] = {}
 
-for v in [_oid('time'), _oid('time with time zone'), _oid('time without time zone'),
-          _oid('timestamp with time zone'), _oid('timestamp without time zone'),
-          _oid('timestamptz'), _oid('timetz'), _oid('timestamp')]:
-    postgres_types[v] = datetime.datetime
+    type_mappings = [
+        (str, ['"char"', 'bpchar', 'character varying', 'character',
+               'json', 'name', 'text', 'uuid', 'varchar']),
+        (int, ['bigint', 'int2', 'int4', 'int8', 'integer']),
+        (float, ['float4', 'float8', 'double precision', 'numeric']),
+        (datetime.date, ['date']),
+        (datetime.datetime, ['time', 'time with time zone', 'time without time zone',
+                             'timestamp with time zone', 'timestamp without time zone',
+                             'timestamptz', 'timetz', 'timestamp']),
+        (bool, ['bool', 'boolean']),
+        (bytes, ['bytea', 'jsonb']),
+    ]
 
-for v in [_oid('bool'), _oid('boolean')]:
-    postgres_types[v] = bool
+    for py_type, pg_names in type_mappings:
+        for name in pg_names:
+            oid = _safe_oid(name)
+            if oid is not None:
+                types[oid] = py_type
 
-for v in [_oid('bytea'), _oid('jsonb')]:
-    postgres_types[v] = bytes
+    # Array types
+    array_oid = _safe_array_oid('int2vector')
+    if array_oid is not None:
+        types[array_oid] = tuple
 
-postgres_types[_aoid('int2vector')] = tuple
-for k in tuple(postgres_types):
-    postgres_types[_aoid(k)] = tuple
+    for oid in list(types.keys()):
+        type_info = pg_types.get(oid)
+        if type_info and type_info.array_oid:
+            types[type_info.array_oid] = tuple
+
+    return types
+
+
+postgres_types: dict[int, type] = _build_postgres_types()
 
 
 sqlite_types: dict[str, type] = {
@@ -265,7 +284,6 @@ def resolve_type(
     column_name: str | None = None,
     table_name: str | None = None,
     type_map: dict | None = None,
-    **kwargs
 ) -> type:
     """Resolve database type code to Python type.
 
@@ -278,9 +296,8 @@ def resolve_type(
         db_type: Database type ('postgresql', 'sqlite')
         type_code: Database-specific type code
         column_name: Optional column name for pattern matching
-        table_name: Optional table name (unused, for compatibility)
+        table_name: Unused, kept for API compatibility
         type_map: Optional type map from strategy.get_type_map()
-        **kwargs: Additional args (precision, scale - unused)
 
     Returns
         Python type

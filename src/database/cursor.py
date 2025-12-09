@@ -33,8 +33,9 @@ def dumpsql(is_many: bool = False):
         @wraps(func)
         def wrapper(self, operation: str, *args: Any, **kwargs: Any):
             start = time.time()
-            if is_many and args:
-                logger.debug(f'SQL:\n{operation}\nparams: {len(args[0])} rows')
+            if is_many:
+                row_count = len(args[0]) if args and args[0] else 0
+                logger.debug(f'SQL:\n{operation}\nparams: {row_count} rows')
             else:
                 logger.debug(f'SQL:\n{operation}\nargs: {args}')
             try:
