@@ -5,17 +5,15 @@ Implements Python DB-API 2.0 specification (PEP-249).
 """
 import logging
 import re
-import sqlite3
 import time
 from collections.abc import Iterator, Sequence
 from functools import wraps
-from numbers import Number
 from typing import Any
 
 from database.sql import has_placeholders
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
-from database.types import columns_from_cursor_description, postgres_types
+from database.types import columns_from_cursor_description
 from database.utils import ensure_commit
 
 from libb import collapse
@@ -287,37 +285,16 @@ def iter_chunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
         yield from chunked
 
 
-class DictRowFactory:
-    """Row factory for psycopg that returns dictionary-like rows."""
-
-    def __init__(self, cursor: Any) -> None:
-        self.fields = [(c.name, postgres_types.get(c.type_code)) for c in (cursor.description or [])]
-
-    def __call__(self, values: tuple) -> dict:
-        return {
-            name: cast(value) if isinstance(value, Number) and cast is not None else value
-            for (name, cast), value in zip(self.fields, values)
-        }
-
-
 def get_dict_cursor(cn: Any) -> Cursor:
-    """Get cursor that returns rows as dictionaries."""
+    """Get cursor that returns rows as dictionaries.
+
+    Delegates cursor creation to the database strategy for dialect-specific
+    implementation.
+    """
     raw_conn = cn.connection if hasattr(cn, 'connection') else cn
     strategy = get_db_strategy(cn)
-
-    if cn.dialect == 'postgresql':
-        cursor = raw_conn.cursor(row_factory=DictRowFactory)
-        return Cursor(cursor, cn, strategy)
-
-    if cn.dialect == 'sqlite':
-        sqlite_conn = raw_conn
-        if hasattr(raw_conn, 'dbapi_connection'):
-            sqlite_conn = raw_conn.dbapi_connection
-        sqlite_conn.row_factory = sqlite3.Row
-        cursor = sqlite_conn.cursor()
-        return Cursor(cursor, cn, strategy)
-
-    raise ValueError(f'Unknown connection type: {cn.dialect}')
+    cursor = strategy.create_dict_cursor(raw_conn)
+    return Cursor(cursor, cn, strategy)
 
 
 def extract_column_info(cursor: 'Any', table_name: str | None = None) -> list['Any']:

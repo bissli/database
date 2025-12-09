@@ -16,13 +16,12 @@ The ConnectionWrapper is the primary database client, providing methods like:
 """
 import atexit
 import logging
-import sqlite3
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import fields
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Self, TypeVar
+from typing import Any, Self, TypeVar
 
 import pandas as pd
 import sqlalchemy as sa
@@ -31,18 +30,15 @@ from database.cursor import process_multiple_result_sets
 from database.exceptions import DbConnectionError, ValidationError
 from database.options import DatabaseOptions, use_iterdict_data_loader
 from database.sql import make_placeholders, prepare_query, quote_identifier
-from database.strategy import get_db_strategy
+from database.strategy import get_db_strategy, get_strategy
 from database.transaction import Transaction
-from database.types import AdapterRegistry, RowAdapter
+from database.types import RowAdapter
 from database.utils import ensure_commit, get_dialect_name
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 
 from libb import attrdict, is_null, load_options, peel
-
-if TYPE_CHECKING:
-    pass
 
 __all__ = [
     'ConnectionWrapper',
@@ -68,31 +64,29 @@ _schema_cache_lock = threading.RLock()
 
 
 def create_url_from_options(options: DatabaseOptions,
-                            url_creator: Callable[..., sa.URL] = sa.URL.create) -> sa.URL:
+                            url_creator: Callable[..., sa.URL] | None = None) -> sa.URL:
     """Convert DatabaseOptions to SQLAlchemy URL.
+
+    Delegates to the database strategy to build the connection URL string,
+    then parses it into a SQLAlchemy URL object.
     """
-    if options.drivername == 'sqlite':
+    strategy = get_strategy(options.drivername)
+    url_string = strategy.build_connection_url(options)
+
+    if url_creator is not None:
+        # For testing - parse and recreate using the provided factory
+        parsed = sa.make_url(url_string)
         return url_creator(
-            drivername='sqlite',
-            database=options.database
+            drivername=parsed.drivername,
+            username=parsed.username,
+            password=parsed.password,
+            host=parsed.host,
+            port=parsed.port,
+            database=parsed.database,
+            query=dict(parsed.query) if parsed.query else {}
         )
 
-    elif options.drivername == 'postgresql':
-        query = {}
-        if options.timeout:
-            query['connect_timeout'] = str(options.timeout)
-
-        return url_creator(
-            drivername='postgresql+psycopg',
-            username=options.username,
-            password=options.password,
-            host=options.hostname,
-            port=options.port,
-            database=options.database,
-            query=query
-        )
-
-    raise ValueError(f'Unsupported database type: {options.drivername}')
+    return sa.make_url(url_string)
 
 
 def check_connection(func: Callable[..., T] | None = None, *, max_retries: int = 3,
@@ -147,13 +141,13 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
             return _engine_registry[key]
 
         url = create_url_from_options(options)
+        strategy = get_strategy(options.drivername)
 
         engine_kwargs: dict[str, Any] = {'echo': False}
 
-        if options.drivername == 'sqlite':
-            engine_kwargs['connect_args'] = {
-                'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
-            }
+        # Get dialect-specific engine kwargs from strategy
+        strategy_kwargs = strategy.get_engine_kwargs(options)
+        engine_kwargs.update(strategy_kwargs)
 
         if not use_pool:
             engine_kwargs['poolclass'] = NullPool
@@ -309,9 +303,7 @@ class ConnectionWrapper:
         cursor.execute(processed_sql, processed_args)
 
         normalized_sql = processed_sql.strip().upper()
-        is_procedure = (normalized_sql.startswith('EXEC ') or
-                        normalized_sql.startswith('CALL ') or
-                        normalized_sql.startswith('EXECUTE '))
+        is_procedure = (normalized_sql.startswith(('EXEC ', 'CALL ', 'EXECUTE ')))
         return_all = kwargs.pop('return_all', False)
         prefer_first = kwargs.pop('prefer_first', False)
 
@@ -685,10 +677,7 @@ def configure_connection(sa_connection: sa.engine.Connection) -> None:
     """
     strategy = get_db_strategy(sa_connection)
     strategy.configure_connection(sa_connection.connection)
-
-    dialect_name = get_dialect_name(sa_connection)
-    if dialect_name == 'sqlite':
-        AdapterRegistry().sqlite(sa_connection.connection)
+    strategy.register_type_adapters(sa_connection.connection)
 
 
 @load_options(cls=DatabaseOptions)
