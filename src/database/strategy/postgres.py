@@ -14,8 +14,12 @@ import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from database.row import DictRowFactory
 from database.sql import make_placeholders, quote_identifier
-from database.strategy.base import DatabaseStrategy
+from database.strategy.base import DatabaseStrategy, register_strategy
+from database.types import postgres_types
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -37,15 +41,61 @@ def _escape_string_literal(s: str) -> str:
     """Escape a string for use as a PostgreSQL string literal."""
     return s.replace("'", "''")
 
+
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
+    from database.options import DatabaseOptions
 
-logger = logging.getLogger(__name__)
 
-
+@register_strategy('postgresql')
 class PostgresStrategy(DatabaseStrategy):
     """PostgreSQL-specific operations.
     """
+
+    @property
+    def dialect_name(self) -> str:
+        """Return the dialect identifier for PostgreSQL."""
+        return 'postgresql'
+
+    def build_connection_url(self, options: 'DatabaseOptions') -> str:
+        """Build the SQLAlchemy connection URL for PostgreSQL."""
+        query_parts = []
+        if options.timeout:
+            query_parts.append(f'connect_timeout={options.timeout}')
+
+        url = (f'postgresql+psycopg://{options.username}:{options.password}'
+               f'@{options.hostname}:{options.port}/{options.database}')
+
+        if query_parts:
+            url += '?' + '&'.join(query_parts)
+
+        return url
+
+    def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
+        """Return SQLAlchemy create_engine kwargs for PostgreSQL."""
+        return {}
+
+    def register_type_adapters(self, connection: Any) -> None:
+        """Register dialect-specific type adapters for PostgreSQL.
+
+        PostgreSQL with psycopg doesn't need special adapters.
+        """
+
+    def create_dict_cursor(self, raw_conn: Any) -> Any:
+        """Create a cursor that returns rows as dictionaries.
+
+        Uses DictRowFactory for PostgreSQL connections.
+        """
+        return raw_conn.cursor(row_factory=DictRowFactory)
+
+    def get_type_map(self) -> dict[int, type]:
+        """Return mapping of PostgreSQL type codes to Python types."""
+        return postgres_types
+
+    @classmethod
+    def get_required_options(cls) -> list[str]:
+        """Return required options for PostgreSQL connections."""
+        return ['hostname', 'username', 'password', 'database', 'port', 'timeout']
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
