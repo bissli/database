@@ -264,6 +264,7 @@ def resolve_type(
     type_code: Any,
     column_name: str | None = None,
     table_name: str | None = None,
+    type_map: dict | None = None,
     **kwargs
 ) -> type:
     """Resolve database type code to Python type.
@@ -278,6 +279,7 @@ def resolve_type(
         type_code: Database-specific type code
         column_name: Optional column name for pattern matching
         table_name: Optional table name (unused, for compatibility)
+        type_map: Optional type map from strategy.get_type_map()
         **kwargs: Additional args (precision, scale - unused)
 
     Returns
@@ -286,16 +288,27 @@ def resolve_type(
     if isinstance(type_code, type):
         return type_code
 
-    if db_type == 'postgresql':
-        if type_code in postgres_types:
-            return postgres_types[type_code]
-    elif db_type == 'sqlite':
-        if isinstance(type_code, str):
+    # Use provided type_map if available, otherwise fall back to dialect lookup
+    if type_map is not None:
+        if type_code in type_map:
+            return type_map[type_code]
+        # For SQLite, also check base type (e.g., "INTEGER(10)" -> "INTEGER")
+        if db_type == 'sqlite' and isinstance(type_code, str):
             base_type = type_code.split('(')[0].upper()
-            if base_type in sqlite_types:
-                return sqlite_types[base_type]
-        if type_code in sqlite_types:
-            return sqlite_types[type_code]
+            if base_type in type_map:
+                return type_map[base_type]
+    else:
+        # Legacy path: direct dict access
+        if db_type == 'postgresql':
+            if type_code in postgres_types:
+                return postgres_types[type_code]
+        elif db_type == 'sqlite':
+            if isinstance(type_code, str):
+                base_type = type_code.split('(')[0].upper()
+                if base_type in sqlite_types:
+                    return sqlite_types[base_type]
+            if type_code in sqlite_types:
+                return sqlite_types[type_code]
 
     if column_name:
         name_lower = column_name.lower()
