@@ -1,9 +1,12 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+from database.strategy import get_available_dialects, get_strategy_class
+from database.strategy import is_supported_dialect
 from database.types import Column
 
 from libb import ConfigOptions, scriptname
@@ -117,17 +120,12 @@ class DatabaseOptions(ConfigOptions):
     pool_wait_timeout: int = 30
 
     def __post_init__(self):
-        if self.drivername not in {'postgresql', 'sqlite'}:
-            raise ValueError('drivername must be `postgresql` or `sqlite`')
+        if not is_supported_dialect(self.drivername):
+            available = get_available_dialects()
+            raise ValueError(f'drivername must be one of: {available}')
         self.appname = self.appname or scriptname() or 'python_console'
-        if self.drivername == 'postgresql':
-            for field in ('hostname', 'username', 'password', 'database',
-                          'port', 'timeout'):
-                if not getattr(self, field):
-                    raise ValueError(f'field {field} cannot be None or 0')
-        if self.drivername == 'sqlite':
-            if not self.database:
-                raise ValueError('field database cannot be None')
+        strategy_cls = get_strategy_class(self.drivername)
+        strategy_cls.validate_options(self)
         if self.data_loader is None:
             self.data_loader = pandas_numpy_data_loader
 
