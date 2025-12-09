@@ -45,14 +45,6 @@ def strategy():
     return PostgresStrategy()
 
 
-@pytest.fixture(autouse=True)
-def clear_caches():
-    """Clear all caches before each test"""
-    Cache.get_instance().clear_all()
-    yield
-    Cache.get_instance().clear_all()
-
-
 @pytest.fixture
 def cache_manager():
     """Provide the cache manager instance"""
