@@ -1,5 +1,8 @@
 """SQL parameter processing with clean tokenization.
 
+This is a low-level utility module. For higher-level dialect-aware operations,
+use strategy methods instead (e.g., strategy.standardize_sql(), strategy.get_placeholder_style()).
+
 Public API:
 - prepare_query(sql, args, dialect) - Main entry point for query processing
 - quote_identifier(name, dialect) - Quote table/column names
@@ -13,6 +16,8 @@ from typing import Any
 from database.types import TypeConverter
 
 from libb import issequence
+
+_SUPPORTED_DIALECTS = {'postgresql', 'sqlite'}
 
 # Regex patterns
 _PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')  # Placeholders (group 1 = named param name)
@@ -52,9 +57,13 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
 
 
 def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
-    """Quote a table or column name safely."""
-    if dialect not in {'postgresql', 'sqlite'}:
-        raise ValueError(f'Unknown dialect: {dialect}')
+    """Quote a table or column name safely.
+
+    Note: The dialect parameter is validated but the quoting is the same
+    for all supported dialects (standard SQL double-quote escaping).
+    """
+    if dialect not in _SUPPORTED_DIALECTS:
+        raise ValueError(f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}')
     return f'"{identifier.replace(chr(34), chr(34)+chr(34))}"'
 
 
@@ -141,10 +150,6 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
 
     return _PH_RE.sub(replace, sql)
 
-
-# ---------------------------------------------------------------------------
-# Internal functions
-# ---------------------------------------------------------------------------
 
 def _find_contexts(sql: str) -> list[PH]:
     """Find placeholders with their contexts in one pass."""
