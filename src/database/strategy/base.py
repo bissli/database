@@ -16,6 +16,25 @@ from database.sql import quote_identifier as sql_quote_identifier
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
+    from database.options import DatabaseOptions
+
+# Registry of dialect name -> strategy class
+# Defined here to avoid circular imports (concrete strategies import from base)
+_STRATEGY_REGISTRY: dict[str, type['DatabaseStrategy']] = {}
+
+
+def register_strategy(dialect: str):
+    """Decorator to register a strategy class for a dialect.
+
+    Usage:
+        @register_strategy('postgresql')
+        class PostgresStrategy(DatabaseStrategy):
+            ...
+    """
+    def decorator(cls: type['DatabaseStrategy']) -> type['DatabaseStrategy']:
+        _STRATEGY_REGISTRY[dialect] = cls
+        return cls
+    return decorator
 
 
 class DatabaseStrategy(ABC):
@@ -175,6 +194,84 @@ class DatabaseStrategy(ABC):
         Args:
             raw_conn: The raw DBAPI connection (not wrapped)
         """
+
+    @property
+    @abstractmethod
+    def dialect_name(self) -> str:
+        """Return the dialect identifier (e.g., 'postgresql', 'sqlite')."""
+
+    @abstractmethod
+    def build_connection_url(self, options: 'DatabaseOptions') -> str:
+        """Build the database connection URL for this dialect.
+
+        Args:
+            options: DatabaseOptions containing connection parameters
+
+        Returns
+            Connection URL string suitable for SQLAlchemy
+        """
+
+    @abstractmethod
+    def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
+        """Return SQLAlchemy create_engine kwargs for this dialect.
+
+        Args:
+            options: DatabaseOptions containing connection parameters
+
+        Returns
+            Dictionary of keyword arguments for create_engine
+        """
+
+    @abstractmethod
+    def register_type_adapters(self, connection: Any) -> None:
+        """Register dialect-specific type adapters.
+
+        Args:
+            connection: Database connection to register adapters on
+        """
+
+    @abstractmethod
+    def create_dict_cursor(self, raw_conn: Any) -> Any:
+        """Create a cursor that returns rows as dictionaries.
+
+        Args:
+            raw_conn: Raw DBAPI connection
+
+        Returns
+            Cursor configured to return dict-like rows
+        """
+
+    @abstractmethod
+    def get_type_map(self) -> dict:
+        """Return mapping of database type codes to Python types.
+
+        Returns
+            Dictionary mapping type codes (int for PostgreSQL, str for SQLite)
+            to Python types
+        """
+
+    @classmethod
+    @abstractmethod
+    def get_required_options(cls) -> list[str]:
+        """Return list of required option field names for this dialect.
+
+        Returns
+            List of field names that must have non-None/non-zero values
+        """
+
+    @classmethod
+    def validate_options(cls, options: 'DatabaseOptions') -> None:
+        """Validate options for this dialect.
+
+        Args:
+            options: DatabaseOptions to validate
+
+        Raises
+            ValueError: If any required field is None or 0
+        """
+        for field in cls.get_required_options():
+            if not getattr(options, field):
+                raise ValueError(f'field {field} cannot be None or 0')
 
     def quote_identifier(self, identifier: str) -> str:
         """Quote a database identifier.
