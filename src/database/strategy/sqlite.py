@@ -9,22 +9,79 @@ It handles SQLite's unique features and limitations such as:
 - Automatic rowid management (no explicit sequence resetting needed)
 - Metadata retrieval using SQLite PRAGMA statements
 """
+import json
 import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
-from database.sql import make_placeholders, quote_identifier, standardize_placeholders
-from database.strategy.base import DatabaseStrategy
+from database.sql import make_placeholders, quote_identifier
+from database.sql import standardize_placeholders
+from database.strategy.base import DatabaseStrategy, register_strategy
+from database.types import convert_date, convert_datetime, sqlite_types
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
+    from database.options import DatabaseOptions
 
 logger = logging.getLogger(__name__)
 
 
+@register_strategy('sqlite')
 class SQLiteStrategy(DatabaseStrategy):
     """SQLite-specific operations.
     """
+
+    @property
+    def dialect_name(self) -> str:
+        """Return the dialect identifier for SQLite."""
+        return 'sqlite'
+
+    def build_connection_url(self, options: 'DatabaseOptions') -> str:
+        """Build the SQLAlchemy connection URL for SQLite."""
+        return f'sqlite:///{options.database}'
+
+    def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
+        """Return SQLAlchemy create_engine kwargs for SQLite."""
+        return {
+            'connect_args': {
+                'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+            }
+        }
+
+    def register_type_adapters(self, connection: Any) -> None:
+        """Register dialect-specific type adapters and converters for SQLite.
+
+        SQLite needs adapters to handle complex types like dict and list,
+        and converters to handle date/datetime coming from the database.
+        """
+        # Adapters (Python -> SQLite)
+        sqlite3.register_adapter(dict, json.dumps)
+        sqlite3.register_adapter(list, json.dumps)
+
+        # Converters (SQLite -> Python)
+        connection.execute('SELECT 1')
+        sqlite3.register_converter('date', convert_date)
+        sqlite3.register_converter('datetime', convert_datetime)
+
+    def create_dict_cursor(self, raw_conn: Any) -> Any:
+        """Create a cursor that returns rows as dictionaries.
+
+        Uses sqlite3.Row for SQLite connections.
+        """
+        sqlite_conn = raw_conn
+        if hasattr(raw_conn, 'dbapi_connection'):
+            sqlite_conn = raw_conn.dbapi_connection
+        sqlite_conn.row_factory = sqlite3.Row
+        return sqlite_conn.cursor()
+
+    def get_type_map(self) -> dict[str, type]:
+        """Return mapping of SQLite type names to Python types."""
+        return sqlite_types
+
+    @classmethod
+    def get_required_options(cls) -> list[str]:
+        """Return required options for SQLite connections."""
+        return ['database']
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
@@ -114,7 +171,7 @@ select name as column from pragma_table_info({quoted_table})
         """
         logger.warning("SQLite doesn't fully support constraint definition retrieval")
         quoted_constraint = quote_identifier(constraint_name, 'sqlite')
-        sql = f"PRAGMA index_info({quoted_constraint})"
+        sql = f'PRAGMA index_info({quoted_constraint})'
         result = self._select_raw(cn, sql)
 
         if not result:
@@ -160,7 +217,7 @@ ORDER BY cid
         """Get columns that have UNIQUE constraints (excluding primary key).
         """
         quoted_table = quote_identifier(table, 'sqlite')
-        sql = f"SELECT name FROM pragma_index_list({quoted_table}) WHERE \"unique\" = 1"
+        sql = f'SELECT name FROM pragma_index_list({quoted_table}) WHERE "unique" = 1'
         index_names = self._select_column_raw(cn, sql)
 
         unique_columns = []
@@ -168,7 +225,7 @@ ORDER BY cid
 
         for idx_name in index_names:
             quoted_idx = quote_identifier(idx_name, 'sqlite')
-            col_sql = f"SELECT name FROM pragma_index_info({quoted_idx})"
+            col_sql = f'SELECT name FROM pragma_index_info({quoted_idx})'
             cols = self._select_column_raw(cn, col_sql)
 
             if cols and set(cols) != primary_keys:
