@@ -284,6 +284,7 @@ def resolve_type(
     column_name: str | None = None,
     table_name: str | None = None,
     type_map: dict | None = None,
+    **_,
 ) -> type:
     """Resolve database type code to Python type.
 
@@ -298,6 +299,7 @@ def resolve_type(
         column_name: Optional column name for pattern matching
         table_name: Unused, kept for API compatibility
         type_map: Optional type map from strategy.get_type_map()
+        **_: Additional args (column_size, precision, scale) accepted but unused
 
     Returns
         Python type

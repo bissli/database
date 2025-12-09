@@ -52,22 +52,24 @@ def iterdict_data_loader(data, column_info, **kwargs) -> list[dict]:
     return list(data)
 
 
+def _empty_dataframe(columns) -> pd.DataFrame:
+    """Create empty DataFrame with column metadata."""
+    df = pd.DataFrame(columns=Column.get_names(columns))
+    df.attrs['column_types'] = Column.get_column_types_dict(columns)
+    return df
+
+
 def pandas_numpy_data_loader(data, columns, **kwargs) -> pd.DataFrame:
-    """
-    Standard pandas DataFrame loader using NumPy.
+    """Standard pandas DataFrame loader using NumPy.
 
     Always returns a DataFrame, never None, with columns preserved for empty results.
     Includes type information in the DataFrame.attrs attribute.
     """
     if not data:
-        df = pd.DataFrame(columns=Column.get_names(columns))
-        df.attrs['column_types'] = Column.get_column_types_dict(columns)
-        return df
+        return _empty_dataframe(columns)
 
     df = pd.DataFrame.from_records(list(data), columns=Column.get_names(columns))
-
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
-
     return df
 
 
@@ -77,16 +79,12 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     Always returns a DataFrame, never None, with columns preserved for empty results.
     """
     if not data:
-        df = pd.DataFrame(columns=Column.get_names(columns))
-        df.attrs['column_types'] = Column.get_column_types_dict(columns)
-        return df
+        return _empty_dataframe(columns)
 
     column_names = Column.get_names(columns)
-    dataT = [[row[col] for row in data] for col in column_names]  # list of cols
-    df = pa.table(dataT, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
-
+    columns_data = [[row[col] for row in data] for col in column_names]
+    df = pa.table(columns_data, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
-
     return df
 
 
@@ -128,11 +126,3 @@ class DatabaseOptions(ConfigOptions):
         strategy_cls.validate_options(self)
         if self.data_loader is None:
             self.data_loader = pandas_numpy_data_loader
-
-
-if __name__ == '__main__':
-    options = DatabaseOptions(hostname='hostname', username='username',
-                              password='password', database='database',
-                              port=1234, timeout=30)
-    print(options.data_loader([{'name': 'foo'}], ['name']))
-    print(str(options))
