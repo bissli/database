@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from database.row import DictRowFactory
-from database.sql import make_placeholders, quote_identifier
+from database.sql import make_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
 from database.types import postgres_types
 
@@ -142,7 +142,7 @@ from
 {quoted_table}
 """
         # Handle both ConnectionWrapper and Transaction (which wraps a connection)
-        conn = cn.cn if hasattr(cn, 'cn') else cn
+        conn = getattr(cn, 'cn', cn)
         self._select_raw(conn, sql)
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
@@ -163,7 +163,7 @@ where i.indrelid = %s::regclass and i.indisprimary
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
         """
-        quoted_table = quote_identifier(table)
+        quoted_table = self.quote_identifier(table)
         sql = f"""
 select skeys(hstore(null::{quoted_table})) as column
     """

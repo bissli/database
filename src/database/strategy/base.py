@@ -9,6 +9,7 @@ Each concrete strategy implements operations with database-specific SQL and tech
 but clients can work with any database through this consistent interface.
 """
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from database.cache import cacheable_strategy
@@ -41,19 +42,28 @@ class DatabaseStrategy(ABC):
     """Base class for database-specific operations.
     """
 
+    @contextmanager
+    def _cursor(self, cn: 'ConnectionWrapper', sql: str, params: tuple | None = None):
+        """Context manager for cursor lifecycle with SQL standardization.
+
+        Handles cursor creation, SQL execution, and cleanup.
+        """
+        sql = self.standardize_sql(sql)
+        cursor = cn.dbapi_connection.cursor()
+        try:
+            cursor.execute(sql, params or ())
+            yield cursor
+        finally:
+            cursor.close()
+
     def _execute_raw(self, cn: 'ConnectionWrapper', sql: str,
                      params: tuple | None = None) -> int:
         """Execute SQL and return rowcount without importing query.py.
 
         Used internally by strategy methods for DDL/DML operations.
         """
-        sql = self.standardize_sql(sql)
-        cursor = cn.dbapi_connection.cursor()
-        try:
-            cursor.execute(sql, params or ())
+        with self._cursor(cn, sql, params) as cursor:
             return cursor.rowcount
-        finally:
-            cursor.close()
 
     def _select_raw(self, cn: 'ConnectionWrapper', sql: str,
                     params: tuple | None = None) -> list[dict]:
@@ -61,16 +71,11 @@ class DatabaseStrategy(ABC):
 
         Used internally by strategy methods for queries returning multiple columns.
         """
-        sql = self.standardize_sql(sql)
-        cursor = cn.dbapi_connection.cursor()
-        try:
-            cursor.execute(sql, params or ())
+        with self._cursor(cn, sql, params) as cursor:
             if cursor.description is None:
                 return []
             columns = [desc[0] for desc in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        finally:
-            cursor.close()
 
     def _select_column_raw(self, cn: 'ConnectionWrapper', sql: str,
                            params: tuple | None = None) -> list:
@@ -78,13 +83,8 @@ class DatabaseStrategy(ABC):
 
         Used internally by strategy methods for single-column queries.
         """
-        sql = self.standardize_sql(sql)
-        cursor = cn.dbapi_connection.cursor()
-        try:
-            cursor.execute(sql, params or ())
+        with self._cursor(cn, sql, params) as cursor:
             return [row[0] for row in cursor.fetchall()]
-        finally:
-            cursor.close()
 
     @abstractmethod
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:

@@ -11,12 +11,17 @@ from database.strategy.sqlite import SQLiteStrategy as SQLiteStrategy
 from database.utils import get_dialect_name
 
 
-@lru_cache(maxsize=8)
-def _get_strategy(dialect: str) -> DatabaseStrategy:
-    """Get cached strategy instance for a dialect."""
+def _validate_dialect(dialect: str) -> None:
+    """Raise ValueError if dialect is not registered."""
     if dialect not in _STRATEGY_REGISTRY:
         available = list(_STRATEGY_REGISTRY.keys())
         raise ValueError(f'Unsupported dialect: {dialect}. Available: {available}')
+
+
+@lru_cache(maxsize=8)
+def _get_strategy(dialect: str) -> DatabaseStrategy:
+    """Get cached strategy instance for a dialect."""
+    _validate_dialect(dialect)
     return _STRATEGY_REGISTRY[dialect]()
 
 
@@ -47,7 +52,5 @@ def is_supported_dialect(dialect: str) -> bool:
 
 def get_strategy_class(dialect: str) -> type['DatabaseStrategy']:
     """Get the strategy class for a dialect without instantiating."""
-    if dialect not in _STRATEGY_REGISTRY:
-        available = list(_STRATEGY_REGISTRY.keys())
-        raise ValueError(f'Unsupported dialect: {dialect}. Available: {available}')
+    _validate_dialect(dialect)
     return _STRATEGY_REGISTRY[dialect]
