@@ -7,6 +7,8 @@ All query/data operations can be called either as:
 
 The module functions are facades for backwards compatibility.
 """
+__version__ = '0.1.0'
+
 from typing import Any
 
 from database.connection import ConnectionWrapper, connect
