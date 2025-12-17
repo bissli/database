@@ -554,6 +554,7 @@ class ConnectionWrapper:
         ]
         return self.select(f"select {','.join(quoted_columns)} from {quoted_table}")
 
+    @check_connection
     def upsert_rows(
         self,
         table: str,

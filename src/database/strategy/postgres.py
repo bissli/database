@@ -59,15 +59,19 @@ class PostgresStrategy(DatabaseStrategy):
 
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
         """Build the SQLAlchemy connection URL for PostgreSQL."""
-        query_parts = []
+        query_parts = [
+            'keepalives=1',
+            'keepalives_idle=30',
+            'keepalives_interval=10',
+            'keepalives_count=5',
+        ]
         if options.timeout:
             query_parts.append(f'connect_timeout={options.timeout}')
 
         url = (f'postgresql+psycopg://{options.username}:{options.password}'
                f'@{options.hostname}:{options.port}/{options.database}')
 
-        if query_parts:
-            url += '?' + '&'.join(query_parts)
+        url += '?' + '&'.join(query_parts)
 
         return url
 

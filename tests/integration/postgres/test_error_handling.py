@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import database as db
 import psycopg
 import pytest
@@ -53,6 +55,33 @@ def test_connection_timeout(psql_docker):
             'port': 5432,
             'timeout': 1  # 1 second timeout
         })
+
+
+def test_upsert_rows_retries_on_connection_error(psql_docker, pg_conn):
+    """Test that upsert_rows retries on OperationalError (e.g., SSL errors)"""
+    pg_conn.execute('''
+        CREATE TABLE IF NOT EXISTS test_retry (
+            id INTEGER PRIMARY KEY,
+            name TEXT
+        )
+    ''')
+
+    call_count = [0]
+    original_executemany = pg_conn.cursor().__class__.executemany
+
+    def mock_executemany(self, operation, seq_of_parameters, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] < 3:
+            raise psycopg.OperationalError('SSL SYSCALL error: EOF detected')
+        return original_executemany(self, operation, seq_of_parameters, *args, **kwargs)
+
+    with patch.object(pg_conn.cursor().__class__, 'executemany', mock_executemany):
+        rows = [{'id': 1, 'name': 'test'}]
+        pg_conn.upsert_rows('test_retry', rows)
+
+    assert call_count[0] == 3
+
+    pg_conn.execute('DROP TABLE test_retry')
 
 
 if __name__ == '__main__':
