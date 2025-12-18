@@ -16,7 +16,7 @@ sqlalchemy = "^2.0.0"
 
 cachetools = "*"
 python-dateutil = "*"
-libb-util = { git = "https://github.com/bissli/libb-util" }
+libb-util = "*"
 
 # == test
 asserts = { version = "*", optional = true }
