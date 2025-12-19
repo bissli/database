@@ -7,7 +7,7 @@ All query/data operations can be called either as:
 
 The module functions are facades for backwards compatibility.
 """
-__version__ = '0.1.3'
+__version__ = '0.1.4'
 
 from typing import Any
 
