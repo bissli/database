@@ -28,6 +28,7 @@ import sqlalchemy as sa
 from database.cursor import extract_column_info, get_dict_cursor, load_data
 from database.cursor import process_multiple_result_sets
 from database.exceptions import DbConnectionError, ValidationError
+from database.exceptions import is_retryable_error
 from database.options import DatabaseOptions, use_iterdict_data_loader
 from database.sql import make_placeholders, prepare_query, quote_identifier
 from database.strategy import get_db_strategy, get_strategy
@@ -92,13 +93,25 @@ def create_url_from_options(options: DatabaseOptions,
 def check_connection(func: Callable[..., T] | None = None, *, max_retries: int = 3,
                      retry_delay: float = 1, retry_errors: type | tuple[type, ...] | None = None,
                      retry_backoff: float = 1.5,
-                     sleep_func: Callable[[float], None] = time.sleep) -> Callable[..., T]:
+                     sleep_func: Callable[[float], None] = time.sleep,
+                     check_retryable: bool = True) -> Callable[..., T]:
     """Connection retry decorator with backoff.
 
     Decorator that handles connection errors by automatically retrying the operation.
     It has configurable retry parameters and supports exponential backoff.
 
+    Only retries for transient/recoverable errors (SSL, connection drops, timeouts)
+    unless check_retryable=False. Permanent errors (syntax, type, constraint) fail
+    immediately without retry.
+
     Supports both @check_connection and @check_connection() syntax.
+
+    :param max_retries: Maximum number of retry attempts (default 3).
+    :param retry_delay: Initial delay between retries in seconds (default 1).
+    :param retry_errors: Exception types to catch (default DbConnectionError).
+    :param retry_backoff: Multiplier for delay between retries (default 1.5).
+    :param sleep_func: Function to use for sleeping (default time.sleep).
+    :param check_retryable: If True, only retry for transient errors (default True).
     """
     def decorator(f: Callable[..., T]) -> Callable[..., T]:
         @wraps(f)
@@ -111,11 +124,15 @@ def check_connection(func: Callable[..., T] | None = None, *, max_retries: int =
                 try:
                     return f(*args, **kwargs)
                 except error_types as err:
+                    if check_retryable and not is_retryable_error(err):
+                        logger.debug(f'Non-retryable error, failing immediately: {err}')
+                        raise
+
                     tries += 1
                     if tries >= max_retries:
                         logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
                         raise
-                    logger.warning(f'Connection error (attempt {tries}/{max_retries}): {err}')
+                    logger.warning(f'Retryable error (attempt {tries}/{max_retries}): {err}')
                     sleep_func(delay)
                     delay *= retry_backoff
 

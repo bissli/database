@@ -1,9 +1,60 @@
 """
 Database-specific exception classes.
 """
+import re
 import sqlite3
 
 import psycopg
+
+RETRYABLE_PATTERNS = [
+    # SSL/TLS errors
+    r'ssl',
+    r'tls',
+    # Connection drops
+    r'connection.*(closed|reset|refused|lost|terminated|broken)',
+    r'server closed',
+    r'eof detected',
+    r'broken pipe',
+    r'connection reset',
+    # Timeouts
+    r'timeout',
+    r'timed out',
+    # Network issues
+    r'could not connect',
+    r'no route to host',
+    r'network.*(unreachable|error)',
+    r'host.*(unreachable|down)',
+    # Database unavailable
+    r'database.*unavailable',
+    r'too many connections',
+    r'connection pool',
+]
+
+_RETRYABLE_REGEX = re.compile('|'.join(RETRYABLE_PATTERNS), re.IGNORECASE)
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    """Check if an exception represents a transient error worth retrying.
+
+    Returns True for errors that are likely transient and may succeed on retry:
+    - SSL/TLS errors
+    - Connection drops/resets
+    - Timeouts
+    - Network issues
+    - Database temporarily unavailable
+
+    Returns False for errors that will definitely fail again:
+    - Syntax errors
+    - Type mismatches
+    - Constraint violations
+    - Permission errors
+    - Programming errors
+
+    :param exc: The exception to check.
+    :returns: True if the error is likely transient and worth retrying.
+    """
+    error_msg = str(exc).lower()
+    return bool(_RETRYABLE_REGEX.search(error_msg))
 
 
 class DatabaseError(Exception):
