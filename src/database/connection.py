@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable
 from dataclasses import fields
 from functools import wraps
-from typing import Any, Self, TypeVar
+from typing import Any, Self, TextIO, TypeVar
 
 import pandas as pd
 import sqlalchemy as sa
@@ -688,6 +688,13 @@ class ConnectionWrapper:
             self.reset_table_sequence(table)
 
         return total_affected
+
+    def copy_from(self, table: str, file: TextIO,
+                  columns: list[str] | None = None) -> int:
+        """Bulk load data from a file-like object using COPY.
+        """
+        strategy = get_db_strategy(self)
+        return strategy.copy_from(self, table, file, columns)
 
 
 def configure_connection(sa_connection: sa.engine.Connection) -> None:

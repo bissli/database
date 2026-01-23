@@ -12,7 +12,7 @@ It handles PostgreSQL's unique features such as:
 import logging
 import re
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from database.row import DictRowFactory
 from database.sql import make_placeholders
@@ -150,6 +150,27 @@ from
         self._select_raw(conn, sql)
 
         logger.debug(f'Reset sequence for {table=} using {identity=}')
+
+    def copy_from(self, cn: 'ConnectionWrapper', table: str,
+                  file: TextIO, columns: list[str] | None = None) -> int:
+        """Bulk load using PostgreSQL COPY.
+        """
+        quoted_table = self.quote_identifier(table)
+
+        if columns:
+            quoted_cols = ','.join(self.quote_identifier(c) for c in columns)
+            sql = f"COPY {quoted_table} ({quoted_cols}) FROM STDIN WITH (FORMAT csv, NULL '')"
+        else:
+            sql = f"COPY {quoted_table} FROM STDIN WITH (FORMAT csv, NULL '')"
+
+        cursor = cn.dbapi_connection.cursor()
+        with cursor.copy(sql) as copy:
+            while data := file.read(8192):
+                copy.write(data)
+
+        rowcount = cursor.rowcount
+        cursor.close()
+        return rowcount
 
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:

@@ -10,7 +10,7 @@ but clients can work with any database through this consistent interface.
 """
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
 from database.sql import quote_identifier as sql_quote_identifier
@@ -124,6 +124,12 @@ class DatabaseStrategy(ABC):
             cn: Database connection object
             table: Name of the table with the sequence
             identity: Name of the identity column, by default None
+        """
+
+    @abstractmethod
+    def copy_from(self, cn: 'ConnectionWrapper', table: str,
+                  file: TextIO, columns: list[str] | None = None) -> int:
+        """Bulk load data from a file-like object using COPY.
         """
 
     @abstractmethod

@@ -12,7 +12,7 @@ It handles SQLite's unique features and limitations such as:
 import json
 import logging
 import sqlite3
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from database.sql import make_placeholders, quote_identifier
 from database.sql import standardize_placeholders
@@ -107,6 +107,13 @@ class SQLiteStrategy(DatabaseStrategy):
         """
         if identity is None:
             identity = self.find_sequence_column(cn, table)
+
+    def copy_from(self, cn: 'ConnectionWrapper', table: str,
+                  file: TextIO, columns: list[str] | None = None) -> int:
+        """SQLite doesn't support COPY.
+        """
+        logger.warning('COPY operation not supported in SQLite, use insert_rows instead')
+        return 0
 
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:

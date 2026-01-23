@@ -1,3 +1,5 @@
+import io
+
 import database as db
 from database.strategy import PostgresStrategy
 
@@ -90,6 +92,64 @@ def test_strategy_get_sequence_columns(psql_docker, pg_conn):
     # Verify sequence columns
     assert 'id' in seq_columns
     assert 'non_serial_id' not in seq_columns
+
+
+def test_copy_from(psql_docker, pg_conn):
+    """Test bulk loading data using PostgreSQL COPY."""
+    db.execute(pg_conn, """
+        CREATE TEMPORARY TABLE test_copy (
+            name TEXT,
+            value INTEGER
+        )
+    """)
+
+    csv_data = io.StringIO('David,40\nEva,50\nFrank,60\n')
+    rowcount = db.copy_from(pg_conn, 'test_copy', csv_data, ['name', 'value'])
+
+    assert rowcount == 3
+
+    rows = db.select(pg_conn, 'SELECT name, value FROM test_copy ORDER BY value')
+    assert len(rows) == 3
+    assert rows[0]['name'] == 'David'
+    assert rows[0]['value'] == 40
+    assert rows[2]['name'] == 'Frank'
+    assert rows[2]['value'] == 60
+
+
+def test_copy_from_without_columns(psql_docker, pg_conn):
+    """Test COPY without specifying columns uses table column order."""
+    db.execute(pg_conn, """
+        CREATE TEMPORARY TABLE test_copy_nocol (
+            col1 TEXT,
+            col2 INTEGER
+        )
+    """)
+
+    csv_data = io.StringIO('Alice,100\nBob,200\n')
+    rowcount = db.copy_from(pg_conn, 'test_copy_nocol', csv_data)
+
+    assert rowcount == 2
+
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_copy_nocol')
+    assert count == 2
+
+
+def test_copy_from_empty_file(psql_docker, pg_conn):
+    """Test COPY with empty file inserts no rows."""
+    db.execute(pg_conn, """
+        CREATE TEMPORARY TABLE test_copy_empty (
+            name TEXT,
+            value INTEGER
+        )
+    """)
+
+    csv_data = io.StringIO('')
+    rowcount = db.copy_from(pg_conn, 'test_copy_empty', csv_data, ['name', 'value'])
+
+    assert rowcount == 0
+
+    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_copy_empty')
+    assert count == 0
 
 
 if __name__ == '__main__':

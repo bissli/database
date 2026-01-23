@@ -9,14 +9,15 @@ The module functions are facades for backwards compatibility.
 """
 __version__ = '0.1.4'
 
-from typing import Any
+from typing import Any, TextIO
 
 from database.connection import ConnectionWrapper, connect
-from database.exceptions import ConnectionFailure, DatabaseError, ValidationError
+from database.exceptions import ConnectionFailure, DatabaseError
 from database.exceptions import DbConnectionError, IntegrityError
 from database.exceptions import IntegrityViolationError, OperationalError
 from database.exceptions import ProgrammingError, QueryError
 from database.exceptions import TypeConversionError, UniqueViolation
+from database.exceptions import ValidationError
 from database.options import DatabaseOptions
 from database.transaction import Transaction as transaction
 from database.types import Column, get_adapter_registry
@@ -156,6 +157,13 @@ def cluster_table(cn: ConnectionWrapper, table: str,
     cn.cluster_table(table, index)
 
 
+def copy_from(cn: ConnectionWrapper, table: str, file: TextIO,
+              columns: list[str] | None = None) -> int:
+    """Bulk load data from a file-like object using COPY.
+    """
+    return cn.copy_from(table, file, columns)
+
+
 __all__ = [
     'connect',
     'ConnectionWrapper',
@@ -180,6 +188,7 @@ __all__ = [
     'vacuum_table',
     'reindex_table',
     'cluster_table',
+    'copy_from',
     'Column',
     'IntegrityError',
     'ProgrammingError',
