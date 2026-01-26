@@ -67,6 +67,8 @@ class PostgresStrategy(DatabaseStrategy):
         ]
         if options.timeout:
             query_parts.append(f'connect_timeout={options.timeout}')
+        if options.appname:
+            query_parts.append(f'application_name={options.appname}')
 
         url = (f'postgresql+psycopg://{options.username}:{options.password}'
                f'@{options.hostname}:{options.port}/{options.database}')
