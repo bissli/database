@@ -172,7 +172,7 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
             engine_kwargs['pool_size'] = pool_size
             engine_kwargs['pool_recycle'] = pool_recycle
             engine_kwargs['pool_timeout'] = pool_timeout
-            engine_kwargs['max_overflow'] = 10
+            engine_kwargs['max_overflow'] = 0
             engine_kwargs['pool_pre_ping'] = True
             engine_kwargs['pool_reset_on_return'] = 'rollback'
 
@@ -279,15 +279,20 @@ class ConnectionWrapper:
         self.sa_connection.commit()
 
     def close(self) -> None:
-        """Close the SQLAlchemy connection, committing first if needed
+        """Close the SQLAlchemy connection, committing first if needed.
         """
         if not getattr(self.sa_connection, 'closed', False):
-            if not self.in_transaction:
-                ensure_commit(self.sa_connection)
-
-            if self.sa_connection and not self.sa_connection.closed:
-                self.sa_connection.close()
-
+            try:
+                if not self.in_transaction:
+                    ensure_commit(self.sa_connection)
+            except Exception as e:
+                logger.warning(f'Error during pre-close commit: {e}')
+            finally:
+                try:
+                    if self.sa_connection and not self.sa_connection.closed:
+                        self.sa_connection.close()
+                except Exception as e:
+                    logger.warning(f'Error closing SA connection: {e}')
             logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s (avg: {self.time/max(1,self.calls):.3f}s per query)')
 
     @check_connection
