@@ -13,6 +13,7 @@ import logging
 import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
+from urllib.parse import quote, quote_plus
 
 from database.cache import cacheable_strategy
 from database.row import DictRowFactory
@@ -71,7 +72,16 @@ class PostgresStrategy(DatabaseStrategy):
         return 'postgresql'
 
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
-        """Build the SQLAlchemy connection URL for PostgreSQL."""
+        """Build the SQLAlchemy connection URL for PostgreSQL.
+
+        Username, password, database, and appname are URL-encoded so
+        that special characters can't corrupt URL parsing or inject
+        libpq parameters via the query string.
+        """
+        user = quote(options.username or '', safe='')
+        pwd = quote(options.password or '', safe='')
+        db = quote(options.database or '', safe='')
+
         query_parts = [
             'keepalives=1',
             'keepalives_idle=30',
@@ -81,10 +91,10 @@ class PostgresStrategy(DatabaseStrategy):
         if options.timeout:
             query_parts.append(f'connect_timeout={options.timeout}')
         if options.appname:
-            query_parts.append(f'application_name={options.appname}')
+            query_parts.append(f'application_name={quote_plus(options.appname)}')
 
-        url = (f'postgresql+psycopg://{options.username}:{options.password}'
-               f'@{options.hostname}:{options.port}/{options.database}')
+        url = (f'postgresql+psycopg://{user}:{pwd}'
+               f'@{options.hostname}:{options.port}/{db}')
 
         url += '?' + '&'.join(query_parts)
 

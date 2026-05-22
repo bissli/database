@@ -1,5 +1,5 @@
 """
-Database access module with support for PostgreSQL, SQLite, and SQL Server.
+Database access module with support for PostgreSQL and SQLite.
 
 All query/data operations can be called either as:
 - Module functions: db.select(cn, sql, *args)

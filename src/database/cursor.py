@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 def dumpsql(is_many: bool = False):
     """Decorator for logging SQL queries and parameters.
 
+    Uses lazy %-format on the logger so parameter __repr__ is only
+    invoked when a handler actually emits the record (i.e. when DEBUG
+    or ERROR are enabled). This matters on the hot path — every
+    execute/executemany call passes through here.
+
     Args:
         is_many: If True, logs row count instead of args (for executemany)
     """
@@ -32,27 +37,29 @@ def dumpsql(is_many: bool = False):
 
         @wraps(func)
         def wrapper(self, operation: str, *args: Any, **kwargs: Any):
-            start = time.time()
+            start = time.perf_counter()
             if is_many:
                 row_count = len(args[0]) if args and args[0] else 0
-                logger.debug(f'SQL:\n{operation}\nparams: {row_count} rows')
+                logger.debug('SQL:\n%s\nparams: %d rows', operation, row_count)
             else:
-                logger.debug(f'SQL:\n{operation}\nargs: {args}')
+                logger.debug('SQL:\n%s\nargs: %s', operation, args)
             try:
                 result = func(self, operation, *args, **kwargs)
                 if hasattr(self.dbapi_cursor, 'statusmessage'):
-                    logger.debug(f'{label} result: {self.dbapi_cursor.statusmessage}')
+                    logger.debug('%s result: %s',
+                                 label, self.dbapi_cursor.statusmessage)
                 return result
             except Exception:
                 if is_many:
-                    logger.error(f'Error with executemany:\nSQL:\n{operation}')
+                    logger.error('Error with executemany:\nSQL:\n%s', operation)
                 else:
-                    logger.error(f'Error with query:\nSQL:\n{operation}\nargs: {args}')
+                    logger.error('Error with query:\nSQL:\n%s\nargs: %s',
+                                 operation, args)
                 raise
             finally:
-                elapsed = time.time() - start
+                elapsed = time.perf_counter() - start
                 self.connwrapper._addcall(elapsed)
-                logger.debug(f'{label} time: {elapsed:.4f}s')
+                logger.debug('%s time: %.4fs', label, elapsed)
         return wrapper
     return decorator
 
