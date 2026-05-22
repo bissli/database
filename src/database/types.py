@@ -158,9 +158,32 @@ class TypeConverter:
 
     @staticmethod
     def convert_value(value: Any) -> Any:
-        """Convert a single value to a database-compatible format."""
+        """Convert a single value to a database-compatible format.
+
+        Hot path: most parameter values are plain Python builtins
+        (int, float, str, bool, bytes, datetime). Short-circuit those
+        with exact type() checks before falling into the
+        numpy/pandas/pyarrow isinstance chain, which is significantly
+        more expensive on every call. Subclasses (numpy/pandas types
+        that inherit from Python builtins) fall through to the slow
+        path so their special handling still runs.
+        """
         if value is None:
             return None
+
+        value_type = type(value)
+        if value_type is int or value_type is bool:
+            return value
+        if value_type is float:
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return value
+        if value_type is str:
+            if _check_special_string(value) is None:
+                return None
+            return value
+        if value_type is bytes or value_type is datetime.date or value_type is datetime.datetime:
+            return value
 
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
