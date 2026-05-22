@@ -209,8 +209,12 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
     # Rule 3: Nested list/tuple handling
     if len(args) == 1 and _isseq(args[0]):
         inner = args[0]
-        # [(a,b,c)] -> (a,b,c) if count matches
-        if len(inner) == len(phs):
+        # [(a,b,c)] -> (a,b,c) when there are multiple placeholders to fill.
+        # With a single placeholder, never unpack: the inner sequence is the
+        # value (e.g. ANY(%s) or = %s with an array). Unpacking a one-element
+        # list under a single placeholder silently turns array params into
+        # scalar binds and breaks `ANY(%s)`.
+        if len(inner) == len(phs) and len(phs) > 1:
             return tuple(inner)
         # [[1,2,3]] -> ((1,2,3),) for single nested IN
         if len(inner) == 1 and _isseq(inner[0]):
