@@ -175,6 +175,55 @@ class TestPrepareQueryInClause:
         assert result_args == ('2025-01-01', 'Tenor')
 
 
+class TestPrepareQueryAnyAll:
+    """Test ANY(%s) / ALL(%s) array parameter binding.
+
+    These tests guard against a regression where a single-element list arg
+    bound to a single placeholder gets silently unpacked into a scalar
+    tuple, breaking PostgreSQL's `=  ANY(%s)` semantics which requires the
+    parameter to be an array.
+    """
+
+    def test_any_single_element_list_stays_wrapped(self):
+        """ANY(%s) with a one-element list keeps the list as a single param.
+        """
+        sql = 'select count(*) from t where id = ANY(%s) and y is null'
+        result_sql, result_args = prepare_query(sql, ([1979],), 'postgresql')
+
+        assert result_sql.endswith('and y is null')
+        assert 'ANY(%s)' in result_sql
+        assert result_args == ([1979],), (
+            f'Expected the list to stay wrapped as a single array param, '
+            f'got {result_args!r}'
+            )
+
+    def test_any_multi_element_list_stays_wrapped(self):
+        """ANY(%s) with a multi-element list binds the whole list as array.
+        """
+        sql = 'select * from t where id = ANY(%s)'
+        result_sql, result_args = prepare_query(sql, ([1, 2, 3],), 'postgresql')
+
+        assert 'ANY(%s)' in result_sql
+        assert result_args == ([1, 2, 3],)
+
+    def test_any_with_extra_param_preserves_list(self):
+        """ANY combined with another placeholder preserves the array.
+        """
+        sql = 'select * from t where id = ANY(%s) and name = %s'
+        result_sql, result_args = prepare_query(sql, ([1, 2], 'alice'), 'postgresql')
+
+        assert 'ANY(%s)' in result_sql
+        assert result_args == ([1, 2], 'alice')
+
+    def test_all_single_element_list_stays_wrapped(self):
+        """ALL(%s) follows the same array-binding rule as ANY(%s).
+        """
+        sql = 'select * from t where price < ALL(%s)'
+        _, result_args = prepare_query(sql, ([100],), 'postgresql')
+
+        assert result_args == ([100],)
+
+
 class TestPrepareQueryNamedParams:
     """Test named parameter handling."""
 

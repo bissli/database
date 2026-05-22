@@ -582,5 +582,41 @@ def test_no_placeholders_with_parameters(psql_docker, pg_conn):
     assert result[0]['value'] == 'static_value'
 
 
+def test_any_with_list_parameter(psql_docker, pg_conn):
+    """Verify ANY(%s) binds a list as a PostgreSQL array (not unpacked to scalar).
+
+    Regression guard for a bug where a single-element list arg under a single
+    placeholder was silently flattened to a scalar tuple, causing
+    `op ANY/ALL (array) requires array on right side` from psycopg.
+    """
+    db.execute(pg_conn, """
+    CREATE TEMPORARY TABLE test_any (
+        id INTEGER PRIMARY KEY,
+        name TEXT
+    )
+    """)
+    for i, name in enumerate(['Alpha', 'Beta', 'Gamma'], start=1):
+        db.insert(pg_conn, 'INSERT INTO test_any (id, name) VALUES (%s, %s)', i, name)
+
+    # Single-element list - the original failing case
+    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [2])
+    assert n == 1
+
+    # Multi-element list
+    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [1, 3])
+    assert n == 2
+
+    # Empty list - should match nothing
+    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [])
+    assert n == 0
+
+    # Combined with another placeholder
+    rows = db.select(pg_conn,
+                     'SELECT name FROM test_any WHERE id = ANY(%s) AND name LIKE %s',
+                     [1, 2, 3], 'A%')
+    assert len(rows) == 1
+    assert rows[0]['name'] == 'Alpha'
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])
