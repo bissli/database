@@ -351,6 +351,137 @@ class TestPrepareQueryRegexp:
             assert expected_escaped in result_sql
 
 
+class TestPrepareQueryDollarQuotes:
+    """Dollar-quoted strings ($$...$$, $tag$...$tag$) must be treated as
+    protected context — placeholders inside the body are not real.
+    """
+
+    def test_anonymous_dollar_quoted_body_protects_percent_s(self):
+        """$$ ... %s ... $$ has no real placeholder; one outside binds one arg.
+        """
+        sql = "SELECT $$has %s inside$$, %s FROM t"
+        result_sql, result_args = prepare_query(sql, (42,), 'postgresql')
+        assert '$$has %s inside$$' in result_sql
+        assert result_args == (42,)
+
+    def test_anonymous_dollar_quoted_body_with_question_mark_postgresql(self):
+        """? inside $$...$$ on postgres is literal (dollar-quoting is PG-specific).
+        """
+        sql = "SELECT $$contains ? char$$ FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (7,), 'postgresql')
+        assert '$$contains ? char$$' in result_sql
+        assert result_args == (7,)
+
+    def test_tagged_dollar_quoted_body_protected(self):
+        """$tag$ ... %s ... $tag$ body is literal.
+        """
+        sql = "SELECT $body$any %s text$body$ FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (1,), 'postgresql')
+        assert '$body$any %s text$body$' in result_sql
+        assert result_args == (1,)
+
+    def test_nested_dollar_tags_match_by_tag(self):
+        """$outer$ ... $inner$ ... $outer$ — the outer closes only at matching tag.
+        """
+        sql = "SELECT $outer$ %s and $inner$ %s $inner$ end $outer$ FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (99,), 'postgresql')
+        assert '$outer$' in result_sql
+        assert '$inner$' in result_sql
+        assert result_args == (99,)
+
+
+class TestPrepareQueryComments:
+    """SQL comments (-- line, /* */ block) must be protected from placeholder
+    extraction.
+    """
+
+    def test_line_comment_protects_percent_s(self):
+        """-- comment %s is literal; only the post-newline %s binds.
+        """
+        sql = "SELECT * FROM t -- comment %s\nWHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (5,), 'postgresql')
+        assert '-- comment %s' in result_sql
+        assert result_args == (5,)
+
+    def test_block_comment_protects_percent_s(self):
+        """/* %s */ is literal; only outside placeholder binds.
+        """
+        sql = "SELECT /* has %s */ * FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (10,), 'postgresql')
+        assert '/* has %s */' in result_sql
+        assert result_args == (10,)
+
+    def test_multiline_block_comment_protected(self):
+        """Multi-line /* ... %s ... */ block.
+        """
+        sql = "SELECT /* line1\n%s line2 */ * FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (2,), 'postgresql')
+        assert '/* line1\n%s line2 */' in result_sql
+        assert result_args == (2,)
+
+    def test_comment_marker_inside_string_literal_is_not_a_comment(self):
+        """String protection wins over comment markers.
+
+        'foo -- bar baz' is a literal string; the -- inside must NOT
+        start a comment that would swallow the closing quote and the
+        rest of the line. One real placeholder outside the string binds.
+        """
+        sql = "SELECT 'foo -- bar baz' AS lit FROM t WHERE id = %s"
+        result_sql, result_args = prepare_query(sql, (1,), 'postgresql')
+        assert "'foo -- bar baz'" in result_sql
+        assert "AS lit FROM t" in result_sql
+        assert result_args == (1,)
+
+    def test_question_mark_in_line_comment_protected_sqlite(self):
+        """-- ? comment is literal in SQLite.
+        """
+        sql = "SELECT * FROM t -- comment ?\nWHERE id = ?"
+        result_sql, result_args = prepare_query(sql, (1,), 'sqlite')
+        assert '-- comment ?' in result_sql
+        assert result_args == (1,)
+
+
+class TestPrepareQueryJsonbOperator:
+    """PostgreSQL JSONB ? operator must NOT be treated as a placeholder.
+
+    Rule: in dialect='postgresql', '?' followed by a quoted literal or by
+    one of the JSONB multi-char ops ('|', '&') is a JSONB operator, not a
+    placeholder. SQLite '?' remains a placeholder.
+    """
+
+    def test_jsonb_question_mark_with_quoted_literal_not_placeholder(self):
+        """WHERE data ? 'key' AND id = %s binds only one arg.
+        """
+        sql = "SELECT * FROM t WHERE data ? 'key' AND id = %s"
+        result_sql, result_args = prepare_query(sql, (1,), 'postgresql')
+        assert " ? 'key'" in result_sql
+        assert result_args == (1,)
+
+    def test_jsonb_question_mark_pipe_not_placeholder(self):
+        """data ?| array['a','b'] preserved.
+        """
+        sql = "SELECT * FROM t WHERE data ?| array['a','b'] AND id = %s"
+        result_sql, result_args = prepare_query(sql, (2,), 'postgresql')
+        assert '?|' in result_sql
+        assert result_args == (2,)
+
+    def test_jsonb_question_mark_amp_not_placeholder(self):
+        """data ?& array['a','b'] preserved.
+        """
+        sql = "SELECT * FROM t WHERE data ?& array['a','b'] AND id = %s"
+        result_sql, result_args = prepare_query(sql, (3,), 'postgresql')
+        assert '?&' in result_sql
+        assert result_args == (3,)
+
+    def test_sqlite_question_mark_remains_placeholder(self):
+        """The PG-only rule must not affect SQLite.
+        """
+        sql = "SELECT * FROM t WHERE id = ? AND name = ?"
+        result_sql, result_args = prepare_query(sql, (1, 'foo'), 'sqlite')
+        assert result_sql.count('?') == 2
+        assert result_args == (1, 'foo')
+
+
 class TestQuoteIdentifier:
     """Test database identifier quoting."""
 
@@ -373,6 +504,20 @@ class TestQuoteIdentifier:
         """Test unknown dialect raises ValueError."""
         with pytest.raises(ValueError, match='Unknown dialect: mysql'):
             quote_identifier('table', 'mysql')
+
+    @pytest.mark.parametrize(('identifier', 'dialect', 'expected'), [
+        ('public.foo', 'postgresql', '"public"."foo"'),
+        ('myschema.t', 'postgresql', '"myschema"."t"'),
+        ('public.order', 'postgresql', '"public"."order"'),
+        ('public.foo', 'sqlite', '"public"."foo"'),
+    ], ids=['pg_public', 'pg_myschema', 'pg_reserved_word', 'sqlite_dotted'])
+    def test_quote_identifier_dotted_splits_segments(self, identifier, dialect, expected):
+        """Dotted identifiers split on unquoted dots and quote each part."""
+        assert quote_identifier(identifier, dialect) == expected
+
+    def test_quote_identifier_unqualified_unchanged(self):
+        """Unqualified identifier stays quoted as a single segment."""
+        assert quote_identifier('foo', 'postgresql') == '"foo"'
 
 
 class TestHasPlaceholders:

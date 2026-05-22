@@ -24,6 +24,7 @@ _PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')  # Placeholders (group 1 = named param
 _STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")  # String literals
 _REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
 _UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by % or s or (
+_DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening tag
 
 # Placeholder info: position, end, name (for named params), context, already in parens
 PH = namedtuple('PH', 'pos end name ctx in_parens')
@@ -45,7 +46,7 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
         return sql, converted
 
     # Find placeholders with context
-    phs = _find_contexts(sql)
+    phs = _find_contexts(sql, dialect)
 
     # Normalize args to canonical form
     args = _normalize(args, phs)
@@ -59,12 +60,60 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
 def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     """Quote a table or column name safely.
 
-    Note: The dialect parameter is validated but the quoting is the same
-    for all supported dialects (standard SQL double-quote escaping).
+    Dotted identifiers (e.g. 'public.foo') are split on the dot and each
+    segment is quoted independently — so 'public.foo' becomes
+    '"public"."foo"', not '"public.foo"'. A dot inside an already-quoted
+    segment ('"weird.name"') is preserved as part of that segment.
+
+    Standard SQL double-quote escaping is applied identically for all
+    supported dialects.
     """
     if dialect not in _SUPPORTED_DIALECTS:
         raise ValueError(f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}')
-    return f'"{identifier.replace(chr(34), chr(34)+chr(34))}"'
+    parts = _split_qualified_identifier(identifier)
+    return '.'.join(f'"{p.replace(chr(34), chr(34) + chr(34))}"' for p in parts)
+
+
+def _split_qualified_identifier(identifier: str) -> list[str]:
+    """Split a possibly-qualified identifier on unquoted dots.
+
+    A segment is "quoted" only when '"' appears at the start of the
+    segment; '"' characters in the middle of an otherwise-unquoted
+    segment are treated as literal data (and the caller will double-quote
+    them). Inside a quoted segment, '""' is an escape for a literal '"'.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    i = 0
+    n = len(identifier)
+    while i < n:
+        c = identifier[i]
+        if in_quote:
+            if c == '"':
+                if i + 1 < n and identifier[i + 1] == '"':
+                    buf.append('"')
+                    i += 2
+                    continue
+                in_quote = False
+                i += 1
+                continue
+            buf.append(c)
+            i += 1
+            continue
+        if c == '"' and not buf:
+            in_quote = True
+            i += 1
+            continue
+        if c == '.':
+            parts.append(''.join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    parts.append(''.join(buf))
+    return parts
 
 
 def make_placeholders(count: int, dialect: str = 'postgresql') -> str:
@@ -134,35 +183,31 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
     if dialect == 'postgresql' and '?' not in sql:
         return sql
 
-    # Protect regexp_replace and string literals
-    protected = set()
-    for m in _REGEXP_RE.finditer(sql):
-        protected.update(range(m.start(), m.end()))
-    for m in _STR_RE.finditer(sql):
-        protected.update(range(m.start(), m.end()))
-
+    protected = _protected_ranges(sql, dialect)
     target = '?' if dialect == 'sqlite' else '%s'
 
     def replace(m):
         if m.start() in protected:
             return m.group(0)  # Preserve protected content
+        if (dialect == 'postgresql' and m.group(0) == '?'
+                and _is_jsonb_op(sql, m.start())):
+            return m.group(0)
         return m.group(0) if m.group(1) else target  # Keep named params
 
     return _PH_RE.sub(replace, sql)
 
 
-def _find_contexts(sql: str) -> list[PH]:
+def _find_contexts(sql: str, dialect: str = 'postgresql') -> list[PH]:
     """Find placeholders with their contexts in one pass."""
-    # Build protected ranges (strings + regexp calls)
-    protected = set()
-    for m in _STR_RE.finditer(sql):
-        protected.update(range(m.start(), m.end()))
-    for m in _REGEXP_RE.finditer(sql):
-        protected.update(range(m.start(), m.end()))
+    protected = _protected_ranges(sql, dialect)
 
     phs = []
     for m in _PH_RE.finditer(sql):
         if m.start() in protected:
+            continue
+
+        if (dialect == 'postgresql' and m.group(0) == '?'
+                and _is_jsonb_op(sql, m.start())):
             continue
 
         # Determine context from SQL prefix
@@ -172,6 +217,82 @@ def _find_contexts(sql: str) -> list[PH]:
         phs.append(PH(m.start(), m.end(), m.group(1), ctx, in_parens))
 
     return phs
+
+
+def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
+    """Return character positions that are inside protected SQL contexts.
+
+    Protected contexts:
+    - String literals ('...' and "...") — handled in lexical order with
+      precedence over comments and dollar quotes.
+    - Single-line comments (--) and block comments (/* */).
+    - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) — PostgreSQL only.
+    - regexp_replace(...) calls.
+    """
+    protected: set[int] = set()
+    n = len(sql)
+    i = 0
+    while i < n:
+        c = sql[i]
+        if c == "'" or c == '"':
+            j = i + 1
+            while j < n:
+                if sql[j] == c:
+                    if j + 1 < n and sql[j + 1] == c:
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            else:
+                j = n
+            protected.update(range(i, j))
+            i = j
+            continue
+        if c == '-' and i + 1 < n and sql[i + 1] == '-':
+            j = sql.find('\n', i + 2)
+            if j == -1:
+                j = n
+            protected.update(range(i, j))
+            i = j
+            continue
+        if c == '/' and i + 1 < n and sql[i + 1] == '*':
+            j = sql.find('*/', i + 2)
+            j = n if j == -1 else j + 2
+            protected.update(range(i, j))
+            i = j
+            continue
+        if dialect == 'postgresql' and c == '$':
+            m = _DOLLAR_OPEN_RE.match(sql, i)
+            if m:
+                tag = m.group(0)
+                close = sql.find(tag, m.end())
+                j = n if close == -1 else close + len(tag)
+                protected.update(range(i, j))
+                i = j
+                continue
+        i += 1
+    for m in _REGEXP_RE.finditer(sql):
+        if m.start() not in protected:
+            protected.update(range(m.start(), m.end()))
+    return protected
+
+
+def _is_jsonb_op(sql: str, pos: int) -> bool:
+    """Detect PostgreSQL JSONB '?' operator at pos.
+
+    Returns True for the JSONB key-exists family — '?' followed (after
+    optional whitespace) by a quoted literal, or paired into multi-char
+    operators '?|' / '?&'. The caller must already know the dialect is
+    'postgresql'.
+    """
+    n = len(sql)
+    if pos + 1 < n and sql[pos + 1] in '|&':
+        return True
+    j = pos + 1
+    while j < n and sql[j].isspace():
+        j += 1
+    return j < n and sql[j] in "'\""
 
 
 def _parse_ctx(prefix: str) -> tuple[str, bool]:
