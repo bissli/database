@@ -95,6 +95,50 @@ def test_direct_lists_for_multiple_in_clauses(db_conn, dialect):
     assert set(cats) == {'cat1', 'cat2'}
 
 
+def test_named_params_in_clause(db_conn, dialect):
+    """Named-parameter IN-clause expansion must work on both backends.
+
+    Library expands 'IN %(items)s' to '(%(items_0)s, %(items_1)s, ...)'.
+    On postgres that stays pyformat. On sqlite the library must translate
+    each expanded placeholder to ':items_0', ':items_1', ... so sqlite3
+    accepts them.
+    """
+    if dialect == 'postgresql':
+        ddl = _temp_table_ddl(dialect, 'named_in_test',
+                              'id SERIAL PRIMARY KEY, category TEXT, vendor TEXT, '
+                              'description TEXT')
+    else:
+        ddl = _temp_table_ddl(dialect, 'named_in_test',
+                              'id INTEGER PRIMARY KEY, category TEXT, vendor TEXT, '
+                              'description TEXT')
+    db.execute(db_conn, ddl)
+    for cat, vendor, desc in [
+        ('Electronics', 'Apple', 'Smartphone'),
+        ('Electronics', 'Samsung', 'Tablet'),
+        ('Clothing', 'Nike', 'Running shoes'),
+    ]:
+        db.execute(db_conn,
+                   'INSERT INTO named_in_test (category, vendor, description) '
+                   'VALUES (%s, %s, %s)', cat, vendor, desc)
+
+    query = """
+        SELECT DISTINCT category, description
+        FROM named_in_test
+        WHERE category IN %(categories)s
+        AND vendor = %(vendor)s
+    """
+
+    single = db.select(db_conn, query, {'categories': ('Electronics',), 'vendor': 'Apple'})
+    assert len(single) == 1
+
+    multi = db.select(db_conn, query,
+                      {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'})
+    assert len(multi) == 1
+
+    none = db.select(db_conn, query, {'categories': ('Books',), 'vendor': 'Apple'})
+    assert len(none) == 0
+
+
 def test_no_placeholders_with_extra_args(db_conn, dialect):
     """A SQL with zero placeholders must ignore any extra positional args.
 
