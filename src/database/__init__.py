@@ -115,7 +115,6 @@ def upsert_rows(
     reset_sequence: bool = False,
     batch_size: int = 500,
     use_primary_key: bool = False,
-    **kw: Any
 ) -> int:
     """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows.
     """
@@ -127,8 +126,7 @@ def upsert_rows(
         update_cols_ifnull=update_cols_ifnull,
         reset_sequence=reset_sequence,
         batch_size=batch_size,
-        use_primary_key=use_primary_key,
-        **kw)
+        use_primary_key=use_primary_key)
 
 
 def reset_table_sequence(cn: ConnectionWrapper, table: str,

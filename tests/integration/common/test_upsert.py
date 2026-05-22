@@ -135,6 +135,30 @@ class TestUpsertInvalidColumns:
         assert result.value == 100
 
 
+class TestUpsertUnknownKwargRejection:
+    """Unknown kwargs must raise, not silently drop.
+
+    Previously the **kw catch-all swallowed misspelled or stale kwargs
+    (e.g. `update_cols_key`) and the upsert silently fell back to
+    primary-key conflict resolution. That hid real bugs in downstream
+    callers; raising surfaces them.
+    """
+
+    def test_module_level_upsert_rejects_unknown_kwarg(self, db_conn):
+        """db.upsert_rows(...) must raise TypeError for unknown kwargs."""
+        rows = [{'name': 'KwargReject', 'value': 1}]
+        with pytest.raises(TypeError, match='update_cols_key'):
+            db.upsert_rows(db_conn, 'test_table', rows,
+                           update_cols_key=['name'])
+
+    def test_method_level_upsert_rejects_unknown_kwarg(self, db_conn):
+        """cn.upsert_rows(...) must raise TypeError for unknown kwargs."""
+        rows = [{'name': 'KwargReject2', 'value': 1}]
+        with pytest.raises(TypeError, match='update_cols_key'):
+            db_conn.upsert_rows('test_table', rows,
+                                update_cols_key=['name'])
+
+
 class TestUpsertNoPrimaryKey:
     """Tests for tables without primary keys."""
 

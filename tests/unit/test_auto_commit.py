@@ -160,5 +160,6 @@ class TestAutoCommitIntegration:
         ensure_commit(conn)
         conn.commit.assert_called_once()
 
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])
