@@ -38,7 +38,7 @@ from database.types import RowAdapter
 from database.utils import ensure_commit, get_dialect_name
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from libb import attrdict, is_null, load_options, peel
 
@@ -88,6 +88,7 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
         options.username, options.database, options.appname,
         use_pool, pool_size, pool_recycle, pool_timeout,
     ))
+
 
 # Simple cache for schema info (cleared on bypass_cache=True)
 _schema_cache: dict[tuple, list[str]] = {}
@@ -180,11 +181,13 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
                            **kwargs: Any) -> Engine:
     """Get or create a SQLAlchemy engine for the given options.
     """
+    is_memory_sqlite = (options.drivername == 'sqlite'
+                        and options.database == ':memory:')
     key = _build_engine_registry_key(options, use_pool, pool_size,
                                      pool_recycle, pool_timeout)
 
     with _engine_registry_lock:
-        if key in _engine_registry:
+        if not is_memory_sqlite and key in _engine_registry:
             logger.debug(f'Using existing engine for {options.drivername}')
             return _engine_registry[key]
 
@@ -197,21 +200,26 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
         strategy_kwargs = strategy.get_engine_kwargs(options)
         engine_kwargs.update(strategy_kwargs)
 
-        if not use_pool:
+        if is_memory_sqlite:
+            engine_kwargs['poolclass'] = StaticPool
+            connect_args = engine_kwargs.setdefault('connect_args', {})
+            connect_args['check_same_thread'] = False
+        elif not use_pool:
             engine_kwargs['poolclass'] = NullPool
         else:
             engine_kwargs['pool_size'] = pool_size
             engine_kwargs['pool_recycle'] = pool_recycle
             engine_kwargs['pool_timeout'] = pool_timeout
-            engine_kwargs['max_overflow'] = 0
-            engine_kwargs['pool_pre_ping'] = True
-            engine_kwargs['pool_reset_on_return'] = 'rollback'
 
         engine_kwargs.update(kwargs)
 
         engine = engine_factory(url, **engine_kwargs)
 
-        _engine_registry[key] = engine
+        # ':memory:' engines own a private in-memory database via StaticPool;
+        # caching them would leak that database across independent connect()
+        # calls and break test isolation.
+        if not is_memory_sqlite:
+            _engine_registry[key] = engine
         logger.debug(f'Created new engine for {options.drivername}')
 
         return engine

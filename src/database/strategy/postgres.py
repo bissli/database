@@ -102,8 +102,20 @@ class PostgresStrategy(DatabaseStrategy):
         return url
 
     def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
-        """Return SQLAlchemy create_engine kwargs for PostgreSQL."""
-        return {}
+        """Return SQLAlchemy create_engine kwargs for PostgreSQL.
+
+        When pooling is enabled, set max_overflow=0 so the configured
+        pool_size is a hard ceiling, pool_pre_ping=True so stale
+        connections are detected before the caller sees the error, and
+        pool_reset_on_return='rollback' so an aborted transaction does
+        not leak across checkouts.
+        """
+        kwargs: dict[str, Any] = {}
+        if options.use_pool:
+            kwargs['max_overflow'] = 0
+            kwargs['pool_pre_ping'] = True
+            kwargs['pool_reset_on_return'] = 'rollback'
+        return kwargs
 
     def register_type_adapters(self, connection: Any) -> None:
         """Register dialect-specific type adapters for PostgreSQL.
