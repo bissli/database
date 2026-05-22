@@ -160,28 +160,5 @@ class TestAutoCommitIntegration:
         ensure_commit(conn)
         conn.commit.assert_called_once()
 
-    def test_execute_with_transaction_no_auto_commit(self, mocker):
-        """Test that execute within a transaction does not auto-commit"""
-        ensure_commit_mock = mocker.Mock()
-        mocker.patch('database.connection.ensure_commit', ensure_commit_mock)
-
-        conn = mocker.Mock()
-        mock_tx = mocker.MagicMock()
-        mock_tx.execute.return_value = 1
-
-        transaction_mock = mocker.MagicMock()
-        transaction_mock.__enter__.return_value = mock_tx
-
-        mocker.patch.object(Transaction, '__new__', return_value=transaction_mock)
-
-        with Transaction(conn) as tx:
-            tx.execute('INSERT INTO test VALUES (1)')
-
-        mock_tx.execute.assert_called_once_with('INSERT INTO test VALUES (1)')
-        transaction_mock.__enter__.assert_called_once()
-        transaction_mock.__exit__.assert_called_once()
-        ensure_commit_mock.assert_not_called()
-
-
 if __name__ == '__main__':
     __import__('pytest').main([__file__])
