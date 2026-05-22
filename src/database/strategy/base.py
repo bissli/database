@@ -133,10 +133,13 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table
+
+        Concrete implementations must apply @cacheable_strategy
+        ('primary_keys') themselves — Python strips decorators on abstract
+        method overrides, so decorating here would be dead.
 
         Args:
             cn: Database connection object
@@ -148,10 +151,12 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
+
+        Concrete implementations must apply @cacheable_strategy
+        ('table_columns') themselves.
 
         Args:
             cn: Database connection object
@@ -163,10 +168,12 @@ class DatabaseStrategy(ABC):
         """
 
     @abstractmethod
-    @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
         """Get columns with sequences/identities.
+
+        Concrete implementations must apply @cacheable_strategy
+        ('sequence_columns') themselves.
 
         Args:
             cn: Database connection object

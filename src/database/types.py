@@ -232,7 +232,7 @@ def _build_postgres_types() -> dict[int, type]:
 
     type_mappings = [
         (str, ['"char"', 'bpchar', 'character varying', 'character',
-               'json', 'name', 'text', 'uuid', 'varchar']),
+               'name', 'text', 'uuid', 'varchar']),
         (int, ['bigint', 'int2', 'int4', 'int8', 'integer']),
         (float, ['float4', 'float8', 'double precision', 'numeric']),
         (datetime.date, ['date']),
@@ -240,7 +240,8 @@ def _build_postgres_types() -> dict[int, type]:
                              'timestamp with time zone', 'timestamp without time zone',
                              'timestamptz', 'timetz', 'timestamp']),
         (bool, ['bool', 'boolean']),
-        (bytes, ['bytea', 'jsonb']),
+        (bytes, ['bytea']),
+        (dict, ['json', 'jsonb']),
     ]
 
     for py_type, pg_names in type_mappings:

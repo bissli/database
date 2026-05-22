@@ -30,7 +30,8 @@ from database.cursor import process_multiple_result_sets
 from database.exceptions import DbConnectionError, ValidationError
 from database.exceptions import is_retryable_error
 from database.options import DatabaseOptions, use_iterdict_data_loader
-from database.sql import make_placeholders, prepare_query, quote_identifier
+from database.sql import _split_qualified_identifier, make_placeholders
+from database.sql import prepare_query, quote_identifier
 from database.strategy import get_db_strategy, get_strategy
 from database.transaction import Transaction
 from database.types import RowAdapter
@@ -58,6 +59,16 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
+
+
+def _split_schema_for_inspector(table: str) -> tuple[str | None, str]:
+    """Split a possibly schema-qualified table into (schema, name) for use
+    with SQLAlchemy's Inspector, which takes schema separately.
+    """
+    parts = _split_qualified_identifier(table)
+    if len(parts) >= 2:
+        return parts[-2], parts[-1]
+    return None, parts[-1]
 
 # Simple cache for schema info (cleared on bypass_cache=True)
 _schema_cache: dict[tuple, list[str]] = {}
@@ -398,8 +409,9 @@ class ConnectionWrapper:
             if not bypass_cache and cache_key in _schema_cache:
                 return _schema_cache[cache_key]
 
+        schema, name = _split_schema_for_inspector(table)
         inspector = inspect(self.sa_connection)
-        columns = [col['name'] for col in inspector.get_columns(table)]
+        columns = [col['name'] for col in inspector.get_columns(name, schema=schema)]
         with _schema_cache_lock:
             _schema_cache[cache_key] = columns
         return columns
@@ -412,8 +424,9 @@ class ConnectionWrapper:
             if not bypass_cache and cache_key in _schema_cache:
                 return _schema_cache[cache_key]
 
+        schema, name = _split_schema_for_inspector(table)
         inspector = inspect(self.sa_connection)
-        pk_constraint = inspector.get_pk_constraint(table)
+        pk_constraint = inspector.get_pk_constraint(name, schema=schema)
         primary_keys = pk_constraint.get('constrained_columns', [])
         with _schema_cache_lock:
             _schema_cache[cache_key] = primary_keys
