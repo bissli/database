@@ -106,7 +106,25 @@ count = db.select_scalar(cn, 'SELECT COUNT(*) FROM users')
 emails = db.select_column(cn, 'SELECT email FROM users')
 ```
 
+`select_row` and `select_scalar` raise `db.ValidationError` if the query
+returns zero or multiple rows. Use `select_row_or_none` /
+`select_scalar_or_none` when zero rows are valid.
+
 For more query operations, see the [Query Operations documentation](docs/README.md#query-operations).
+
+### Bulk Operations
+
+```python
+# Upsert: INSERT ... ON CONFLICT DO UPDATE
+db.upsert_rows(cn, 'users',
+               ({'email': 'a@example.com', 'name': 'Alice'},
+                {'email': 'b@example.com', 'name': 'Bob'}),
+               update_cols_always=['name'])
+
+# COPY FROM (PostgreSQL only) — fastest bulk load from a CSV file
+with open('users.csv') as f:
+    db.copy_from(cn, 'users', f, columns=['email', 'name'])
+```
 
 ### Transactions
 
