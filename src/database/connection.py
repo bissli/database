@@ -623,6 +623,7 @@ class ConnectionWrapper:
         table: str,
         rows: tuple[dict[str, Any], ...],
         constraint_name: str | None = None,
+        conflict_columns: list[str] | None = None,
         update_cols_always: list[str] | None = None,
         update_cols_ifnull: list[str] | None = None,
         reset_sequence: bool = False,
@@ -630,10 +631,18 @@ class ConnectionWrapper:
         use_primary_key: bool = False,
     ) -> int:
         """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows.
+
+        Conflict-target precedence: constraint_name (postgres only, by index
+        or constraint name) > conflict_columns (explicit column list, must be
+        covered by a unique constraint or unique index) > primary-key
+        auto-detect.
         """
         if not rows:
             logger.debug('Skipping upsert of empty rows')
             return 0
+
+        if constraint_name is not None and conflict_columns is not None:
+            raise ValidationError('constraint_name and conflict_columns are mutually exclusive')
 
         dialect = self.dialect
 
@@ -658,12 +667,15 @@ class ConnectionWrapper:
 
         should_update = update_cols_always is not None or update_cols_ifnull is not None
 
-        key_cols = self.get_table_primary_keys(table)
+        if conflict_columns is not None:
+            key_cols = [case_map.get(c.lower(), c) for c in conflict_columns]
+        else:
+            key_cols = self.get_table_primary_keys(table)
 
         provided_cols_lower = {col.lower() for col in columns}
         key_cols_in_data = key_cols and all(k.lower() in provided_cols_lower for k in key_cols)
 
-        if dialect == 'sqlite' and not use_primary_key and not key_cols_in_data:
+        if dialect == 'sqlite' and not use_primary_key and not key_cols_in_data and conflict_columns is None:
             strategy = get_db_strategy(self)
             if hasattr(strategy, 'get_unique_columns'):
                 unique_constraints = strategy.get_unique_columns(self, table)
