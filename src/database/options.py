@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 import pyarrow as pa
+from database.exceptions import ValidationError
 from database.strategy import get_available_dialects, get_strategy_class
 from database.strategy import is_supported_dialect
 from database.types import Column
@@ -108,8 +109,6 @@ class DatabaseOptions(ConfigOptions):
     port: int = 0
     timeout: int = 0
     appname: str = None
-    cleanup: bool = True
-    check_connection: bool = True
     data_loader: Callable[..., Any] | None = None
     # Connection pooling parameters
     use_pool: bool = False
@@ -120,7 +119,7 @@ class DatabaseOptions(ConfigOptions):
     def __post_init__(self):
         if not is_supported_dialect(self.drivername):
             available = get_available_dialects()
-            raise ValueError(f'drivername must be one of: {available}')
+            raise ValidationError(f'drivername must be one of: {available}')
         self.appname = self.appname or scriptname() or 'python_console'
         strategy_cls = get_strategy_class(self.drivername)
         strategy_cls.validate_options(self)

@@ -13,6 +13,7 @@ import re
 from collections import namedtuple
 from typing import Any
 
+from database.exceptions import DatabaseError
 from database.types import TypeConverter
 
 from libb import issequence
@@ -69,7 +70,9 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     supported dialects.
     """
     if dialect not in _SUPPORTED_DIALECTS:
-        raise ValueError(f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}')
+        raise DatabaseError(
+            f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}'
+        )
     parts = _split_qualified_identifier(identifier)
     return '.'.join(f'"{p.replace(chr(34), chr(34) + chr(34))}"' for p in parts)
 
@@ -234,7 +237,7 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
     i = 0
     while i < n:
         c = sql[i]
-        if c == "'" or c == '"':
+        if c in {"'", '"'}:
             j = i + 1
             while j < n:
                 if sql[j] == c:

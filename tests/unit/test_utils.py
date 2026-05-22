@@ -5,9 +5,9 @@ Unit tests for database utility functions.
 import logging
 
 import pytest
-from database.connection import get_dialect_name
 from database.sql import build_insert_sql, quote_identifier
 from database.sql import standardize_placeholders
+from database.utils import get_dialect_name
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,8 @@ class TestDatabaseUtilities:
 
     def test_quote_identifier_error(self):
         """Test error handling in quote_identifier"""
-        with pytest.raises(ValueError, match='Unknown dialect'):
+        from database.exceptions import DatabaseError
+        with pytest.raises(DatabaseError, match='Unknown dialect'):
             quote_identifier('table_name', 'unknown')
 
     def test_connection_detection_with_postgres(self, mocker):

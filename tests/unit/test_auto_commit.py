@@ -3,9 +3,9 @@ Test auto-commit functionality across different database drivers.
 """
 import logging
 
-from database.connection import ensure_commit
 from database.transaction import Transaction, diagnose_connection
 from database.transaction import disable_auto_commit, enable_auto_commit
+from database.utils import ensure_commit
 
 logger = logging.getLogger(__name__)
 

@@ -52,7 +52,7 @@ class TestExtractIndexDefinition:
         definition = "CREATE UNIQUE INDEX complex_unique_constraint ON test_complex_constraint (id, COALESCE(name, ''), COALESCE(value, -1))"
         expected = "(id, COALESCE(name, ''), COALESCE(value, -1))"
         assert extract_index_definition(definition) == expected
-        
+
     def test_btree_index_with_coalesce(self):
         """Test extraction from a btree index with COALESCE expressions."""
         definition = "CREATE UNIQUE INDEX complex_unique_index ON public.test_complex_index USING btree (id, COALESCE(name, ''), COALESCE(value, -1))"
@@ -61,8 +61,9 @@ class TestExtractIndexDefinition:
 
     def test_malformed_definition(self):
         """Test handling of malformed index definitions."""
+        from database.exceptions import QueryError
         definition = 'NOT A VALID INDEX DEFINITION'
-        with pytest.raises(ValueError):
+        with pytest.raises(QueryError):
             extract_index_definition(definition)
 
 

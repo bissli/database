@@ -1,22 +1,35 @@
 [tool.poetry]
 name = "database"
 version = "0.1.5"
-description = ""
+description = "Unified Python interface for PostgreSQL and SQLite over SQLAlchemy."
 authors = ["bissli <bissli@xyz.com>"]
 readme = "README.md"
+license = "OSL-3.0"
+keywords = ["database", "postgresql", "sqlite", "sqlalchemy", "psycopg"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 packages = [{ include = "database", from = "src" }]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.10"
 
 pandas = "*"
 pyarrow = "*"
-psycopg = { extras = ["binary"], version = "3.2.10" }
+psycopg = { extras = ["binary"], version = "~3.2" }
 sqlalchemy = "^2.0.0"
 
 cachetools = "*"
 python-dateutil = "*"
-libb-util = "*"
+libb-util = ">=0.0.36"
 
 # == test
 asserts = { version = "*", optional = true }

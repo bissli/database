@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from urllib.parse import quote, quote_plus
 
 from database.cache import cacheable_strategy
+from database.exceptions import QueryError
 from database.row import DictRowFactory
 from database.sql import _split_qualified_identifier, make_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
@@ -298,7 +299,7 @@ select skeys(hstore(null::{quoted_table})) as column
         result = self._select_raw(cn, union_query, (constraint_name, table_name, constraint_name, table_name))
 
         if not result:
-            raise ValueError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
+            raise QueryError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
 
         definition = result[0]['definition']
         source = result[0]['source']
@@ -315,7 +316,7 @@ select skeys(hstore(null::{quoted_table})) as column
         else:
             return extract_index_definition(definition)
 
-        raise ValueError(f'Failed to extract regex from definition: {definition}')
+        raise QueryError(f'Failed to extract regex from definition: {definition}')
 
     def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
@@ -427,4 +428,4 @@ def extract_index_definition(definition: str) -> str:
             return f'{column_def} WHERE {where_match.group(1)}'
         return column_def
 
-    raise ValueError(f'Failed to extract column definition from index: {definition}')
+    raise QueryError(f'Failed to extract column definition from index: {definition}')

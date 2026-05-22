@@ -3,6 +3,7 @@ Database strategy factory for database-specific operations.
 """
 from functools import lru_cache
 
+from database.exceptions import DatabaseError
 from database.strategy.base import _STRATEGY_REGISTRY
 from database.strategy.base import DatabaseStrategy as DatabaseStrategy
 from database.strategy.base import register_strategy as register_strategy
@@ -12,10 +13,12 @@ from database.utils import get_dialect_name
 
 
 def _validate_dialect(dialect: str) -> None:
-    """Raise ValueError if dialect is not registered."""
+    """Raise DatabaseError if dialect is not registered."""
     if dialect not in _STRATEGY_REGISTRY:
         available = list(_STRATEGY_REGISTRY.keys())
-        raise ValueError(f'Unsupported dialect: {dialect}. Available: {available}')
+        raise DatabaseError(
+            f'Unsupported dialect: {dialect}. Available: {available}'
+        )
 
 
 @lru_cache(maxsize=8)
