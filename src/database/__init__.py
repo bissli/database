@@ -7,7 +7,7 @@ All query/data operations can be called either as:
 
 The module functions are facades for backwards compatibility.
 """
-__version__ = '0.1.7'
+__version__ = '0.1.8'
 
 from typing import Any, TextIO
 
