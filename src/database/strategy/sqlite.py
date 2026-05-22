@@ -14,6 +14,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any, TextIO
 
+from database.cache import cacheable_strategy
 from database.sql import make_placeholders, quote_identifier
 from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
@@ -115,6 +116,7 @@ class SQLiteStrategy(DatabaseStrategy):
         logger.warning('COPY operation not supported in SQLite, use insert_rows instead')
         return 0
 
+    @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table.
@@ -125,6 +127,7 @@ select l.name as column from pragma_table_info({quoted_table}) as l where l.pk <
 """
         return self._select_column_raw(cn, sql)
 
+    @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
@@ -135,6 +138,7 @@ select name as column from pragma_table_info({quoted_table})
     """
         return self._select_column_raw(cn, sql)
 
+    @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
         """SQLite uses rowid but reports primary keys as sequence columns.

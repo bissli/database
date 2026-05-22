@@ -415,9 +415,67 @@ class TestCachePerformance:
         assert bypass_call_time > second_call_time
 
 
-@pytest.mark.skip(reason='get_detailed_stats removed during cache simplification')
-def test_get_detailed_stats():
-    """Test that detailed cache statistics are properly collected and formatted"""
+class TestConcreteStrategyMethodsAreCached:
+    """Verify that the concrete schema-introspection methods on each
+    strategy are actually cached.
+
+    Background: the @cacheable_strategy decorator was originally applied
+    to the abstract methods in strategy/base.py. Python strips decorators
+    on concrete overrides, so for a long time these methods were NOT
+    cached at all — the existing TestCacheableStrategy tests above use a
+    synthetic CacheableMethodFactory that re-applies the decorator, so
+    they cover the decorator machinery but never exercise the real
+    methods. These tests close that gap by patching the underlying
+    query helper and asserting it fires exactly once across two calls.
+    """
+
+    def test_postgres_get_primary_keys_caches(self, mock_connection, mocker):
+        from database.strategy.postgres import PostgresStrategy
+        strategy = PostgresStrategy()
+        spy = mocker.patch.object(
+            strategy, '_select_column_raw', return_value=['id'])
+        strategy.get_primary_keys(mock_connection, 'foo')
+        strategy.get_primary_keys(mock_connection, 'foo')
+        assert spy.call_count == 1, (
+            'get_primary_keys called the DB twice; '
+            '@cacheable_strategy is not applied to the concrete override'
+        )
+
+    def test_postgres_get_columns_caches(self, mock_connection, mocker):
+        from database.strategy.postgres import PostgresStrategy
+        strategy = PostgresStrategy()
+        spy = mocker.patch.object(
+            strategy, '_select_column_raw', return_value=['a', 'b'])
+        strategy.get_columns(mock_connection, 'foo')
+        strategy.get_columns(mock_connection, 'foo')
+        assert spy.call_count == 1
+
+    def test_postgres_get_sequence_columns_caches(self, mock_connection, mocker):
+        from database.strategy.postgres import PostgresStrategy
+        strategy = PostgresStrategy()
+        spy = mocker.patch.object(
+            strategy, '_select_column_raw', return_value=['id'])
+        strategy.get_sequence_columns(mock_connection, 'foo')
+        strategy.get_sequence_columns(mock_connection, 'foo')
+        assert spy.call_count == 1
+
+    def test_sqlite_get_primary_keys_caches(self, mock_connection, mocker):
+        from database.strategy.sqlite import SQLiteStrategy
+        strategy = SQLiteStrategy()
+        spy = mocker.patch.object(
+            strategy, '_select_column_raw', return_value=['id'])
+        strategy.get_primary_keys(mock_connection, 'foo')
+        strategy.get_primary_keys(mock_connection, 'foo')
+        assert spy.call_count == 1
+
+    def test_sqlite_get_columns_caches(self, mock_connection, mocker):
+        from database.strategy.sqlite import SQLiteStrategy
+        strategy = SQLiteStrategy()
+        spy = mocker.patch.object(
+            strategy, '_select_column_raw', return_value=['a', 'b'])
+        strategy.get_columns(mock_connection, 'foo')
+        strategy.get_columns(mock_connection, 'foo')
+        assert spy.call_count == 1
 
 
 if __name__ == '__main__':

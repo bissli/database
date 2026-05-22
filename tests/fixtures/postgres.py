@@ -130,3 +130,31 @@ def pg_conn(psql_docker):
             logger.warning(f'Error during connection cleanup: {e}')
         finally:
             terminate_postgres_connections(cn)
+
+
+@pytest.fixture
+def pg_schema_conn(pg_conn):
+    """PostgreSQL connection with a non-default schema and a test table.
+
+    Yields the connection; cleans up the schema on exit. Use for tests
+    that exercise schema-qualified ('myschema.t') table-name handling.
+    """
+    db.execute(pg_conn, 'CREATE SCHEMA IF NOT EXISTS myschema')
+    db.execute(pg_conn, 'DROP TABLE IF EXISTS myschema.t')
+    db.execute(pg_conn, """
+        CREATE TABLE myschema.t (
+            id SERIAL NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            value INTEGER NOT NULL,
+            PRIMARY KEY (name)
+        )
+    """)
+    db.execute(pg_conn,
+               "INSERT INTO myschema.t (name, value) VALUES ('alpha', 1), ('beta', 2)")
+    try:
+        yield pg_conn
+    finally:
+        try:
+            db.execute(pg_conn, 'DROP SCHEMA myschema CASCADE')
+        except Exception as e:
+            logger.warning(f'Error dropping myschema: {e}')

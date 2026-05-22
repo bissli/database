@@ -33,12 +33,15 @@ class TestPostgresTypeMapping:
         ('timestamp', datetime.datetime),
         ('timestamptz', datetime.datetime),
         ('bool', bool),
+        ('json', dict),
+        ('jsonb', dict),
+        ('bytea', bytes),
     ], ids=[
         'int4', 'int8', 'int2',
         'float8', 'float4',
         'varchar', 'text',
         'date', 'time', 'timestamp', 'timestamptz',
-        'bool'
+        'bool', 'json', 'jsonb', 'bytea',
     ])
     def test_postgres_type_resolution(self, pg_type, expected_python_type):
         """Test PostgreSQL type code resolves to correct Python type"""

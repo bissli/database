@@ -137,17 +137,10 @@ def test_postgres_type_consistency(psql_docker, pg_conn, value_dict):
         else:
             assert row['bytea_col'] == value_dict['binary_value']
 
-        # Verify JSON data - PostgreSQL JSONB type can automatically deserialize to Python dict
-        if isinstance(row['json_col'], str):
-            assert row['json_col'] is not None
-            assert '"key":"value"' in row['json_col'].replace(' ', '') or '{"key":"value"' in row['json_col'].replace(' ', '')
-        else:
-            # Database driver may have deserialized JSON to a dictionary
-            assert isinstance(row['json_col'], dict)
-            assert 'key' in row['json_col']
-            assert row['json_col']['key'] == 'value'
-            assert 'numbers' in row['json_col']
-            assert isinstance(row['json_col']['numbers'], list)
+        # psycopg3 returns JSONB columns as Python dict.
+        assert isinstance(row['json_col'], dict)
+        assert row['json_col']['key'] == 'value'
+        assert isinstance(row['json_col']['numbers'], list)
 
         # Verify NULL value
         assert row['null_col'] is None

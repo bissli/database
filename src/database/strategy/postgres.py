@@ -14,8 +14,9 @@ import re
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
 
+from database.cache import cacheable_strategy
 from database.row import DictRowFactory
-from database.sql import make_placeholders
+from database.sql import _split_qualified_identifier, make_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
 from database.types import postgres_types
 
@@ -40,6 +41,18 @@ def temporary_autocommit(connection):
 def _escape_string_literal(s: str) -> str:
     """Escape a string for use as a PostgreSQL string literal."""
     return s.replace("'", "''")
+
+
+def _split_schema_table(table: str) -> tuple[str | None, str]:
+    """Return (schema, table_name) for a possibly-qualified identifier.
+
+    Returns (None, name) for an unqualified table, or (schema, name) for
+    a 'schema.table' or '"schema"."table"' form.
+    """
+    parts = _split_qualified_identifier(table)
+    if len(parts) >= 2:
+        return parts[-2], parts[-1]
+    return None, parts[-1]
 
 
 if TYPE_CHECKING:
@@ -174,6 +187,7 @@ from
         cursor.close()
         return rowcount
 
+    @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table.
@@ -186,6 +200,7 @@ where i.indrelid = %s::regclass and i.indisprimary
 """
         return self._select_column_raw(cn, sql, (table,))
 
+    @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
@@ -196,17 +211,27 @@ select skeys(hstore(null::{quoted_table})) as column
     """
         return self._select_column_raw(cn, sql)
 
+    @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
         """Get columns with sequences.
         """
+        schema, name = _split_schema_table(table)
+        if schema is not None:
+            sql = """
+            SELECT column_name as column
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            AND column_default LIKE 'nextval%%'
+            """
+            return self._select_column_raw(cn, sql, (schema, name))
         sql = """
         SELECT column_name as column
         FROM information_schema.columns
         WHERE table_name = %s
         AND column_default LIKE 'nextval%%'
         """
-        return self._select_column_raw(cn, sql, (table,))
+        return self._select_column_raw(cn, sql, (name,))
 
     def configure_connection(self, conn: Any) -> None:
         """Configure connection settings for PostgreSQL.
@@ -286,34 +311,40 @@ select skeys(hstore(null::{quoted_table})) as column
                             bypass_cache: bool = False) -> list[str]:
         """Get columns suitable for general data display.
         """
-        sql = """
+        schema, name = _split_schema_table(table)
+        schema_clause = 't.table_schema = %s and ' if schema is not None else ''
+        sql = f"""
 select
 t.column_name
 from information_schema.columns t
 where
-t.table_name = %s
+{schema_clause}t.table_name = %s
 and t.data_type in ('character', 'character varying', 'boolean',
     'text', 'double precision', 'real', 'integer', 'date',
     'time without time zone', 'timestamp without time zone')
 order by
 t.ordinal_position
 """
-        return self._select_column_raw(cn, sql, (table,))
+        params = (schema, name) if schema is not None else (name,)
+        return self._select_column_raw(cn, sql, params)
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
         """Get all column names for a table ordered by their position.
         """
-        sql = """
+        schema, name = _split_schema_table(table)
+        schema_clause = 't.table_schema = %s and ' if schema is not None else ''
+        sql = f"""
 select
 t.column_name
 from information_schema.columns t
 where
-t.table_name = %s
+{schema_clause}t.table_name = %s
 order by
 t.ordinal_position
 """
-        return self._select_column_raw(cn, sql, (table,))
+        params = (schema, name) if schema is not None else (name,)
+        return self._select_column_raw(cn, sql, params)
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
@@ -353,10 +384,10 @@ t.ordinal_position
             conflict_sql = f"ON CONFLICT ({', '.join(quoted_keys)})"
 
         if not (update_cols_always or update_cols_ifnull):
-            return f'{insert_sql} {conflict_sql} DO NOTHING RETURNING *'
+            return f'{insert_sql} {conflict_sql} DO NOTHING'
 
         update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
-        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)} RETURNING *"
+        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)}"
 
 
 def extract_index_definition(definition: str) -> str:
