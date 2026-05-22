@@ -13,8 +13,7 @@ import re
 from collections import namedtuple
 from typing import Any
 
-from database.exceptions import DatabaseError
-from database.types import TypeConverter
+from database.exceptions import DatabaseError, ValidationError
 
 from libb import issequence
 
@@ -43,8 +42,7 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
 
     # Fast path: no placeholders
     if not sql or not _PH_RE.search(sql):
-        converted = TypeConverter.convert_params(args) if args else args
-        return sql, converted
+        return sql, args
 
     # Find placeholders with context
     phs = _find_contexts(sql, dialect)
@@ -55,7 +53,7 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
     # Transform SQL and args
     sql, args = _transform(sql, phs, args, dialect)
 
-    return sql, TypeConverter.convert_params(args)
+    return sql, args
 
 
 def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
@@ -73,6 +71,8 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
         raise DatabaseError(
             f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}'
         )
+    if '\x00' in identifier:
+        raise ValidationError(f'Identifier contains null byte: {identifier!r}')
     parts = _split_qualified_identifier(identifier)
     return '.'.join(f'"{p.replace(chr(34), chr(34) + chr(34))}"' for p in parts)
 

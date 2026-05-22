@@ -521,6 +521,28 @@ class TestQuoteIdentifier:
         assert quote_identifier('foo', 'postgresql') == '"foo"'
 
 
+class TestQuoteIdentifierNullByteRejection:
+    """Null bytes in identifiers must be rejected, not quoted."""
+
+    def test_rejects_null_byte_in_identifier(self):
+        """A bare identifier containing \\x00 must raise ValidationError."""
+        from database.exceptions import ValidationError
+        with pytest.raises(ValidationError, match='null byte'):
+            quote_identifier('foo\x00bar', 'postgresql')
+
+    def test_rejects_null_byte_in_dotted_identifier(self):
+        """Composition with the dot-splitting rule: any segment with \\x00 raises."""
+        from database.exceptions import ValidationError
+        with pytest.raises(ValidationError, match='null byte'):
+            quote_identifier('public.foo\x00', 'postgresql')
+
+    def test_rejects_null_byte_for_sqlite_dialect(self):
+        """Null-byte rejection is dialect-independent."""
+        from database.exceptions import ValidationError
+        with pytest.raises(ValidationError, match='null byte'):
+            quote_identifier('foo\x00', 'sqlite')
+
+
 class TestHasPlaceholders:
     """Test placeholder detection."""
 
