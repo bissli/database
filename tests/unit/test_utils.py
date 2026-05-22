@@ -95,7 +95,8 @@ class TestDatabaseUtilities:
     @pytest.mark.parametrize(('identifier', 'dialect', 'expected'), [
         # PostgreSQL
         ('table_name', 'postgresql', '"table_name"'),
-        ('column.with.dots', 'postgresql', '"column.with.dots"'),
+        ('schema.table', 'postgresql', '"schema"."table"'),
+        ('catalog.schema.table', 'postgresql', '"catalog"."schema"."table"'),
         ('table"quoted', 'postgresql', '"table""quoted"'),
         # SQLite
         ('table_name', 'sqlite', '"table_name"'),
