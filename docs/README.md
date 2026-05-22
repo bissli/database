@@ -350,7 +350,7 @@ none_value = db.select_row_or_none(cn, 'SELECT * FROM users WHERE 1=0')
 print(none_value)          # None
 
 # Multiple result sets
-empty_results = db.callproc(cn, '''
+empty_results = db.select(cn, '''
     SELECT id, name FROM users WHERE 1=0;
     SELECT email, status FROM users WHERE 1=0;
 ''', return_all=True)
@@ -485,16 +485,6 @@ Insert a single row:
 ```python
 db.insert(cn, 'INSERT INTO users (name, email) VALUES (%s, %s)',
          'Jane Smith', 'jane@example.com')
-```
-
-#### insert_identity
-
-Insert a row and return the auto-generated identity/sequence value:
-
-```python
-user_id = db.insert_identity(cn, 'INSERT INTO users (name, email) VALUES (%s, %s)',
-                            'Jane Smith', 'jane@example.com')
-print(f"New user ID: {user_id}")
 ```
 
 #### insert_row
@@ -991,18 +981,22 @@ db.reset_table_sequence(cn, 'users')
 The module provides several utilities to handle SQL formatting and parameter handling:
 
 ```python
-from database.sql import quote_identifier, handle_in_clause_params
+from database.sql import prepare_query, quote_identifier
 
-# Quote identifiers for different databases
-table_name = quote_identifier('postgresql', 'my_table')  # Returns "my_table"
-column_name = quote_identifier('sqlite', 'user_id')  # Returns "user_id"
+# Quote identifiers for different databases (schema-qualified names
+# split on unquoted dots and quote each segment)
+table_name = quote_identifier('my_table', 'postgresql')     # '"my_table"'
+qualified = quote_identifier('public.users', 'postgresql')  # '"public"."users"'
 
-# Handle IN clauses with list parameters
-sql = "SELECT * FROM users WHERE status IN %s"
-params = [('active', 'pending', 'new')]
-new_sql, new_params = handle_in_clause_params(sql, params)
-# new_sql becomes "SELECT * FROM users WHERE status IN (%s, %s, %s)"
-# new_params becomes ('active', 'pending', 'new')
+# IN-clause expansion is built into prepare_query — pass a sequence
+# inline; placeholders are expanded automatically.
+sql, args = prepare_query(
+    'SELECT * FROM users WHERE status IN %s',
+    [('active', 'pending', 'new')],
+    'postgresql',
+)
+# sql becomes 'SELECT * FROM users WHERE status IN (%s, %s, %s)'
+# args becomes ('active', 'pending', 'new')
 ```
 
 ### Custom Data Loaders
@@ -1064,27 +1058,10 @@ def typed_dict_loader(data, columns, **kwargs):
 
     return result
 
-# You can also create loaders that use different return formats
-def xml_data_loader(data, column_info, **kwargs):
-    """Return query results as XML string"""
-    import xml.etree.ElementTree as ET
-    from xml.dom import minidom
-
-    root = ET.Element("results")
-    for row in
-        row_elem = ET.SubElement(root, "row")
-        for i, col in enumerate(column_info.names):
-            col_elem = ET.SubElement(row_elem, col)
-            col_elem.text = str(row[col]) if row[col] is not None else ""
-
-    xml_str = ET.tostring(root, encoding='unicode')
-    # Pretty print
-    return minidom.parseString(xml_str).toprettyxml(indent="  ")
-
 cn = db.connect({
     'drivername': 'postgres',
     'database': 'your_database',
-    'data_loader': my_custom_loader # or xml_data_loader or typed_dict_loader
+    'data_loader': my_custom_loader,
 })
 ```
 
@@ -1122,35 +1099,35 @@ Note that SQL keywords such as NULL, IN, and LIKE are not case sensitive.
 
 #### LIKE Clauses and Percent Signs
 
-| What you write | What the driver receives |
-|----------------|--------------------------|
-| `db.select(cn, "SELECT * FROM users WHERE name LIKE 'test%'")` | `"SELECT * FROM users WHERE name LIKE 'test%%'"` |
-| `db.select(cn, "SELECT * FROM users WHERE code LIKE '%%CODE'")` | `"SELECT * FROM users WHERE code LIKE '%%CODE'"` |
-| `db.select(cn, "SELECT * FROM users WHERE name LIKE %s", "test%")` | `"SELECT * FROM users WHERE name LIKE %s", "test%"` |
+| What you write                                                                               | What the driver receives                                                       |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `db.select(cn, "SELECT * FROM users WHERE name LIKE 'test%'")`                               | `"SELECT * FROM users WHERE name LIKE 'test%%'"`                               |
+| `db.select(cn, "SELECT * FROM users WHERE code LIKE '%%CODE'")`                              | `"SELECT * FROM users WHERE code LIKE '%%CODE'"`                               |
+| `db.select(cn, "SELECT * FROM users WHERE name LIKE %s", "test%")`                           | `"SELECT * FROM users WHERE name LIKE %s", "test%"`                            |
 | `db.select(cn, "SELECT * FROM products WHERE code LIKE 'PRD-%' AND name LIKE %s", "Chair%")` | `"SELECT * FROM products WHERE code LIKE 'PRD-%%' AND name LIKE %s", "Chair%"` |
 
 The module automatically escapes percent signs in string literals while preserving percent signs in parameters.
 
 #### IS NULL / IS NOT NULL Handling
 
-| What you write | What the driver receives |
-|----------------|--------------------------|
-| `db.select(cn, "SELECT * FROM users WHERE last_login IS NULL")` | `"SELECT * FROM users WHERE last_login IS NULL"` |
-| `db.select(cn, "SELECT * FROM users WHERE email IS NOT NULL")` | `"SELECT * FROM users WHERE email IS NOT NULL"` |
-| `db.select(cn, "SELECT * FROM users WHERE last_login IS %s", None)` | `"SELECT * FROM users WHERE last_login IS NULL"` |
-| `db.select(cn, "SELECT * FROM users WHERE email IS NOT %s", None)` | `"SELECT * FROM users WHERE email IS NOT NULL"` |
+| What you write                                                                                 | What the driver receives                                                        |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `db.select(cn, "SELECT * FROM users WHERE last_login IS NULL")`                                | `"SELECT * FROM users WHERE last_login IS NULL"`                                |
+| `db.select(cn, "SELECT * FROM users WHERE email IS NOT NULL")`                                 | `"SELECT * FROM users WHERE email IS NOT NULL"`                                 |
+| `db.select(cn, "SELECT * FROM users WHERE last_login IS %s", None)`                            | `"SELECT * FROM users WHERE last_login IS NULL"`                                |
+| `db.select(cn, "SELECT * FROM users WHERE email IS NOT %s", None)`                             | `"SELECT * FROM users WHERE email IS NOT NULL"`                                 |
 | `db.select(cn, "SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date)` | `"SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date` |
 
 The module handles `NULL` values consistently across all database backends.
 
 #### IN Clause Parameter Handling
 
-| What you write | What the driver receives |
-|----------------|--------------------------|
-| `db.select(cn, "SELECT * FROM users WHERE id IN %s", [1, 2, 3])` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
-| `db.select(cn, "SELECT * FROM users WHERE status IN %s", ['active'])` | `"SELECT * FROM users WHERE status IN (%s)", "active"` |
-| `db.select(cn, "SELECT * FROM users WHERE id IN %s", ([1, 2, 3],))` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
-| `db.select(cn, "SELECT * FROM users WHERE id IN %(ids)s", {'ids': [1, 2, 3]})` | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3` |
+| What you write                                                                                                                                          | What the driver receives                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `db.select(cn, "SELECT * FROM users WHERE id IN %s", [1, 2, 3])`                                                                                        | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3`                                                |
+| `db.select(cn, "SELECT * FROM users WHERE status IN %s", ['active'])`                                                                                   | `"SELECT * FROM users WHERE status IN (%s)", "active"`                                                   |
+| `db.select(cn, "SELECT * FROM users WHERE id IN %s", ([1, 2, 3],))`                                                                                     | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3`                                                |
+| `db.select(cn, "SELECT * FROM users WHERE id IN %(ids)s", {'ids': [1, 2, 3]})`                                                                          | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3`                                                |
 | `db.select(cn, """SELECT * FROM products WHERE category IN %(cat)s AND status IN %(status)s""", {'cat': ['electronics'], 'status': ['active', 'new']})` | `"SELECT * FROM products WHERE category IN (%s) AND status IN (%s, %s)", "electronics", "active", "new"` |
 
 The module automatically handles all necessary SQL and parameter transformations for each database backend.
@@ -1303,62 +1280,61 @@ The following is a complete reference of the public API functions and types.
 
 ### Core Functions
 
-| Function | Description | Parameters | Returns |
-|----------|-------------|------------|---------|
-| `connect(options, **kwargs)` | Create database connection | `options`: Connection options dictionary or object<br>`**kwargs`: Additional connection options | `ConnectionWrapper` |
-| `execute(cn, sql, *args)` | Execute SQL statement | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters | Row count or specified return data |
-| `transaction(cn)` | Create transaction context manager | `cn`: Database connection | `Transaction` context manager |
+| Function                     | Description                        | Parameters                                                                                      | Returns                            |
+| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `connect(options, **kwargs)` | Create database connection         | `options`: Connection options dictionary or object<br>`**kwargs`: Additional connection options | `ConnectionWrapper`                |
+| `execute(cn, sql, *args)`    | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                  | Row count or specified return data |
+| `transaction(cn)`            | Create transaction context manager | `cn`: Database connection                                                                       | `Transaction` context manager      |
 
 ### Query Operations
 
-| Function | Description | Parameters | Returns |
-|----------|-------------|------------|---------|
-| `select(cn, sql, *args, **kwargs)` | Execute SELECT query or stored procedure | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters<br>`**kwargs`: Additional options | DataFrame or list |
-| `select_row(cn, sql, *args)` | Execute query, return single row | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Row as attribute dictionary |
-| `select_row_or_none(cn, sql, *args)` | Like select_row but returns None if no rows | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Row as attribute dictionary or None |
-| `select_scalar(cn, sql, *args)` | Execute query, return single value | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Single value |
-| `select_scalar_or_none(cn, sql, *args)` | Like select_scalar but returns None if no rows | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | Single value or None |
-| `select_column(cn, sql, *args)` | Execute query, return single column | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters | List of values |
+| Function                                | Description                                    | Parameters                                                                                                          | Returns                             |
+| --------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `select(cn, sql, *args, **kwargs)`      | Execute SELECT query or stored procedure       | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters<br>`**kwargs`: Additional options | DataFrame or list                   |
+| `select_row(cn, sql, *args)`            | Execute query, return single row               | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters                                   | Row as attribute dictionary         |
+| `select_row_or_none(cn, sql, *args)`    | Like select_row but returns None if no rows    | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters                                   | Row as attribute dictionary or None |
+| `select_scalar(cn, sql, *args)`         | Execute query, return single value             | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters                                   | Single value                        |
+| `select_scalar_or_none(cn, sql, *args)` | Like select_scalar but returns None if no rows | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters                                   | Single value or None                |
+| `select_column(cn, sql, *args)`         | Execute query, return single column            | `cn`: Database connection<br>`sql`: SELECT statement<br>`*args`: Query parameters                                   | List of values                      |
 
 ### Data Operations
 
-| Function | Description | Parameters | Returns |
-|----------|-------------|------------|---------|
-| `insert(cn, sql, *args)` | Execute INSERT statement | `cn`: Database connection<br>`sql`: INSERT statement<br>`*args`: Query parameters | Row count |
-| `insert_identity(cn, sql, *args)` | Execute INSERT and return identity value | `cn`: Database connection<br>`sql`: INSERT statement<br>`*args`: Query parameters | Identity value |
-| `update(cn, sql, *args)` | Execute UPDATE statement | `cn`: Database connection<br>`sql`: UPDATE statement<br>`*args`: Query parameters | Row count |
-| `delete(cn, sql, *args)` | Execute DELETE statement | `cn`: Database connection<br>`sql`: DELETE statement<br>`*args`: Query parameters | Row count |
-| `insert_row(cn, table, fields, values)` | Insert single row with named fields | `cn`: Database connection<br>`table`: Table name<br>`fields`: List of column names<br>`values`: List of values | None |
-| `insert_rows(cn, table, rows)` | Insert multiple rows | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries | None |
-| `update_row(cn, table, keyfields, keyvalues, datafields, datavalues)` | Update single row with named fields | `cn`: Database connection<br>`table`: Table name<br>`keyfields`: List of key column names<br>`keyvalues`: List of key values<br>`datafields`: List of data column names<br>`datavalues`: List of data values | None |
-| `update_or_insert(cn, update_sql, insert_sql, *args)` | Try update, insert if not exists | `cn`: Database connection<br>`update_sql`: UPDATE statement<br>`insert_sql`: INSERT statement<br>`*args`: Query parameters | None |
-| `upsert_rows(cn, table, rows, **kwargs)` | Insert or update multiple rows based on keys | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries<br>`**kwargs`: Additional options | None |
+| Function                                                              | Description                                  | Parameters                                                                                                                                                                                                   | Returns   |
+| --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| `insert(cn, sql, *args)`                                              | Execute INSERT statement                     | `cn`: Database connection<br>`sql`: INSERT statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `update(cn, sql, *args)`                                              | Execute UPDATE statement                     | `cn`: Database connection<br>`sql`: UPDATE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `delete(cn, sql, *args)`                                              | Execute DELETE statement                     | `cn`: Database connection<br>`sql`: DELETE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `insert_row(cn, table, fields, values)`                               | Insert single row with named fields          | `cn`: Database connection<br>`table`: Table name<br>`fields`: List of column names<br>`values`: List of values                                                                                               | None      |
+| `insert_rows(cn, table, rows)`                                        | Insert multiple rows                         | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries                                                                                                                             | None      |
+| `update_row(cn, table, keyfields, keyvalues, datafields, datavalues)` | Update single row with named fields          | `cn`: Database connection<br>`table`: Table name<br>`keyfields`: List of key column names<br>`keyvalues`: List of key values<br>`datafields`: List of data column names<br>`datavalues`: List of data values | None      |
+| `update_or_insert(cn, update_sql, insert_sql, *args)`                 | Try update, insert if not exists             | `cn`: Database connection<br>`update_sql`: UPDATE statement<br>`insert_sql`: INSERT statement<br>`*args`: Query parameters                                                                                   | None      |
+| `upsert_rows(cn, table, rows, **kwargs)`                              | Insert or update multiple rows based on keys | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries<br>`**kwargs`: Additional options                                                                                           | None      |
 
 ### Schema Operations
 
-| Function | Description | Parameters | Returns |
-|----------|-------------|------------|---------|
-| `reset_table_sequence(cn, table, identity=None)` | Reset table's auto-increment sequence | `cn`: Database connection<br>`table`: Table name<br>`identity`: Optional identity column name | None |
-| `vacuum_table(cn, table)` | Optimize table, reclaiming space | `cn`: Database connection<br>`table`: Table name | None |
-| `reindex_table(cn, table)` | Rebuild table indexes | `cn`: Database connection<br>`table`: Table name | None |
-| `cluster_table(cn, table, index=None)` | Order table data according to an index | `cn`: Database connection<br>`table`: Table name<br>`index`: Optional index name | None |
-| `get_table_columns(cn, table)` | Get all column names for a table | `cn`: Database connection<br>`table`: Table name | Dictionary mapping column names to types |
-| `get_table_primary_keys(cn, table)` | Get primary key columns for a table | `cn`: Database connection<br>`table`: Table name | List of column names |
-| `get_sequence_columns(cn, table)` | Get sequence/identity columns for a table | `cn`: Database connection<br>`table`: Table name | List of column names |
-| `table_fields(cn, table)` | Get ordered list of all table columns | `cn`: Database connection<br>`table`: Table name | List of column names |
-| `table_data(cn, table, columns=[])` | Get table data by columns | `cn`: Database connection<br>`table`: Table name<br>`columns`: Optional list of column names | DataFrame with table data |
+| Function                                         | Description                               | Parameters                                                                                    | Returns                                  |
+| ------------------------------------------------ | ----------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `reset_table_sequence(cn, table, identity=None)` | Reset table's auto-increment sequence     | `cn`: Database connection<br>`table`: Table name<br>`identity`: Optional identity column name | None                                     |
+| `vacuum_table(cn, table)`                        | Optimize table, reclaiming space          | `cn`: Database connection<br>`table`: Table name                                              | None                                     |
+| `reindex_table(cn, table)`                       | Rebuild table indexes                     | `cn`: Database connection<br>`table`: Table name                                              | None                                     |
+| `cluster_table(cn, table, index=None)`           | Order table data according to an index    | `cn`: Database connection<br>`table`: Table name<br>`index`: Optional index name              | None                                     |
+| `get_table_columns(cn, table)`                   | Get all column names for a table          | `cn`: Database connection<br>`table`: Table name                                              | Dictionary mapping column names to types |
+| `get_table_primary_keys(cn, table)`              | Get primary key columns for a table       | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
+| `get_sequence_columns(cn, table)`                | Get sequence/identity columns for a table | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
+| `table_fields(cn, table)`                        | Get ordered list of all table columns     | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
+| `table_data(cn, table, columns=[])`              | Get table data by columns                 | `cn`: Database connection<br>`table`: Table name<br>`columns`: Optional list of column names  | DataFrame with table data                |
 
 ### Exception Types
 
-| Exception | Description |
-|-----------|-------------|
-| `DatabaseError` | Base class for all database errors |
-| `DbConnectionError` | Connection issues |
-| `IntegrityError` | Constraint violations |
-| `ProgrammingError` | SQL syntax errors |
-| `OperationalError` | Database operational issues |
-| `UniqueViolation` | Unique constraint violations |
-| `ConnectionError` | Custom connection errors |
-| `IntegrityViolationError` | Custom constraint errors |
-| `QueryError` | Query execution errors |
-| `TypeConversionError` | Type conversion errors |
+| Exception                 | Description                        |
+| ------------------------- | ---------------------------------- |
+| `DatabaseError`           | Base class for all database errors |
+| `DbConnectionError`       | Connection issues                  |
+| `IntegrityError`          | Constraint violations              |
+| `ProgrammingError`        | SQL syntax errors                  |
+| `OperationalError`        | Database operational issues        |
+| `UniqueViolation`         | Unique constraint violations       |
+| `ConnectionError`         | Custom connection errors           |
+| `IntegrityViolationError` | Custom constraint errors           |
+| `QueryError`              | Query execution errors             |
+| `TypeConversionError`     | Type conversion errors             |
