@@ -77,5 +77,62 @@ def test_sqlite_options():
         DatabaseOptions(drivername='sqlite')
 
 
+def _make_options(**overrides):
+    """Build a minimal valid DatabaseOptions with defaults."""
+    base = dict(
+        hostname='testhost', username='testuser',
+        password='secret_value_xyz', database='testdb',
+        port=1234, timeout=30,
+    )
+    base.update(overrides)
+    return DatabaseOptions(**base)
+
+
+class TestPasswordRedaction:
+    """Password must never appear in repr/str output or in engine
+    registry cache keys derived from str(options).
+    """
+
+    def test_repr_redacts_password(self):
+        options = _make_options(password='secret_value_xyz')
+        assert 'secret_value_xyz' not in repr(options)
+
+    def test_str_redacts_password(self):
+        options = _make_options(password='secret_value_xyz')
+        assert 'secret_value_xyz' not in str(options)
+
+    def test_repr_keeps_diagnostic_fields(self):
+        """Redaction must not destroy debuggability — non-secret fields stay."""
+        options = _make_options(password='secret_value_xyz')
+        r = repr(options)
+        assert 'testhost' in r
+        assert 'testuser' in r
+        assert 'testdb' in r
+        assert 'postgresql' in r
+
+    def test_repr_shows_redaction_marker(self):
+        """A redaction marker (e.g. '***') should appear so it's obvious
+        the password was scrubbed, not just missing.
+        """
+        options = _make_options(password='secret_value_xyz')
+        assert '***' in repr(options)
+
+    def test_repr_when_password_none(self):
+        """SQLite doesn't require a password — repr should show None plainly."""
+        options = DatabaseOptions(drivername='sqlite', database='test.db')
+        r = repr(options)
+        assert 'password=None' in r
+
+    def test_engine_registry_key_does_not_contain_password(self):
+        """connection.py builds an engine-registry cache key from str(options).
+        The password must not appear in the resulting key.
+        """
+        from database.connection import _build_engine_registry_key
+        options = _make_options(password='secret_value_xyz')
+        key = _build_engine_registry_key(options, use_pool=False, pool_size=5,
+                                         pool_recycle=300, pool_timeout=30)
+        assert 'secret_value_xyz' not in key
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

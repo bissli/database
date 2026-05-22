@@ -126,3 +126,12 @@ class DatabaseOptions(ConfigOptions):
         strategy_cls.validate_options(self)
         if self.data_loader is None:
             self.data_loader = pandas_numpy_data_loader
+
+    def __repr__(self) -> str:
+        masked = '***' if self.password else None
+        return (
+            f'DatabaseOptions(drivername={self.drivername!r}, '
+            f'hostname={self.hostname!r}, username={self.username!r}, '
+            f'password={masked!r}, database={self.database!r}, '
+            f'port={self.port!r}, appname={self.appname!r})'
+        )

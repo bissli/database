@@ -70,6 +70,25 @@ def _split_schema_for_inspector(table: str) -> tuple[str | None, str]:
         return parts[-2], parts[-1]
     return None, parts[-1]
 
+
+def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
+                               pool_size: int, pool_recycle: int,
+                               pool_timeout: int) -> str:
+    """Build a stable, password-free cache key for the engine registry.
+
+    The key must identify an engine uniquely per (drivername, host, port,
+    user, database, appname, pool config) — but never expose the
+    password. Two options with the same credentials except different
+    passwords still collide; that is acceptable because the registry is
+    process-local and the engine pool will fail-fast on the real
+    connection if the password is wrong.
+    """
+    return '|'.join(str(part) for part in (
+        options.drivername, options.hostname, options.port,
+        options.username, options.database, options.appname,
+        use_pool, pool_size, pool_recycle, pool_timeout,
+    ))
+
 # Simple cache for schema info (cleared on bypass_cache=True)
 _schema_cache: dict[tuple, list[str]] = {}
 _schema_cache_lock = threading.RLock()
@@ -161,7 +180,8 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
                            **kwargs: Any) -> Engine:
     """Get or create a SQLAlchemy engine for the given options.
     """
-    key = f'{str(options)}_{use_pool}_{pool_size}_{pool_recycle}_{pool_timeout}'
+    key = _build_engine_registry_key(options, use_pool, pool_size,
+                                     pool_recycle, pool_timeout)
 
     with _engine_registry_lock:
         if key in _engine_registry:
