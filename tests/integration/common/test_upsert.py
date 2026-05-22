@@ -135,6 +135,138 @@ class TestUpsertInvalidColumns:
         assert result.value == 100
 
 
+class TestUpsertColumnOrderIndependence:
+    """Dictionary key order in rows must not affect insert semantics."""
+
+    def test_upsert_column_order_independence(self, db_conn):
+        """Two rows with reversed key order must insert identically."""
+        rows = [
+            {'name': 'OrderTest1', 'value': 300},
+            {'value': 400, 'name': 'OrderTest2'},
+        ]
+        row_count = db.upsert_rows(db_conn, 'test_table', rows, use_primary_key=True)
+        assert row_count == 2
+
+        result = db.select(db_conn,
+                           'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+                           'OrderTest%')
+        assert len(result) == 2
+        assert row(result, 0)['name'] == 'OrderTest1'
+        assert row(result, 0)['value'] == 300
+        assert row(result, 1)['name'] == 'OrderTest2'
+        assert row(result, 1)['value'] == 400
+
+
+class TestUpsertAllInvalidColumns:
+    """Rows with no valid columns must short-circuit to zero, not error."""
+
+    def test_upsert_all_invalid_columns(self, db_conn):
+        rows = [{'nonexistent1': 'Invalid data', 'nonexistent2': 123}]
+        row_count = db.upsert_rows(db_conn, 'test_table', rows, use_primary_key=True)
+        assert row_count == 0
+
+
+class TestUpsertCaseInsensitiveColumns:
+    """filter_table_columns lower-cases names so callers can be sloppy.
+
+    Database column names are stored case-sensitively, but the upsert
+    path matches caller-provided keys case-insensitively and rewrites
+    them to the schema's canonical case before the INSERT.
+    """
+
+    def test_upsert_case_insensitive_columns_insert(self, db_conn):
+        """Insert with assorted column-name casings."""
+        rows = [
+            {'NAME': 'CaseTest1', 'Value': 101},
+            {'name': 'CaseTest2', 'VALUE': 102},
+        ]
+        row_count = db.upsert_rows(db_conn, 'test_table', rows, use_primary_key=True)
+        assert row_count == 2
+
+        result = db.select(db_conn,
+                           'SELECT name, value FROM test_table WHERE name LIKE %s ORDER BY name',
+                           'CaseTest%')
+        assert len(result) == 2
+        assert row(result, 0)['name'] == 'CaseTest1'
+        assert row(result, 0)['value'] == 101
+        assert row(result, 1)['name'] == 'CaseTest2'
+        assert row(result, 1)['value'] == 102
+
+    def test_upsert_case_insensitive_columns_update(self, db_conn):
+        """Updates with differently-cased column names still target the right columns."""
+        db.upsert_rows(db_conn, 'test_table',
+                       [{'name': 'CaseUpdate', 'value': 1}],
+                       use_primary_key=True)
+        db.upsert_rows(db_conn, 'test_table',
+                       [{'NAme': 'CaseUpdate', 'vaLUE': 999}],
+                       use_primary_key=True,
+                       update_cols_always=['value'])
+
+        result = db.select_row(db_conn,
+                               'SELECT value FROM test_table WHERE name = %s',
+                               'CaseUpdate')
+        assert result.value == 999
+
+
+class TestUpsertPrimaryKeyFiltering:
+    """PK columns must be filtered out of update_cols_always / update_cols_ifnull.
+
+    Otherwise PostgreSQL's ON CONFLICT path would try to UPDATE a row's
+    own conflict key, which is either a no-op or an error depending on
+    the backend.
+    """
+
+    def test_pk_columns_excluded_from_update_set(self, db_conn, dialect):
+        """Including PK columns in update_cols_* must NOT update them."""
+        if dialect == 'postgresql':
+            create_sql = """
+                CREATE TEMPORARY TABLE test_pk_filtering (
+                    id INTEGER,
+                    code VARCHAR(10),
+                    description VARCHAR(100) NOT NULL,
+                    value INTEGER NOT NULL,
+                    PRIMARY KEY (id, code)
+                )
+            """
+            insert_sql = 'INSERT INTO test_pk_filtering VALUES (%s, %s, %s, %s)'
+        else:
+            create_sql = """
+                CREATE TEMPORARY TABLE test_pk_filtering (
+                    id INTEGER,
+                    code TEXT,
+                    description TEXT NOT NULL,
+                    value INTEGER NOT NULL,
+                    PRIMARY KEY (id, code)
+                )
+            """
+            insert_sql = 'INSERT INTO test_pk_filtering VALUES (?, ?, ?, ?)'
+
+        db.execute(db_conn, create_sql)
+        db.execute(db_conn, insert_sql, 1, 'ABC', 'Initial description', 100)
+
+        db.upsert_rows(
+            db_conn,
+            'test_pk_filtering',
+            [{'id': 1, 'code': 'ABC',
+              'description': 'Updated description', 'value': 200}],
+            use_primary_key=True,
+            update_cols_always=['id', 'code', 'description', 'value'],
+            update_cols_ifnull=['id', 'code'],
+        )
+
+        result = db.select_row(
+            db_conn,
+            "SELECT id, code, description, value FROM test_pk_filtering WHERE id = 1 AND code = 'ABC'"
+        )
+        assert result.id == 1
+        assert result.code == 'ABC'
+        assert result.description == 'Updated description'
+        assert result.value == 200
+
+        count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_pk_filtering')
+        assert count == 1
+
+
 class TestUpsertUnknownKwargRejection:
     """Unknown kwargs must raise, not silently drop.
 

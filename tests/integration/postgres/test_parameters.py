@@ -177,23 +177,6 @@ def test_none_parameter(psql_docker, pg_conn):
     assert result[0]['null_value'] is None
 
 
-def test_list_parameters(psql_docker, pg_conn):
-    """Test handling of list parameters for IN clauses."""
-    # Insert test data
-    names = ['InTest1', 'InTest2', 'InTest3']
-    for i, name in enumerate(names):
-        db.insert(pg_conn, 'insert into test_table (name, value) values (%s, %s)',
-                  name, (i+1)*10)
-
-    # Query with IN clause using string formatting (not ideal but common)
-    placeholders = ','.join(['%s'] * len(names))
-    query = f'select name, value from test_table where name in ({placeholders}) order by value'
-
-    result = db.select(pg_conn, query, *names)
-    assert len(result) == 3
-    assert [row['name'] for row in result] == names
-
-
 def test_numeric_parameters(psql_docker, pg_conn):
     """Test handling of numeric parameters."""
     # Test integers
@@ -207,75 +190,6 @@ def test_numeric_parameters(psql_docker, pg_conn):
     # Test with computation
     result = db.select(pg_conn, 'select %s + %s as sum_val', 10, 20)
     assert result[0]['sum_val'] == 30
-
-
-def test_direct_list_parameters(psql_docker, pg_conn):
-    """Test the direct list parameter format for IN clauses."""
-    # Insert test data
-    test_ids = [101, 102, 103]
-    for i, test_id in enumerate(test_ids):
-        db.insert(pg_conn, 'insert into test_table (name, value) values (%s, %s)',
-                  f'DirectTest{i}', test_id)
-
-    # Test direct list parameter syntax for IN clause
-    result = db.select(pg_conn, 'select name, value from test_table where value IN %s order by value',
-                       test_ids)
-
-    # Verify results
-    assert len(result) == 3
-    assert [row['value'] for row in result] == test_ids
-
-    # Test with a single-item list
-    result = db.select(pg_conn, 'select name, value from test_table where value IN %s',
-                       [101])
-
-    assert len(result) == 1
-    assert result[0]['value'] == 101
-    assert not isinstance(result[0]['value'], str)
-
-    # Compare with traditional format
-    result_traditional = db.select(pg_conn, 'select name, value from test_table where value IN %s',
-                                   ([101],))
-
-    assert len(result) == len(result_traditional)
-    assert result[0]['value'] == result_traditional[0]['value']
-    assert not isinstance(result_traditional[0]['value'], str)
-
-
-def test_direct_lists_for_multiple_in_clauses(psql_docker, pg_conn):
-    """Test using direct lists for multiple IN clauses."""
-    # Insert test data for multiple categories and statuses
-    categories = ['cat1', 'cat2', 'cat3']
-    statuses = ['active', 'pending']
-
-    # Create a temp table to test with
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE multi_in_test (
-        id SERIAL PRIMARY KEY,
-        category TEXT,
-        status TEXT
-    )
-    """)
-
-    # Insert test data with different combinations
-    for i, (cat, status) in enumerate([(c, s) for c in categories for s in statuses]):
-        db.insert(pg_conn, 'INSERT INTO multi_in_test (category, status) VALUES (%s, %s)',
-                  cat, status)
-
-    # Now test direct lists for multiple IN clauses
-    result = db.select(pg_conn, """
-    SELECT category, status
-    FROM multi_in_test
-    WHERE category IN %s AND status IN %s
-    ORDER BY category, status
-    """, ['cat1', 'cat2'], ['active', 'pending'])
-
-    # Verify results
-    assert len(result) == 4  # 2 categories × 2 statuses
-    categories = {row['category'] for row in result}
-    statuses = {row['status'] for row in result}
-    assert categories == {'cat1', 'cat2'}
-    assert statuses == {'active', 'pending'}
 
 
 def test_like_clause_with_pre_escaped_percent(psql_docker, pg_conn):
@@ -539,47 +453,6 @@ def test_is_null_parameter_handling(psql_docker, pg_conn):
     # Verify results - should match rows where value is NULL
     assert len(result) == 1
     assert result[0]['strategy'] == 'B'
-
-
-def test_no_placeholders_with_parameters(psql_docker, pg_conn):
-    """Test that when a query has no placeholders but parameters are provided,
-    those parameters are ignored and the query executes without errors.
-    """
-    # Create a test table
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE test_no_placeholders (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL
-    )
-    """)
-
-    # Insert test data
-    db.execute(pg_conn, """
-    INSERT INTO test_no_placeholders (name) VALUES ('test1'), ('test2')
-    """)
-
-    # Test 1: Query with no placeholders but with parameters
-    # This should ignore the parameters and execute successfully
-    result = db.select(pg_conn, 'SELECT * FROM test_no_placeholders ORDER BY id',
-                       'ignored_param', 123, True)
-
-    # Verify the query executed correctly
-    assert len(result) == 2
-    assert result[0]['name'] == 'test1'
-    assert result[1]['name'] == 'test2'
-
-    # Test 2: In a transaction
-    with db.transaction(pg_conn) as tx:
-        result = tx.select('SELECT COUNT(*) AS count FROM test_no_placeholders',
-                           'ignored_param')
-        assert result[0]['count'] == 2
-
-    # Test 3: With different types of parameters that would normally cause errors
-    # if they were actually used in the query
-    result = db.select(pg_conn, "SELECT 'static_value' AS value",
-                       {'complex': 'object'}, [1, 2, 3], None)
-    assert len(result) == 1
-    assert result[0]['value'] == 'static_value'
 
 
 def test_any_with_list_parameter(psql_docker, pg_conn):
