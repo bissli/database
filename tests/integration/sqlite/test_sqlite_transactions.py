@@ -1,11 +1,11 @@
 import os
+import pathlib
 import tempfile
 import threading
 import time
 
 import database as db
 import pytest
-import pathlib
 
 
 @pytest.fixture

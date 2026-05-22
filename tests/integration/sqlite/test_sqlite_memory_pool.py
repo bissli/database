@@ -3,8 +3,6 @@ SQLite in-memory connections must share a single DBAPI connection across
 reconnects, so data written before a reconnect survives. NullPool would
 silently hand out a fresh, empty database on reconnect — a footgun.
 """
-import pathlib
-import time
 
 import database as db
 import pytest

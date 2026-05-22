@@ -1,11 +1,11 @@
 """
 Fixtures for SQLite-specific integration tests.
 """
+import pathlib
 import time
 
 import database as db
 import pytest
-import pathlib
 
 
 @pytest.fixture

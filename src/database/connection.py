@@ -628,7 +628,6 @@ class ConnectionWrapper:
         reset_sequence: bool = False,
         batch_size: int = 500,
         use_primary_key: bool = False,
-        **kw: Any
     ) -> int:
         """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows.
         """

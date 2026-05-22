@@ -12,12 +12,12 @@ from database.strategy.postgres import PostgresStrategy
 
 def _options(**overrides):
     """Build a minimal valid DatabaseOptions for URL-builder tests."""
-    base = dict(
-        drivername='postgresql',
-        hostname='myhost', username='myuser',
-        password='mypass', database='mydb',
-        port=5432, timeout=30,
-    )
+    base = {
+        'drivername': 'postgresql',
+        'hostname': 'myhost', 'username': 'myuser',
+        'password': 'mypass', 'database': 'mydb',
+        'port': 5432, 'timeout': 30,
+    }
     base.update(overrides)
     return DatabaseOptions(**base)
 
