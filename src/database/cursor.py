@@ -10,6 +10,7 @@ from collections.abc import Iterator, Sequence
 from functools import wraps
 from typing import Any
 
+from database.exceptions import QueryError
 from database.sql import has_placeholders
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
@@ -225,7 +226,7 @@ class Cursor:
         placeholder = self.strategy.get_placeholder_style()
         placeholder_count = sum(stmt.count(placeholder) for stmt in statements)
         if len(params) != placeholder_count:
-            raise ValueError(
+            raise QueryError(
                 f'Parameter count mismatch: SQL needs {placeholder_count} '
                 f'but {len(params)} were provided'
             )

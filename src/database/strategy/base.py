@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
+from database.exceptions import ValidationError
 from database.sql import quote_identifier as sql_quote_identifier
 
 if TYPE_CHECKING:
@@ -280,11 +281,11 @@ class DatabaseStrategy(ABC):
             options: DatabaseOptions to validate
 
         Raises
-            ValueError: If any required field is None or 0
+            ValidationError: If any required field is None or 0
         """
         for field in cls.get_required_options():
             if not getattr(options, field):
-                raise ValueError(f'field {field} cannot be None or 0')
+                raise ValidationError(f'field {field} cannot be None or 0')
 
     def quote_identifier(self, identifier: str) -> str:
         """Quote a database identifier.

@@ -359,7 +359,7 @@ class TestPrepareQueryDollarQuotes:
     def test_anonymous_dollar_quoted_body_protects_percent_s(self):
         """$$ ... %s ... $$ has no real placeholder; one outside binds one arg.
         """
-        sql = "SELECT $$has %s inside$$, %s FROM t"
+        sql = 'SELECT $$has %s inside$$, %s FROM t'
         result_sql, result_args = prepare_query(sql, (42,), 'postgresql')
         assert '$$has %s inside$$' in result_sql
         assert result_args == (42,)
@@ -367,7 +367,7 @@ class TestPrepareQueryDollarQuotes:
     def test_anonymous_dollar_quoted_body_with_question_mark_postgresql(self):
         """? inside $$...$$ on postgres is literal (dollar-quoting is PG-specific).
         """
-        sql = "SELECT $$contains ? char$$ FROM t WHERE id = %s"
+        sql = 'SELECT $$contains ? char$$ FROM t WHERE id = %s'
         result_sql, result_args = prepare_query(sql, (7,), 'postgresql')
         assert '$$contains ? char$$' in result_sql
         assert result_args == (7,)
@@ -375,7 +375,7 @@ class TestPrepareQueryDollarQuotes:
     def test_tagged_dollar_quoted_body_protected(self):
         """$tag$ ... %s ... $tag$ body is literal.
         """
-        sql = "SELECT $body$any %s text$body$ FROM t WHERE id = %s"
+        sql = 'SELECT $body$any %s text$body$ FROM t WHERE id = %s'
         result_sql, result_args = prepare_query(sql, (1,), 'postgresql')
         assert '$body$any %s text$body$' in result_sql
         assert result_args == (1,)
@@ -383,7 +383,7 @@ class TestPrepareQueryDollarQuotes:
     def test_nested_dollar_tags_match_by_tag(self):
         """$outer$ ... $inner$ ... $outer$ — the outer closes only at matching tag.
         """
-        sql = "SELECT $outer$ %s and $inner$ %s $inner$ end $outer$ FROM t WHERE id = %s"
+        sql = 'SELECT $outer$ %s and $inner$ %s $inner$ end $outer$ FROM t WHERE id = %s'
         result_sql, result_args = prepare_query(sql, (99,), 'postgresql')
         assert '$outer$' in result_sql
         assert '$inner$' in result_sql
@@ -398,7 +398,7 @@ class TestPrepareQueryComments:
     def test_line_comment_protects_percent_s(self):
         """-- comment %s is literal; only the post-newline %s binds.
         """
-        sql = "SELECT * FROM t -- comment %s\nWHERE id = %s"
+        sql = 'SELECT * FROM t -- comment %s\nWHERE id = %s'
         result_sql, result_args = prepare_query(sql, (5,), 'postgresql')
         assert '-- comment %s' in result_sql
         assert result_args == (5,)
@@ -406,7 +406,7 @@ class TestPrepareQueryComments:
     def test_block_comment_protects_percent_s(self):
         """/* %s */ is literal; only outside placeholder binds.
         """
-        sql = "SELECT /* has %s */ * FROM t WHERE id = %s"
+        sql = 'SELECT /* has %s */ * FROM t WHERE id = %s'
         result_sql, result_args = prepare_query(sql, (10,), 'postgresql')
         assert '/* has %s */' in result_sql
         assert result_args == (10,)
@@ -414,7 +414,7 @@ class TestPrepareQueryComments:
     def test_multiline_block_comment_protected(self):
         """Multi-line /* ... %s ... */ block.
         """
-        sql = "SELECT /* line1\n%s line2 */ * FROM t WHERE id = %s"
+        sql = 'SELECT /* line1\n%s line2 */ * FROM t WHERE id = %s'
         result_sql, result_args = prepare_query(sql, (2,), 'postgresql')
         assert '/* line1\n%s line2 */' in result_sql
         assert result_args == (2,)
@@ -429,13 +429,13 @@ class TestPrepareQueryComments:
         sql = "SELECT 'foo -- bar baz' AS lit FROM t WHERE id = %s"
         result_sql, result_args = prepare_query(sql, (1,), 'postgresql')
         assert "'foo -- bar baz'" in result_sql
-        assert "AS lit FROM t" in result_sql
+        assert 'AS lit FROM t' in result_sql
         assert result_args == (1,)
 
     def test_question_mark_in_line_comment_protected_sqlite(self):
         """-- ? comment is literal in SQLite.
         """
-        sql = "SELECT * FROM t -- comment ?\nWHERE id = ?"
+        sql = 'SELECT * FROM t -- comment ?\nWHERE id = ?'
         result_sql, result_args = prepare_query(sql, (1,), 'sqlite')
         assert '-- comment ?' in result_sql
         assert result_args == (1,)
@@ -458,7 +458,7 @@ class TestPrepareQueryJsonbOperator:
         assert result_args == (1,)
 
     def test_jsonb_question_mark_pipe_not_placeholder(self):
-        """data ?| array['a','b'] preserved.
+        """Data ?| array['a','b'] preserved.
         """
         sql = "SELECT * FROM t WHERE data ?| array['a','b'] AND id = %s"
         result_sql, result_args = prepare_query(sql, (2,), 'postgresql')
@@ -466,7 +466,7 @@ class TestPrepareQueryJsonbOperator:
         assert result_args == (2,)
 
     def test_jsonb_question_mark_amp_not_placeholder(self):
-        """data ?& array['a','b'] preserved.
+        """Data ?& array['a','b'] preserved.
         """
         sql = "SELECT * FROM t WHERE data ?& array['a','b'] AND id = %s"
         result_sql, result_args = prepare_query(sql, (3,), 'postgresql')
@@ -476,7 +476,7 @@ class TestPrepareQueryJsonbOperator:
     def test_sqlite_question_mark_remains_placeholder(self):
         """The PG-only rule must not affect SQLite.
         """
-        sql = "SELECT * FROM t WHERE id = ? AND name = ?"
+        sql = 'SELECT * FROM t WHERE id = ? AND name = ?'
         result_sql, result_args = prepare_query(sql, (1, 'foo'), 'sqlite')
         assert result_sql.count('?') == 2
         assert result_args == (1, 'foo')
@@ -501,8 +501,9 @@ class TestQuoteIdentifier:
         assert quote_identifier('table') == '"table"'
 
     def test_unknown_dialect_error(self):
-        """Test unknown dialect raises ValueError."""
-        with pytest.raises(ValueError, match='Unknown dialect: mysql'):
+        """Test unknown dialect raises DatabaseError."""
+        from database.exceptions import DatabaseError
+        with pytest.raises(DatabaseError, match='Unknown dialect: mysql'):
             quote_identifier('table', 'mysql')
 
     @pytest.mark.parametrize(('identifier', 'dialect', 'expected'), [

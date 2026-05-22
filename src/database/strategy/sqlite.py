@@ -15,6 +15,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
+from database.exceptions import QueryError
 from database.sql import make_placeholders, quote_identifier
 from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
@@ -186,7 +187,7 @@ select name as column from pragma_table_info({quoted_table})
         result = self._select_raw(cn, sql)
 
         if not result:
-            raise ValueError(f"Constraint '{constraint_name}' not found on table '{table}'")
+            raise QueryError(f"Constraint '{constraint_name}' not found on table '{table}'")
 
         columns = [row['name'] for row in result]
         return {

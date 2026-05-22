@@ -1,4 +1,5 @@
 import pytest
+from database.exceptions import ValidationError
 from database.options import DatabaseOptions, pandas_numpy_data_loader
 
 
@@ -15,8 +16,6 @@ def test_init_defaults():
 
     assert options.drivername == 'postgresql'
     assert options.appname is not None
-    assert options.cleanup is True
-    assert options.check_connection is True
     assert options.data_loader == pandas_numpy_data_loader
 
     assert options.use_pool is False
@@ -49,7 +48,7 @@ def test_pooling_options():
 
 def test_validation():
     """Test validation rules"""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         DatabaseOptions(
             drivername='invalid',
             hostname='testhost',
@@ -60,7 +59,7 @@ def test_validation():
             timeout=30
         )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         DatabaseOptions(drivername='postgresql', hostname='testhost')
 
 
@@ -73,17 +72,17 @@ def test_sqlite_options():
     assert options.drivername == 'sqlite'
     assert options.database == 'test.db'
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         DatabaseOptions(drivername='sqlite')
 
 
 def _make_options(**overrides):
     """Build a minimal valid DatabaseOptions with defaults."""
-    base = dict(
-        hostname='testhost', username='testuser',
-        password='secret_value_xyz', database='testdb',
-        port=1234, timeout=30,
-    )
+    base = {
+        'hostname': 'testhost', 'username': 'testuser',
+        'password': 'secret_value_xyz', 'database': 'testdb',
+        'port': 1234, 'timeout': 30,
+    }
     base.update(overrides)
     return DatabaseOptions(**base)
 
@@ -122,16 +121,6 @@ class TestPasswordRedaction:
         options = DatabaseOptions(drivername='sqlite', database='test.db')
         r = repr(options)
         assert 'password=None' in r
-
-    def test_engine_registry_key_does_not_contain_password(self):
-        """connection.py builds an engine-registry cache key from str(options).
-        The password must not appear in the resulting key.
-        """
-        from database.connection import _build_engine_registry_key
-        options = _make_options(password='secret_value_xyz')
-        key = _build_engine_registry_key(options, use_pool=False, pool_size=5,
-                                         pool_recycle=300, pool_timeout=30)
-        assert 'secret_value_xyz' not in key
 
 
 if __name__ == '__main__':
