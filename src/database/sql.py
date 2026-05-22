@@ -20,7 +20,8 @@ from libb import issequence
 _SUPPORTED_DIALECTS = {'postgresql', 'sqlite'}
 
 # Regex patterns
-_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')  # Placeholders (group 1 = named param name)
+_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')  # Input placeholders (group 1 = named param name)
+_HAS_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?|(?<!:):\w+')  # Detection regex; also covers ':name' for sqlite
 _STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")  # String literals
 _REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
 _UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by % or s or (
@@ -171,8 +172,14 @@ def build_insert_sql(dialect: str, table: str, columns: list[str]) -> str:
 
 
 def has_placeholders(sql: str | None) -> bool:
-    """Check if SQL contains parameter placeholders."""
-    return bool(sql and _PH_RE.search(sql))
+    """Check if SQL contains parameter placeholders.
+
+    Covers pyformat ('%(name)s'), classic positional ('%s'), qmark ('?'),
+    and sqlite named (':name') — i.e. any placeholder that might appear
+    in SQL on its way to the DBAPI cursor. '::' (PG type cast) is
+    explicitly excluded.
+    """
+    return bool(sql and _HAS_PH_RE.search(sql))
 
 
 def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
@@ -375,7 +382,7 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
 
         # Process placeholder
         if isinstance(args, dict):
-            sql_part, arg_upd = _proc_named(ph, args)
+            sql_part, arg_upd = _proc_named(ph, args, dialect)
             parts.append(sql_part)
             new_args.update(arg_upd)
         else:
@@ -426,11 +433,21 @@ def _expand_in(val: Any, marker: str, in_parens: bool) -> tuple[str, list]:
     return marker if in_parens else f'({marker})', [val]
 
 
-def _proc_named(ph: PH, args: dict) -> tuple[str, dict]:
+def _named_ph(name: str, dialect: str) -> str:
+    """Return the named-placeholder syntax for the dialect.
+
+    psycopg accepts pyformat '%(name)s'; sqlite3 only accepts the named
+    style ':name'. Emitting the right shape here keeps the args dict
+    untouched — both drivers look up by `name` as the dict key.
+    """
+    return f':{name}' if dialect == 'sqlite' else f'%({name})s'
+
+
+def _proc_named(ph: PH, args: dict, dialect: str) -> tuple[str, dict]:
     """Process named placeholder."""
     name = ph.name
     if name not in args:
-        return f'%({name})s', {}
+        return _named_ph(name, dialect), {}
 
     val = args[name]
 
@@ -440,12 +457,12 @@ def _proc_named(ph: PH, args: dict) -> tuple[str, dict]:
 
     # IN clause
     if ph.ctx == 'in':
-        return _expand_named_in(name, val, ph.in_parens)
+        return _expand_named_in(name, val, ph.in_parens, dialect)
 
-    return f'%({name})s', {name: val}
+    return _named_ph(name, dialect), {name: val}
 
 
-def _expand_named_in(name: str, val: Any, in_parens: bool) -> tuple[str, dict]:
+def _expand_named_in(name: str, val: Any, in_parens: bool, dialect: str) -> tuple[str, dict]:
     """Expand named IN clause."""
     # Unwrap single nested sequence
     if _isseq(val) and len(val) == 1 and _isseq(val[0]):
@@ -459,7 +476,7 @@ def _expand_named_in(name: str, val: Any, in_parens: bool) -> tuple[str, dict]:
         phs = []
         for i, v in enumerate(val):
             key = f'{name}_{i}'
-            phs.append(f'%({key})s')
+            phs.append(_named_ph(key, dialect))
             new_args[key] = v
 
         sql = ', '.join(phs)
@@ -467,7 +484,7 @@ def _expand_named_in(name: str, val: Any, in_parens: bool) -> tuple[str, dict]:
 
     # Single value
     key = f'{name}_0'
-    sql = f'%({key})s'
+    sql = _named_ph(key, dialect)
     return (sql, {key: val}) if in_parens else (f'({sql})', {key: val})
 
 
