@@ -28,6 +28,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_memory_db(sqlite_conn: Any) -> bool:
+    """Return True when the 'main' database is backed by ':memory:'.
+
+    PRAGMA database_list yields (seq, name, file); the file path is
+    empty for in-memory databases.
+    """
+    cursor = sqlite_conn.execute('PRAGMA database_list')
+    for row in cursor.fetchall():
+        if row[1] == 'main':
+            return not row[2]
+    return False
+
+
 @register_strategy('sqlite')
 class SQLiteStrategy(DatabaseStrategy):
     """SQLite-specific operations.
@@ -148,12 +161,20 @@ select name as column from pragma_table_info({quoted_table})
 
     def configure_connection(self, conn: Any) -> None:
         """Configure connection settings for SQLite.
+
+        Sets foreign_keys, an explicit busy_timeout, and WAL journal mode
+        on file-based databases. WAL is skipped for ':memory:' since it
+        has no on-disk log to write ahead of.
         """
         sqlite_conn = conn
         if hasattr(conn, 'dbapi_connection'):
             sqlite_conn = conn.dbapi_connection
 
         sqlite_conn.execute('PRAGMA foreign_keys = ON')
+        sqlite_conn.execute('PRAGMA busy_timeout = 5000')
+        if not _is_memory_db(sqlite_conn):
+            sqlite_conn.execute('PRAGMA journal_mode = WAL')
+            sqlite_conn.execute('PRAGMA synchronous = NORMAL')
         sqlite_conn.row_factory = sqlite3.Row
         self.enable_autocommit(sqlite_conn)
 
