@@ -5,6 +5,7 @@ import re
 import sqlite3
 
 import psycopg
+import sqlalchemy.exc
 
 RETRYABLE_PATTERNS = [
     # SSL/TLS errors
@@ -16,6 +17,9 @@ RETRYABLE_PATTERNS = [
     r'eof detected',
     r'broken pipe',
     r'connection reset',
+    r'terminating connection',
+    r'administrator command',
+    r'system is shutting down',
     # Timeouts
     r'timeout',
     r'timed out',
@@ -53,7 +57,9 @@ def is_retryable_error(exc: BaseException) -> bool:
     :param exc: The exception to check.
     :returns: True if the error is likely transient and worth retrying.
     """
-    error_msg = str(exc).lower()
+    if getattr(exc, 'connection_invalidated', False):
+        return True
+    error_msg = str(getattr(exc, 'orig', None) or exc).lower()
     return bool(_RETRYABLE_REGEX.search(error_msg))
 
 
@@ -92,6 +98,8 @@ DbConnectionError = (
     psycopg.InterfaceError,
     sqlite3.OperationalError,
     sqlite3.InterfaceError,
+    sqlalchemy.exc.OperationalError,
+    sqlalchemy.exc.InterfaceError,
     ConnectionFailure,
     )
 
