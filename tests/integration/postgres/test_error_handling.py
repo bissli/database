@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import config
 import database as db
 import psycopg
 import pytest
@@ -153,6 +154,33 @@ def test_upsert_rows_retries_on_connection_error(psql_docker, pg_conn):
     assert call_count[0] == 3
 
     pg_conn.execute('DROP TABLE test_retry')
+
+
+def test_upsert_rows_recovers_when_server_drops_connection(psql_docker, pg_conn):
+    """Verify upsert_rows reconnects after the server drops an idle connection."""
+    pg_conn.execute("""
+        CREATE TABLE IF NOT EXISTS test_drop_recover (
+            id INTEGER PRIMARY KEY,
+            name TEXT
+        )
+    """)
+
+    backend_pid = pg_conn.select('select pg_backend_pid() as pid')[0]['pid']
+
+    killer = db.connect('postgresql', config=config)
+    try:
+        db.execute(killer, 'select pg_terminate_backend(%s)', backend_pid)
+    finally:
+        killer.close()
+
+    assert getattr(pg_conn.sa_connection, 'closed', False) is False
+
+    pg_conn.upsert_rows('test_drop_recover', [{'id': 1, 'name': 'recovered'}])
+
+    rows = pg_conn.select('select name from test_drop_recover where id = 1')
+    assert rows[0]['name'] == 'recovered'
+
+    pg_conn.execute('DROP TABLE test_drop_recover')
 
 
 if __name__ == '__main__':

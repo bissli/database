@@ -163,6 +163,9 @@ def check_connection(func: Callable[..., T] | None = None, *, max_retries: int =
                     if tries >= max_retries:
                         logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
                         raise
+                    conn = args[0] if args else None
+                    if isinstance(conn, ConnectionWrapper) and not conn.in_transaction:
+                        conn._invalidate()
                     logger.warning(f'Retryable error (attempt {tries}/{max_retries}): {err}')
                     sleep_func(delay)
                     delay *= retry_backoff
@@ -288,12 +291,33 @@ class ConnectionWrapper:
     def cursor(self) -> 'Cursor':
         """Get a wrapped cursor for this connection
         """
-        if getattr(self.sa_connection, 'closed', False):
+        self._ensure_connection()
+        return get_dict_cursor(self)
+
+    def _ensure_connection(self) -> None:
+        """Rebuild the connection if it is closed, invalidated, or discarded.
+
+        A server-dropped connection leaves the closed flag False, so
+        invalidated and the None sentinel also trigger a reconnect.
+        """
+        if (self.sa_connection is None
+                or getattr(self.sa_connection, 'closed', False)
+                or getattr(self.sa_connection, 'invalidated', False)):
             self.sa_connection = self.engine.connect()
             self.dbapi_connection = self.sa_connection.connection
             configure_connection(self.sa_connection)
 
-        return get_dict_cursor(self)
+    def _invalidate(self) -> None:
+        """Discard a broken connection so the next cursor() rebuilds it.
+        """
+        try:
+            if self.sa_connection is not None:
+                self.sa_connection.invalidate()
+        except Exception as e:
+            logger.debug(f'Error invalidating broken connection: {e}')
+        finally:
+            self.sa_connection = None
+            self.dbapi_connection = None
 
     def _addcall(self, elapsed: float) -> None:
         """Track execution statistics
@@ -438,6 +462,7 @@ class ConnectionWrapper:
                 return _schema_cache[cache_key]
 
         schema, name = _split_schema_for_inspector(table)
+        self._ensure_connection()
         inspector = inspect(self.sa_connection)
         columns = [col['name'] for col in inspector.get_columns(name, schema=schema)]
         with _schema_cache_lock:
@@ -453,6 +478,7 @@ class ConnectionWrapper:
                 return _schema_cache[cache_key]
 
         schema, name = _split_schema_for_inspector(table)
+        self._ensure_connection()
         inspector = inspect(self.sa_connection)
         pk_constraint = inspector.get_pk_constraint(name, schema=schema)
         primary_keys = pk_constraint.get('constrained_columns', [])
