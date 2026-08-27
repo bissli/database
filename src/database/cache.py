@@ -67,6 +67,11 @@ class Cache:
         Args:
             table_name: Name of the table to clear cache entries for
         """
+        if not table_name:
+            logger.warning('clear_for_table called with an empty table name; '
+                           'ignoring rather than clearing every cache')
+            return
+
         table_lower = table_name.lower()
         with self._lock:
             for cache in self._caches.values():
@@ -110,8 +115,12 @@ class Cache:
         Returns
             TTLCache for schema metadata
         """
-        cache_name = f'schema_{connection_id}' if connection_id else 'schema_global'
+        cache_name = ('schema_global' if connection_id is None
+                      else f'schema_{connection_id}')
         return self.get_cache(cache_name, maxsize=50, ttl=600)
+
+
+_MISS = object()
 
 
 def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) -> str:
@@ -120,7 +129,7 @@ def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) 
     Excludes connection objects (detected by cursor/driver_connection attributes).
     """
     args_str = ':'.join(
-        repr(arg) for arg in method_args[1:]
+        repr(arg) for arg in method_args
         if not hasattr(arg, 'cursor') and not hasattr(arg, 'driver_connection')
     )
 
@@ -150,29 +159,35 @@ def cacheable_strategy(cache_name: str, ttl: int = 300, maxsize: int = 50):
         def wrapper(self, cn, table, *args, bypass_cache=False, **kwargs):
             if bypass_cache:
                 logger.debug(f'Bypassing cache for {method.__name__}({table})')
-                return method(self, cn, table, *args, **kwargs)
+                return method(self, cn, table, *args, bypass_cache=True, **kwargs)
 
+            # Notes:
+            # - Only key construction and the cache lookup sit inside the
+            #   try. Wrapping the wrapped call too would re-run it on its
+            #   own KeyError/TypeError/ValueError, firing side effects
+            #   twice before the error reached the caller.
             try:
-                # Create cache name specific to strategy class and method
                 strategy_class = self.__class__.__name__
                 specific_cache_name = f'{cache_name}_{strategy_class}_{method.__name__}'
-
                 cache = Cache.get_instance().get_cache(specific_cache_name, ttl=ttl, maxsize=maxsize)
                 cache_key = _create_cache_key(table, args, kwargs)
-
-                if cache_key in cache:
-                    logger.debug(f'Cache hit for {method.__name__}({table})')
-                    return cache[cache_key]
-
-                logger.debug(f'Cache miss for {method.__name__}({table})')
-                result = method(self, cn, table, *args, **kwargs)
-                cache[cache_key] = result
-                return result
-
+                cached = cache.get(cache_key, _MISS)
             except (KeyError, TypeError, ValueError) as e:
-                # Cache-related exceptions - fall back to uncached execution
                 logger.warning(f'Cache error in {method.__name__}({table}): {e}')
                 return method(self, cn, table, *args, **kwargs)
+
+            if cached is not _MISS:
+                logger.debug(f'Cache hit for {method.__name__}({table})')
+                return cached
+
+            logger.debug(f'Cache miss for {method.__name__}({table})')
+            result = method(self, cn, table, *args, **kwargs)
+            try:
+                cache[cache_key] = result
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f'Could not store cache entry for '
+                               f'{method.__name__}({table}): {e}')
+            return result
 
         return wrapper
     return decorator
@@ -187,5 +202,6 @@ def get_schema_cache(connection_id: int | None = None) -> cachetools.TTLCache:
     Returns
         TTLCache for schema metadata
     """
-    cache_name = f'schema_{connection_id}' if connection_id else 'schema_global'
+    cache_name = ('schema_global' if connection_id is None
+                  else f'schema_{connection_id}')
     return Cache.get_instance().get_cache(cache_name, maxsize=50, ttl=600)
