@@ -53,9 +53,24 @@ def iterdict_data_loader(data, column_info, **kwargs) -> list[dict]:
     return list(data)
 
 
-def _empty_dataframe(columns) -> pd.DataFrame:
-    """Create empty DataFrame with column metadata."""
-    df = pd.DataFrame(columns=Column.get_names(columns))
+def _empty_dataframe(columns, dtype=None) -> pd.DataFrame:
+    """Build a column-preserving empty frame carrying the type metadata.
+
+    Parameters
+    ----------
+    columns : list[Column]
+        Column metadata; supplies both the frame's column names and the
+        'column_types' entry of DataFrame.attrs.
+    dtype : Any, default None
+        dtype for every column. Pass the loader's own backing dtype so an
+        empty result is backed the same way a populated one would be.
+
+    Returns
+    -------
+    pd.DataFrame
+        A zero-row frame with the metadata columns.
+    """
+    df = pd.DataFrame(columns=Column.get_names(columns), dtype=dtype)
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
     return df
 
@@ -80,10 +95,12 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     Always returns a DataFrame, never None, with columns preserved for empty results.
     """
     if not data:
-        return _empty_dataframe(columns)
+        return _empty_dataframe(columns, dtype=pd.ArrowDtype(pa.null()))
 
     column_names = Column.get_names(columns)
-    columns_data = [[row[col] for row in data] for col in column_names]
+    # row.get keeps this loader interchangeable with the numpy one, which
+    # nulls an absent key rather than raising.
+    columns_data = [[row.get(col) for row in data] for col in column_names]
     df = pa.table(columns_data, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
     return df
@@ -127,7 +144,7 @@ class DatabaseOptions(ConfigOptions):
             self.data_loader = pandas_numpy_data_loader
 
     def __repr__(self) -> str:
-        masked = '***' if self.password else None
+        masked = None if self.password is None else '***'
         return (
             f'DatabaseOptions(drivername={self.drivername!r}, '
             f'hostname={self.hostname!r}, username={self.username!r}, '
