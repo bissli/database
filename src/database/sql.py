@@ -35,9 +35,9 @@ def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'po
     """Process SQL query with parameters for the given dialect.
 
     Handles:
-    - IN clause expansion: `IN %s` with `(1,2,3)` → `IN (%s,%s,%s)`
-    - IS NULL handling: `IS %s` with `None` → `IS NULL`
-    - Placeholder conversion: `%s` ↔ `?` based on dialect
+    - IN clause expansion: `IN %s` with `(1,2,3)` -> `IN (%s,%s,%s)`
+    - IS NULL handling: `IS %s` with `None` -> `IS NULL`
+    - Placeholder conversion: `%s` <-> `?` based on dialect
     - Percent escaping in string literals for PostgreSQL
     """
 
@@ -61,7 +61,7 @@ def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
     """Quote a table or column name safely.
 
     Dotted identifiers (e.g. 'public.foo') are split on the dot and each
-    segment is quoted independently — so 'public.foo' becomes
+    segment is quoted independently - so 'public.foo' becomes
     '"public"."foo"', not '"public.foo"'. A dot inside an already-quoted
     segment ('"weird.name"') is preserved as part of that segment.
 
@@ -233,10 +233,10 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
     """Return character positions that are inside protected SQL contexts.
 
     Protected contexts:
-    - String literals ('...' and "...") — handled in lexical order with
+    - String literals ('...' and "...") - handled in lexical order with
       precedence over comments and dollar quotes.
     - Single-line comments (--) and block comments (/* */).
-    - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) — PostgreSQL only.
+    - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) - PostgreSQL only.
     - regexp_replace(...) calls.
     """
     protected: set[int] = set()
@@ -291,7 +291,7 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
 def _is_jsonb_op(sql: str, pos: int) -> bool:
     """Detect PostgreSQL JSONB '?' operator at pos.
 
-    Returns True for the JSONB key-exists family — '?' followed (after
+    Returns True for the JSONB key-exists family - '?' followed (after
     optional whitespace) by a quoted literal, or paired into multi-char
     operators '?|' / '?&'. The caller must already know the dialect is
     'postgresql'.
@@ -438,7 +438,7 @@ def _named_ph(name: str, dialect: str) -> str:
 
     psycopg accepts pyformat '%(name)s'; sqlite3 only accepts the named
     style ':name'. Emitting the right shape here keeps the args dict
-    untouched — both drivers look up by `name` as the dict key.
+    untouched - both drivers look up by `name` as the dict key.
     """
     return f':{name}' if dialect == 'sqlite' else f'%({name})s'
 
