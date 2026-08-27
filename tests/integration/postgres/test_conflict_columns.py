@@ -1,7 +1,7 @@
 """
 Integration test for the `conflict_columns` upsert parameter on a table
 where the unique constraint is NOT the primary key. This proves the
-new param actually generates valid PostgreSQL ON CONFLICT SQL — i.e.
+new param actually generates valid PostgreSQL ON CONFLICT SQL - i.e.
 PG accepts the column list against a real unique index that isn't the
 PK.
 """
@@ -14,7 +14,7 @@ def pg_conflict_cols_conn(pg_conn):
     """Table with PK=(id) but a separate UNIQUE INDEX on (a, b).
 
     The point of this fixture is to force the test to actually USE the
-    unique index, not the PK — if the library silently fell back to PK,
+    unique index, not the PK - if the library silently fell back to PK,
     the second upsert would either fail (no PK in row data) or insert
     duplicates.
     """
@@ -78,7 +78,7 @@ def test_conflict_columns_rejects_simultaneous_constraint_name(pg_conflict_cols_
 def test_conflict_columns_fails_when_no_matching_unique_index(pg_conn):
     """If the columns aren't covered by a unique index, PG must reject.
 
-    This proves the param isn't doing anything sneaky — it generates the
+    This proves the param isn't doing anything sneaky - it generates the
     real ON CONFLICT SQL and PG's own constraint resolution applies.
     """
     db.execute(pg_conn, 'DROP TABLE IF EXISTS no_idx_test')

@@ -1,5 +1,5 @@
 """
-Database-agnostic tests for parameter handling — IN clause expansion,
+Database-agnostic tests for parameter handling - IN clause expansion,
 named params, list params, and the "ignore extra args" path.
 
 These cases exercise the library's placeholder logic, which lives above
@@ -37,7 +37,7 @@ def test_list_parameters(db_conn):
 def test_direct_list_parameters(db_conn):
     """`IN %s` accepts a flat list and expands it in-place.
 
-    Two equivalent shapes — flat `[1,2,3]` and wrapped `([1,2,3],)` — must
+    Two equivalent shapes - flat `[1,2,3]` and wrapped `([1,2,3],)` - must
     behave identically.
     """
     test_values = [101, 102, 103]

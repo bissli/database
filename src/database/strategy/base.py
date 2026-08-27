@@ -139,7 +139,7 @@ class DatabaseStrategy(ABC):
         """Get primary key columns for a table
 
         Concrete implementations must apply @cacheable_strategy
-        ('primary_keys') themselves — Python strips decorators on abstract
+        ('primary_keys') themselves - Python strips decorators on abstract
         method overrides, so decorating here would be dead.
 
         Args:
