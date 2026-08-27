@@ -9,6 +9,9 @@ import pathlib
 _SRC = pathlib.Path(__file__).parent.parent.parent / 'src' / 'database'
 _STRATEGY_SRC = _SRC / 'strategy'
 _UNIT_TESTS = pathlib.Path(__file__).parent.parent / 'unit'
+_REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
+_SRC_ROOT = _REPO_ROOT / 'src'
+_TESTS_ROOT = pathlib.Path(__file__).parent.parent
 
 
 def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
@@ -102,7 +105,7 @@ def test_unit_tests_do_not_import_connection_module():
 
 def test_all_registered_strategies_are_concrete():
     """Every dialect in _STRATEGY_REGISTRY must have no unimplemented
-    abstract methods — otherwise the class can't be instantiated.
+    abstract methods - otherwise the class can't be instantiated.
     """
     from database.strategy import _STRATEGY_REGISTRY
 
@@ -167,7 +170,7 @@ def test_public_api_snapshot():
     Added names: update _EXPECTED_ALL with the new names in the same
     commit and explain the addition in the commit message.
 
-    Removed names: check all callers before removing — pre-1.0, this is
+    Removed names: check all callers before removing - pre-1.0, this is
     still a breaking change for downstream consumers.
     """
     import database
@@ -184,8 +187,49 @@ def test_public_api_snapshot():
         )
     if removed:
         messages.append(
-            'Names removed from __all__ (breaking change — check callers): '
+            'Names removed from __all__ (breaking change - check callers): '
             f'{sorted(removed)}'
         )
 
     assert not messages, '\n'.join(messages)
+
+
+def test_python_sources_contain_no_non_ascii_characters():
+    """Every .py file under src/ and tests/ must be pure ASCII.
+
+    Mutation: a Unicode dash or arrow put back into src/, e.g. sql.py's
+        '->' rewritten as the arrow U+2192, or the '-' in
+        strategy/base.py restored to the em dash U+2014.
+    Oracle: a byte-level scan comparing every character's ord() against
+        the 127 boundary, independent of any formatter or linter.
+    """
+    py_files = sorted(_SRC_ROOT.rglob('*.py'))
+    py_files += sorted(_TESTS_ROOT.rglob('*.py'))
+    scanned = {py_file.relative_to(_REPO_ROOT).as_posix() for py_file in py_files}
+
+    roots_reached = {'src/database/sql.py', 'tests/unit/test_sql.py'}
+    assert roots_reached <= scanned, (
+        f'the walk missed a root - only {len(py_files)} files scanned')
+
+    offenders = []
+    for py_file in py_files:
+        raw = py_file.read_bytes()
+        if raw.isascii():
+            continue
+        # surrogateescape keeps a non-UTF-8 byte reportable instead of
+        # raising, and maps it above 127 so the scan still flags it.
+        text = raw.decode('utf-8', errors='surrogateescape')
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for col, char in enumerate(line, start=1):
+                if ord(char) < 128:
+                    continue
+                offenders.append(
+                    f'{py_file.relative_to(_REPO_ROOT).as_posix()}:'
+                    f'{lineno}:{col}: {ascii(char)} (U+{ord(char):04X})'
+                )
+
+    assert not offenders, (
+        'Non-ASCII characters in Python sources - they mangle over SSM '
+        'or S3 and break parsing on Windows:\n'
+        + '\n'.join(f'  {o}' for o in offenders)
+    )
