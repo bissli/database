@@ -242,11 +242,11 @@ class TestPrepareQueryInClause:
         """
         sql = 'SELECT * FROM t WHERE date = %s AND fund IN (%s)'
 
-        result = prepare_query(sql, ('2025-01-01', 'Tenor'), 'postgresql')
+        result = prepare_query(sql, ('2025-01-01', 'Growth'), 'postgresql')
 
         assert result == (
             'SELECT * FROM t WHERE date = %s AND fund IN (%s)',
-            ('2025-01-01', 'Tenor'))
+            ('2025-01-01', 'Growth'))
 
     def test_in_clause_with_single_element_list(self):
         """A one-element list in an IN slot expands to exactly one marker.
@@ -257,11 +257,11 @@ class TestPrepareQueryInClause:
         """
         sql = 'SELECT * FROM t WHERE date = %s AND fund IN (%s)'
 
-        result = prepare_query(sql, ('2025-01-01', ['Tenor']), 'postgresql')
+        result = prepare_query(sql, ('2025-01-01', ['Growth']), 'postgresql')
 
         assert result == (
             'SELECT * FROM t WHERE date = %s AND fund IN (%s)',
-            ('2025-01-01', 'Tenor'))
+            ('2025-01-01', 'Growth'))
 
     def test_in_context_survives_whitespace_after_open_paren(self):
         """`IN ( %s )` is still an IN context; the prefix is right-stripped.
