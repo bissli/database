@@ -77,15 +77,25 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     """Build a stable, password-free cache key for the engine registry.
 
     The key must identify an engine uniquely per (drivername, host, port,
-    user, database, appname, pool config) — but never expose the
+    user, database, appname, timeout, pool config) - but never expose the
     password. Two options with the same credentials except different
     passwords still collide; that is acceptable because the registry is
     process-local and the engine pool will fail-fast on the real
     connection if the password is wrong.
+
+    Notes
+    -----
+    - timeout belongs in the key because the strategies bake it into the
+      engine URL; leaving it out hands the second caller the first
+      caller's timeout.
+    - Parts are joined through repr() so a '|' inside a username,
+      database, or appname cannot shift the boundary between two fields
+      and make unlike configurations share an engine.
     """
-    return '|'.join(str(part) for part in (
+    return '|'.join(repr(part) for part in (
         options.drivername, options.hostname, options.port,
         options.username, options.database, options.appname,
+        options.timeout,
         use_pool, pool_size, pool_recycle, pool_timeout,
     ))
 
@@ -99,8 +109,26 @@ def create_url_from_options(options: DatabaseOptions,
                             url_creator: Callable[..., sa.URL] | None = None) -> sa.URL:
     """Convert DatabaseOptions to SQLAlchemy URL.
 
-    Delegates to the database strategy to build the connection URL string,
-    then parses it into a SQLAlchemy URL object.
+    Parameters
+    ----------
+    options : DatabaseOptions
+        Connection settings; options.database is authoritative over
+        whatever survives the URL round trip.
+    url_creator : Callable[..., sa.URL] | None, default None
+        Test seam. When given, the parsed parts are handed to it instead
+        of the sa.URL that make_url produced.
+
+    Returns
+    -------
+    sa.URL
+        A SQLAlchemy URL ready for create_engine.
+
+    Notes
+    -----
+    - The strategies percent-encode the database name so a '?' or '#' in
+      it cannot inject libpq query parameters. make_url unquotes only
+      username and password, so the raw name is put back here; without
+      that, a database called 'my db' would be opened as 'my%20db'.
     """
     strategy = get_strategy(options.drivername)
     url_string = strategy.build_connection_url(options)
@@ -108,6 +136,8 @@ def create_url_from_options(options: DatabaseOptions,
     if url_creator is not None:
         # For testing - parse and recreate using the provided factory
         parsed = sa.make_url(url_string)
+        if options.database and parsed.database != options.database:
+            parsed = parsed.set(database=options.database)
         return url_creator(
             drivername=parsed.drivername,
             username=parsed.username,
@@ -118,7 +148,10 @@ def create_url_from_options(options: DatabaseOptions,
             query=dict(parsed.query) if parsed.query else {}
         )
 
-    return sa.make_url(url_string)
+    url = sa.make_url(url_string)
+    if options.database and url.database != options.database:
+        url = url.set(database=options.database)
+    return url
 
 
 def check_connection(func: Callable[..., T] | None = None, *, max_retries: int = 3,
@@ -758,7 +791,7 @@ class ConnectionWrapper:
             update_cols_ifnull=update_cols_ifnull if should_update else None,
         )
 
-        params = [[row[col] for col in columns] for row in rows]
+        params = [[row.get(col) for col in columns] for row in rows]
 
         cursor = self.cursor()
         rc = cursor.executemany(sql, params, batch_size)
