@@ -135,9 +135,6 @@ class Transaction:
         if connection_id in _local.active_transactions:
             raise RuntimeError('Nested transactions are not supported')
 
-        if hasattr(cn, 'in_transaction'):
-            cn.in_transaction = True
-
     @property
     def cursor(self) -> Any:
         """Lazy cursor wrapped with timing and error handling.
@@ -146,6 +143,9 @@ class Transaction:
 
     def __enter__(self):
         _local.active_transactions[id(self.connection)] = True
+
+        if hasattr(self.connection, 'in_transaction'):
+            self.connection.in_transaction = True
 
         disable_auto_commit(self.connection)
         logger.debug(f'Started transaction for connection {id(self.connection)}')
