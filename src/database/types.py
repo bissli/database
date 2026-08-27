@@ -250,7 +250,19 @@ def _safe_array_oid(type_name: str) -> int | None:
 
 
 def _build_postgres_types() -> dict[int, type]:
-    """Build PostgreSQL type code to Python type mapping."""
+    """Build PostgreSQL type code to Python type mapping.
+
+    Returns
+    -------
+    dict[int, type]
+        Python type psycopg loads each type OID as.
+
+    Notes
+    -----
+    - A temporal entry states what psycopg hands back, not what SQL
+      calls the type: `time` and `timetz` load as `datetime.time`, and
+      only the `timestamp` family loads as `datetime.datetime`.
+    """
     types: dict[int, type] = {}
 
     type_mappings = [
@@ -259,9 +271,10 @@ def _build_postgres_types() -> dict[int, type]:
         (int, ['bigint', 'int2', 'int4', 'int8', 'integer']),
         (float, ['float4', 'float8', 'double precision', 'numeric']),
         (datetime.date, ['date']),
-        (datetime.datetime, ['time', 'time with time zone', 'time without time zone',
-                             'timestamp with time zone', 'timestamp without time zone',
-                             'timestamptz', 'timetz', 'timestamp']),
+        (datetime.time, ['time', 'time with time zone', 'time without time zone',
+                         'timetz']),
+        (datetime.datetime, ['timestamp', 'timestamp with time zone',
+                             'timestamp without time zone', 'timestamptz']),
         (bool, ['bool', 'boolean']),
         (bytes, ['bytea']),
         (dict, ['json', 'jsonb']),
