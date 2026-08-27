@@ -6,6 +6,8 @@ import datetime
 import psycopg
 import pytest
 from database.types import postgres_types, resolve_type, sqlite_types
+from psycopg.adapt import Transformer
+from psycopg.pq import Format
 
 
 def get_pg_oid(type_name):
@@ -29,7 +31,8 @@ class TestPostgresTypeMapping:
         ('varchar', str),
         ('text', str),
         ('date', datetime.date),
-        ('time', datetime.datetime),
+        ('time', datetime.time),
+        ('timetz', datetime.time),
         ('timestamp', datetime.datetime),
         ('timestamptz', datetime.datetime),
         ('bool', bool),
@@ -40,13 +43,32 @@ class TestPostgresTypeMapping:
         'int4', 'int8', 'int2',
         'float8', 'float4',
         'varchar', 'text',
-        'date', 'time', 'timestamp', 'timestamptz',
+        'date', 'time', 'timetz', 'timestamp', 'timestamptz',
         'bool', 'json', 'jsonb', 'bytea',
     ])
     def test_postgres_type_resolution(self, pg_type, expected_python_type):
         """Test PostgreSQL type code resolves to correct Python type"""
         result = resolve_type('postgresql', get_pg_oid(pg_type))
         assert result == expected_python_type
+
+    @pytest.mark.parametrize(('pg_type', 'wire_value'), [
+        ('date', b'2024-01-15'),
+        ('time', b'17:00:00'),
+        ('timetz', b'17:00:00+00'),
+        ('timestamp', b'2024-01-15 17:00:00'),
+        ('timestamptz', b'2024-01-15 17:00:00+00'),
+    ], ids=['date', 'time', 'timetz', 'timestamp', 'timestamptz'])
+    def test_temporal_type_matches_what_psycopg_loads(self, pg_type, wire_value):
+        """Verify a temporal OID resolves to the class psycopg loads it as.
+
+        Mutation: mapping time or timetz to datetime.datetime, the way
+            the SQL spelling suggests.
+        Oracle: psycopg's own registered loader for the same OID, which
+            decides the class a cursor actually hands back.
+        """
+        oid = get_pg_oid(pg_type)
+        loaded = Transformer().get_loader(oid, Format.TEXT).load(wire_value)
+        assert resolve_type('postgresql', oid) is type(loaded)
 
 
 class TestSqliteTypeMapping:
