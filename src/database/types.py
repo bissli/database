@@ -35,6 +35,7 @@ SQLiteConnection = TypeVar('SQLiteConnection')
 SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
 NUMPY_FLOAT_TYPES = (np.floating,)
 NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
+NUMPY_BOOL_TYPES = (np.bool_,)
 PANDAS_NULLABLE_TYPES = (
     pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
     pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
@@ -120,23 +121,44 @@ def _convert_pyarrow_value(value: Any) -> Any:
         return None
 
 
-def _convert_numpy_value(val: Any) -> float | int | datetime.datetime | None:
-    """Convert NumPy value to Python type."""
+def _convert_numpy_value(val: Any) -> float | int | bool | datetime.datetime | None:
+    """Convert a NumPy scalar to its builtin Python counterpart.
+
+    Parameters
+    ----------
+    val : Any
+        A NumPy scalar, or any value the caller could not classify.
+
+    Returns
+    -------
+    float | int | bool | datetime.datetime | None
+        The unboxed builtin, or None for a NumPy null. Anything that is
+        not a NumPy scalar is returned unchanged.
+
+    Notes
+    -----
+    - Both NaN and infinity map to None, matching what convert_value
+      already does for builtin floats: no SQL numeric column can hold
+      either, and np.float32 does not subclass float so it reaches this
+      function rather than that branch.
+    - datetime64 is read as naive UTC.
+    """
     if val is None:
         return None
 
-    if isinstance(val, np.floating) and np.isnan(val):
+    if isinstance(val, np.floating) and (np.isnan(val) or np.isinf(val)):
         return None
 
     if isinstance(val, np.datetime64) and np.isnat(val):
         return None
 
-    if isinstance(val, (np.floating, np.integer | np.unsignedinteger)):
+    if isinstance(val, (np.floating, np.integer, np.unsignedinteger, np.bool_)):
         return val.item()
 
     if isinstance(val, np.datetime64):
         timestamp = val.astype('datetime64[s]').astype(int)
-        return datetime.datetime.utcfromtimestamp(timestamp)
+        return datetime.datetime.fromtimestamp(
+            timestamp, datetime.UTC).replace(tzinfo=None)
 
     return val
 
@@ -194,7 +216,8 @@ class TypeConverter:
         if isinstance(value, str) and _check_special_string(value) is None:
             return None
 
-        if isinstance(value, (*NUMPY_FLOAT_TYPES, *NUMPY_INT_TYPES, np.datetime64)):
+        if isinstance(value, (*NUMPY_FLOAT_TYPES, *NUMPY_INT_TYPES,
+                              *NUMPY_BOOL_TYPES, np.datetime64)):
             return _convert_numpy_value(value)
 
         if pd.api.types.is_scalar(value) and pd.isna(value):
@@ -255,13 +278,18 @@ def _build_postgres_types() -> dict[int, type]:
     Returns
     -------
     dict[int, type]
-        Python type psycopg loads each type OID as.
+        The Python type this library reports for each type OID.
 
     Notes
     -----
     - A temporal entry states what psycopg hands back, not what SQL
       calls the type: `time` and `timetz` load as `datetime.time`, and
       only the `timestamp` family loads as `datetime.datetime`.
+    - Two entries deliberately differ from what psycopg loads: `numeric`
+      (OID 1700) is reported as `float` where psycopg returns
+      `decimal.Decimal`, and `uuid` (OID 2950) as `str` where psycopg
+      returns `uuid.UUID`. The map is the reported type, not a promise
+      about the row values.
     """
     types: dict[int, type] = {}
 
@@ -465,7 +493,11 @@ class Column:
                 'internal_size': description_item[3],
                 'precision': description_item[4],
                 'scale': description_item[5],
-                'nullable': bool(description_item[6])
+                # DBAPI null_ok is None for "unknown", which sqlite3
+                # reports for every column. bool() would turn that into
+                # a definite NOT NULL.
+                'nullable': (None if description_item[6] is None
+                             else bool(description_item[6]))
             }
         return {
             'name': description_item[0] if len(description_item) > 0 else None,
