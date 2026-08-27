@@ -7,6 +7,7 @@ Public API:
 - prepare_query(sql, args, dialect) - Main entry point for query processing
 - quote_identifier(name, dialect) - Quote table/column names
 - has_placeholders(sql) - Check for parameter placeholders
+- has_named_placeholders(sql, dialect) - Check for named placeholders only
 - standardize_placeholders(sql, dialect) - Convert %s <-> ?
 """
 import re
@@ -26,6 +27,8 @@ _STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")  # String literals
 _REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
 _UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by % or s or (
 _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening tag
+_NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')  # Named pyformat placeholder
+_NAMED_COLON_RE = re.compile(r'(?<!:):\w+')  # sqlite named placeholder, ':' cast excluded
 
 # Placeholder info: position, end, name (for named params), context, already in parens
 PH = namedtuple('PH', 'pos end name ctx in_parens')
@@ -175,11 +178,48 @@ def has_placeholders(sql: str | None) -> bool:
     """Check if SQL contains parameter placeholders.
 
     Covers pyformat ('%(name)s'), classic positional ('%s'), qmark ('?'),
-    and sqlite named (':name') — i.e. any placeholder that might appear
+    and sqlite named (':name') - i.e. any placeholder that might appear
     in SQL on its way to the DBAPI cursor. '::' (PG type cast) is
     explicitly excluded.
     """
     return bool(sql and _HAS_PH_RE.search(sql))
+
+
+def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool:
+    """Report whether SQL carries named placeholders the caller must bind.
+
+    Parameters
+    ----------
+    sql : str | None
+        SQL to inspect, already standardized for the dialect.
+    dialect : str, default 'postgresql'
+        Which named syntaxes count. PostgreSQL recognizes pyformat
+        '%(name)s' only; sqlite also recognizes ':name'.
+
+    Returns
+    -------
+    bool
+        True when at least one named placeholder sits outside a string
+        literal, comment, or dollar-quoted body.
+
+    Notes
+    -----
+    - This is what separates a dict argument that names parameters from
+      a dict argument that IS a value (a JSON column, say). Without the
+      distinction every dict is bound by name.
+    - The ':name' form is left out for PostgreSQL on purpose: '::' casts
+      and array slices ('arr[1:3]') would otherwise read as named
+      placeholders.
+    """
+    if not sql:
+        return False
+    patterns = [_NAMED_PYFORMAT_RE]
+    if dialect == 'sqlite':
+        patterns.append(_NAMED_COLON_RE)
+    protected = _protected_ranges(sql, dialect)
+    return any(m.start() not in protected
+               for pattern in patterns
+               for m in pattern.finditer(sql))
 
 
 def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
@@ -325,10 +365,17 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
     if not args:
         return args
 
+    # Notes:
+    # - A dict is a name->value binding map only when the SQL actually
+    #   names a placeholder. Against '?' or '%s' it is an ordinary
+    #   value (a JSON column, say), and binding it by name would emit
+    #   ':None' from _proc_named, since a positional PH carries no name.
+    has_named = any(p.name for p in phs)
+
     # Rule 1: Dict passthrough
     if isinstance(args, dict):
-        return args
-    if len(args) == 1 and isinstance(args[0], dict):
+        return args if has_named else (args,)
+    if len(args) == 1 and isinstance(args[0], dict) and has_named:
         return args[0]
 
     in_count = sum(1 for p in phs if p.ctx == 'in')

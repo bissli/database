@@ -11,7 +11,7 @@ from functools import wraps
 from typing import Any
 
 from database.exceptions import QueryError
-from database.sql import has_placeholders
+from database.sql import has_named_placeholders, has_placeholders
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
 from database.types import columns_from_cursor_description
@@ -27,7 +27,7 @@ def dumpsql(is_many: bool = False):
 
     Uses lazy %-format on the logger so parameter __repr__ is only
     invoked when a handler actually emits the record (i.e. when DEBUG
-    or ERROR are enabled). This matters on the hot path — every
+    or ERROR are enabled). This matters on the hot path - every
     execute/executemany call passes through here.
 
     Args:
@@ -40,7 +40,8 @@ def dumpsql(is_many: bool = False):
         def wrapper(self, operation: str, *args: Any, **kwargs: Any):
             start = time.perf_counter()
             if is_many:
-                row_count = len(args[0]) if args and args[0] else 0
+                params = args[0] if args else kwargs.get('seq_of_parameters')
+                row_count = len(params) if params else 0
                 logger.debug('SQL:\n%s\nparams: %d rows', operation, row_count)
             else:
                 logger.debug('SQL:\n%s\nargs: %s', operation, args)
@@ -179,7 +180,8 @@ class Cursor:
 
         # Named parameters (dict)
         dict_params = self._find_dict_params(args)
-        if dict_params is not None:
+        if dict_params is not None and has_named_placeholders(
+                sql, getattr(self.connwrapper, 'dialect', 'postgresql')):
             self._execute_with_dict_params(sql, dict_params)
             return
 
@@ -270,7 +272,8 @@ class Cursor:
             self.dbapi_cursor.executemany(operation, seq_of_parameters)
             total_rowcount = self.dbapi_cursor.rowcount
         else:
-            logger.debug(f'Batching {len(seq_of_parameters)} rows into chunks of {batch_size}')
+            logger.debug('Batching %d rows into chunks of %d',
+                         len(seq_of_parameters), batch_size)
             for i in range(0, len(seq_of_parameters), batch_size):
                 chunk = seq_of_parameters[i:i + batch_size]
                 self.dbapi_cursor.executemany(operation, chunk)
