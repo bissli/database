@@ -2,9 +2,9 @@
 
 mask_protected_text blanks string literals, comments, and dollar-quoted
 bodies while holding every offset, and split_statements splits only on
-the semicolons that survive it. Cursor._is_multi_statement decides on
-that split, so a scanner that ends a literal early breaks a query in
-half and sends both halves.
+the semicolons that survive it. Cursor._execute_query decides on that
+split, so a scanner that ends a literal early breaks a query in half
+and sends both halves.
 """
 import pytest
 from database.sql import mask_protected_text, split_statements

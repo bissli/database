@@ -188,8 +188,9 @@ class Cursor:
             return
 
         # Multi-statement SQL with positional params
-        if self._is_multi_statement(sql) and args:
-            self._execute_multi_statement(sql, args)
+        statements = self._statements(sql)
+        if len(statements) > 1 and args:
+            self._execute_multi_statement(statements, args)
             return
 
         # Standard execution
@@ -204,8 +205,9 @@ class Cursor:
 
     def _execute_with_dict_params(self, sql: str, params: dict) -> None:
         """Execute SQL with named (dict) parameters."""
-        if self._is_multi_statement(sql):
-            self._execute_multi_statement_named(sql, params)
+        statements = self._statements(sql)
+        if len(statements) > 1:
+            self._execute_multi_statement_named(statements, params)
         else:
             self.dbapi_cursor.execute(sql, params)
 
@@ -240,13 +242,8 @@ class Cursor:
         """
         return split_statements(sql, getattr(self.connwrapper, 'dialect', 'postgresql'))
 
-    def _is_multi_statement(self, sql: str) -> bool:
-        """Check if SQL contains multiple statements."""
-        return len(self._statements(sql)) > 1
-
-    def _execute_multi_statement(self, sql: str, args: tuple) -> None:
-        """Execute multiple statements with positional parameters."""
-        statements = self._statements(sql)
+    def _execute_multi_statement(self, statements: list[str], args: tuple) -> None:
+        """Execute each statement, splitting the positional parameters."""
         params = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
 
         placeholder = self.strategy.get_placeholder_style()
@@ -267,9 +264,10 @@ class Cursor:
             else:
                 self.dbapi_cursor.execute(stmt)
 
-    def _execute_multi_statement_named(self, sql: str, params_dict: dict) -> None:
-        """Execute multiple statements with named parameters."""
-        for stmt in self._statements(sql):
+    def _execute_multi_statement_named(self, statements: list[str],
+                                       params_dict: dict) -> None:
+        """Execute each statement with the named parameters it uses."""
+        for stmt in statements:
             param_names = re.findall(r'%\(([^)]+)\)s', stmt)
             if param_names:
                 stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
