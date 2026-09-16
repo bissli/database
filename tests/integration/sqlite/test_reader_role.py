@@ -327,13 +327,13 @@ def test_reader_refuses_an_empty_batch(sqlite_reader_pair):
 def test_comment_hidden_statement_never_runs(sqlite_reader_pair):
     """Verify a write behind a trailing comment is neither seen nor run.
 
-    The guard masks comments before splitting; the cursor used to
-    split the raw text, so a statement hidden behind '--' skipped
-    classification and then executed.
+    split_statements masks comments before splitting; the cursor used
+    to split the raw text, so a statement hidden behind '--' became a
+    statement of its own and executed.
 
     Mutation: sql.split(';') in place of split_statements in
-        Cursor._is_multi_statement and _execute_multi_statement, which
-        clears query_only and commits the row.
+        Cursor._execute_query, which clears query_only and commits
+        the row.
     Oracle: the writer's row count and SQLite's report of query_only,
         both unchanged after the call.
     """
