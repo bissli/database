@@ -13,6 +13,7 @@ For detailed documentation, see the [API Reference](docs/README.md)
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
   - [Connections](#connections)
+  - [Reader Endpoints](#reader-endpoints)
   - [Queries](#queries)
   - [Transactions](#transactions)
 - [Common Usage Patterns](#common-usage-patterns)
@@ -86,6 +87,41 @@ sqlite_cn = db.connect({
 ```
 
 For more connection options including pooling, see the [Connection Management documentation](docs/README.md#connection-management).
+
+### Reader Endpoints
+
+A cluster that publishes a separate reader endpoint can serve read-only
+work from its replicas instead of its writer:
+
+```python
+import database as db
+
+options = {
+    'drivername': 'postgresql',
+    'database': 'your_database',
+    'hostname': 'cluster.cluster-abc123.us-east-1.rds.amazonaws.com',
+    'reader_hostname': 'cluster.cluster-ro-abc123.us-east-1.rds.amazonaws.com',
+    'username': 'your_username',
+    'password': 'your_password',
+    'port': 5432
+}
+
+reader = db.connect(options, role='reader')
+
+db.select(reader, 'SELECT count(*) FROM orders')   # served by a replica
+db.execute(reader, 'DELETE FROM orders')           # raises ReadOnlyError
+```
+
+A reader rejects every write in process, before the statement reaches the
+replica, and its session is read-only on the server as well. A database
+declaring no reader endpoint still answers `role='reader'`, falling back to
+the writer endpoint and keeping the guard. `role` is keyword only.
+
+SQLite has no reader endpoint, so the reader host values are ignored there
+and `role='reader'` opens the same file with the guard applied.
+
+For endpoint selection, the full list of refused operations, and pooling
+behavior, see the [Reader Endpoints documentation](docs/README.md#reader-endpoints-and-read-only-connections).
 
 ### Queries
 

@@ -12,6 +12,7 @@ from typing import Any
 
 from database.exceptions import QueryError
 from database.sql import has_named_placeholders, has_placeholders
+from database.sql import raise_on_readonly_write, split_statements
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
 from database.types import columns_from_cursor_description
@@ -156,6 +157,7 @@ class Cursor:
     @dumpsql()
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation."""
+        raise_on_readonly_write(self.connwrapper, operation)
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)
@@ -216,13 +218,35 @@ class Cursor:
         else:
             self.dbapi_cursor.execute(sql, args)
 
+    def _statements(self, sql: str) -> list[str]:
+        """Split SQL into the statements that will actually be sent.
+
+        Parameters
+        ----------
+        sql : str
+            Statement text.
+
+        Returns
+        -------
+        list[str]
+            One entry per statement, splitting only on a semicolon that
+            sits outside every literal and comment.
+
+        Notes
+        -----
+        - Splitting the raw text executes a statement hidden behind a
+          trailing '--', and breaks a query carrying a semicolon inside
+          a string literal.
+        """
+        return split_statements(sql, getattr(self.connwrapper, 'dialect', 'postgresql'))
+
     def _is_multi_statement(self, sql: str) -> bool:
         """Check if SQL contains multiple statements."""
-        return ';' in sql and len([s for s in sql.split(';') if s.strip()]) > 1
+        return len(self._statements(sql)) > 1
 
     def _execute_multi_statement(self, sql: str, args: tuple) -> None:
         """Execute multiple statements with positional parameters."""
-        statements = [stmt.strip() for stmt in sql.split(';') if stmt.strip()]
+        statements = self._statements(sql)
         params = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
 
         placeholder = self.strategy.get_placeholder_style()
@@ -245,7 +269,7 @@ class Cursor:
 
     def _execute_multi_statement_named(self, sql: str, params_dict: dict) -> None:
         """Execute multiple statements with named parameters."""
-        for stmt in (s.strip() for s in sql.split(';') if s.strip()):
+        for stmt in self._statements(sql):
             param_names = re.findall(r'%\(([^)]+)\)s', stmt)
             if param_names:
                 stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
@@ -261,6 +285,7 @@ class Cursor:
             logger.warning('executemany called with no parameter sequences')
             return 0
 
+        raise_on_readonly_write(self.connwrapper, operation)
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)

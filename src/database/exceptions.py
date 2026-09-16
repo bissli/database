@@ -93,6 +93,11 @@ class ValidationError(DatabaseError):
     """
 
 
+class ReadOnlyError(DatabaseError):
+    """Write attempted on a connection opened for reading only.
+    """
+
+
 DbConnectionError = (
     psycopg.OperationalError,
     psycopg.InterfaceError,

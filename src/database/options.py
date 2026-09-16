@@ -117,6 +117,15 @@ class DatabaseOptions(ConfigOptions):
     - pool_max_connections: Maximum connections in pool (default: 5)
     - pool_max_idle_time: Maximum seconds a connection can be idle (default: 300)
     - pool_wait_timeout: Maximum seconds to wait for a connection (default: 30)
+
+    Notes
+    -----
+    - reader_hostname and reader_port name the endpoint serving the
+      cluster's replicas, which `connect(..., role='reader')` opens.
+    - A database declaring neither still answers role='reader': each
+      field falls back to hostname or port on its own, so the reader
+      lands on the writer endpoint and keeps the read-only guard.
+    - SQLite has no reader endpoint, so both fields are ignored there.
     """
     drivername: str = 'postgresql'
     hostname: str = None
@@ -127,6 +136,9 @@ class DatabaseOptions(ConfigOptions):
     timeout: int = 0
     appname: str = None
     data_loader: Callable[..., Any] | None = None
+    # Reader endpoint parameters
+    reader_hostname: str = None
+    reader_port: int = 0
     # Connection pooling parameters
     use_pool: bool = False
     pool_max_connections: int = 5

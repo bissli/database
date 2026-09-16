@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _raw_sqlite(conn: Any) -> Any:
+    """Return the sqlite3 connection behind a pooled wrapper."""
+    if hasattr(conn, 'dbapi_connection'):
+        return conn.dbapi_connection
+    return conn
+
+
 def _is_memory_db(sqlite_conn: Any) -> bool:
     """Return True when the 'main' database is backed by ':memory:'.
 
@@ -160,23 +167,48 @@ select name as column from pragma_table_info({quoted_table})
         return self.get_primary_keys(cn, table, bypass_cache=bypass_cache)
 
     def configure_connection(self, conn: Any) -> None:
-        """Configure connection settings for SQLite.
+        """Apply the SQLite session settings every connection takes.
 
-        Sets foreign_keys, an explicit busy_timeout, and WAL journal mode
-        on file-based databases. WAL is skipped for ':memory:' since it
-        has no on-disk log to write ahead of.
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw sqlite3 connection.
+
+        Notes
+        -----
+        - foreign_keys, busy_timeout, the row factory, and auto-commit
+          live in the connection, not the database, so a reader takes
+          them too.
         """
-        sqlite_conn = conn
-        if hasattr(conn, 'dbapi_connection'):
-            sqlite_conn = conn.dbapi_connection
-
+        sqlite_conn = _raw_sqlite(conn)
         sqlite_conn.execute('PRAGMA foreign_keys = ON')
         sqlite_conn.execute('PRAGMA busy_timeout = 5000')
-        if not _is_memory_db(sqlite_conn):
-            sqlite_conn.execute('PRAGMA journal_mode = WAL')
-            sqlite_conn.execute('PRAGMA synchronous = NORMAL')
         sqlite_conn.row_factory = sqlite3.Row
         self.enable_autocommit(sqlite_conn)
+
+    def configure_writer_connection(self, conn: Any) -> None:
+        """Put the database in WAL mode, which only a writer may do.
+
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw sqlite3 connection.
+
+        Notes
+        -----
+        - journal_mode is stored in the database header, so setting it
+          changes the file itself and fails on a database whose
+          permissions deny writing. query_only does not cover it,
+          which is why a reader has to skip it rather than rely on the
+          session setting.
+        - Skipped for ':memory:', which has no on-disk log to write
+          ahead of.
+        """
+        sqlite_conn = _raw_sqlite(conn)
+        if _is_memory_db(sqlite_conn):
+            return
+        sqlite_conn.execute('PRAGMA journal_mode = WAL')
+        sqlite_conn.execute('PRAGMA synchronous = NORMAL')
 
     def enable_autocommit(self, raw_conn: Any) -> None:
         """Enable auto-commit mode for SQLite.
@@ -187,6 +219,23 @@ select name as column from pragma_table_info({quoted_table})
         """Disable auto-commit mode for SQLite.
         """
         raw_conn.isolation_level = 'DEFERRED'
+
+    def set_session_readonly(self, conn: Any) -> None:
+        """Put a SQLite connection in read-only mode.
+
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw sqlite3 connection.
+
+        Notes
+        -----
+        - query_only makes the database reject every write on this
+          connection, including DDL, while leaving reads untouched.
+        - It does not cover journal_mode, which is why
+          configure_writer_connection holds that pragma instead.
+        """
+        _raw_sqlite(conn).execute('PRAGMA query_only = ON')
 
     def get_placeholder_style(self) -> str:
         """Return SQLite's placeholder marker.

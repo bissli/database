@@ -13,10 +13,9 @@ import sqlite3
 
 import pytest
 import sqlalchemy as sa
-from database.connection import _build_engine_registry_key
-from database.connection import _engine_registry, connect
-from database.connection import create_url_from_options, dispose_all_engines
-from database.connection import get_engine_for_options
+from database.connection import _build_engine_registry_key, _engine_registry
+from database.connection import connect, create_url_from_options
+from database.connection import dispose_all_engines, get_engine_for_options
 from database.options import DatabaseOptions
 from database.strategy.postgres import PostgresStrategy
 from sqlalchemy.pool import NullPool, StaticPool
@@ -156,7 +155,7 @@ class TestPostgresUrlShape:
 class TestCredentialEncoding:
     """Characters that would corrupt URL parsing must be encoded."""
 
-    @pytest.mark.parametrize('password,encoded', [
+    @pytest.mark.parametrize(('password', 'encoded'), [
         ('p@ss', 'p%40ss'),
         ('p/ss', 'p%2Fss'),
         ('p?ss', 'p%3Fss'),
@@ -184,7 +183,7 @@ class TestCredentialEncoding:
         assert parsed.host == 'myhost'
         assert parsed.username == 'myuser'
 
-    @pytest.mark.parametrize('username,encoded', [
+    @pytest.mark.parametrize(('username', 'encoded'), [
         ('user@dom', 'user%40dom'),
         ('user:name', 'user%3Aname'),
         ('user/name', 'user%2Fname'),
@@ -260,7 +259,7 @@ class TestAppnameInjection:
         assert len(parsed.query) == 6
         assert parsed.query['application_name'] == 'evil&sslmode=disable'
 
-    @pytest.mark.parametrize('appname,encoded', [
+    @pytest.mark.parametrize(('appname', 'encoded'), [
         ('name=with=equals', 'name%3Dwith%3Dequals'),
         ('name#frag', 'name%23frag'),
         ('my app', 'my+app'),
@@ -297,7 +296,7 @@ class TestCreateUrlFromOptions:
         assert url.port == 5432
         assert url.query['application_name'] == 'myapp'
 
-    @pytest.mark.parametrize('database,expected', [
+    @pytest.mark.parametrize(('database', 'expected'), [
         ('test.db', 'sqlite:///test.db'),
         ('/tmp/abs.db', 'sqlite:////tmp/abs.db'),
     ], ids=['relative', 'absolute'])
@@ -451,17 +450,17 @@ class TestEngineRegistryKey:
     def test_key_matches_hand_written_literal(self):
         """Verify the key's exact field set, order, and separator.
 
-        Mutation: dropping options.database, options.appname or
-        options.timeout from the key tuple, reordering username and
-        database, or swapping repr() back to str() so a '|' inside a
-        field can shift the field boundary.
+        Mutation: dropping options.database, options.appname,
+        options.timeout or readonly from the key tuple, reordering
+        username and database, or swapping repr() back to str() so a
+        '|' inside a field can shift the field boundary.
         Oracle: hand-written key literal.
         """
-        key = _build_engine_registry_key(_options(), False, 5, 300, 30)
+        key = _build_engine_registry_key(_options(), False, 5, 300, 30, False)
         assert key == ("'postgresql'|'myhost'|5432|'myuser'|'mydb'|'myapp'"
-                       '|30|False|5|300|30')
+                       '|30|False|5|300|30|False')
 
-    @pytest.mark.parametrize('field,value', [
+    @pytest.mark.parametrize(('field', 'value'), [
         ('drivername', 'sqlite'),
         ('hostname', 'otherhost'),
         ('port', 5433),
@@ -483,7 +482,7 @@ class TestEngineRegistryKey:
                                              False, 5, 300, 30)
         assert changed != baseline
 
-    @pytest.mark.parametrize('position,value', [
+    @pytest.mark.parametrize(('position', 'value'), [
         (0, True),
         (1, 7),
         (2, 111),
@@ -503,6 +502,20 @@ class TestEngineRegistryKey:
         pool_args[position] = value
         changed = _build_engine_registry_key(_options(), *pool_args)
         assert changed != baseline
+
+    def test_readonly_changes_the_key(self):
+        """Verify the reader role gets its own engine.
+
+        Mutation: dropping readonly from the key tuple, which lets one
+        pooled engine serve both roles - a writer then checks out a
+        connection whose session the server holds read only, and every
+        write on it fails.
+        Oracle: inequality between the two keys, with every other
+        field held equal.
+        """
+        writer = _build_engine_registry_key(_options(), False, 5, 300, 30, False)
+        reader = _build_engine_registry_key(_options(), False, 5, 300, 30, True)
+        assert reader != writer
 
 
 class TestEngineRegistry:
@@ -542,6 +555,24 @@ class TestEngineRegistry:
         assert first is not second
         assert len(created) == 2
         assert len(_engine_registry) == 2
+
+    def test_readonly_engines_are_not_shared_with_writers(self):
+        """Verify get_engine_for_options forwards readonly to the key.
+
+        Mutation: dropping readonly=readonly from the
+        _build_engine_registry_key call inside get_engine_for_options,
+        which leaves the key correct in isolation while the two roles
+        still collapse onto one engine in practice.
+        Oracle: a spy factory counting create_engine calls for the two
+        roles over one identical option set.
+        """
+        factory, created = _spy_factory()
+        writer = get_engine_for_options(_options(), readonly=False,
+                                        engine_factory=factory)
+        reader = get_engine_for_options(_options(), readonly=True,
+                                        engine_factory=factory)
+        assert writer is not reader
+        assert len(created) == 2
 
     def test_unpooled_engine_uses_nullpool(self):
         """Verify the default path disables pooling outright.

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from database.cache import cacheable_strategy
 from database.exceptions import ValidationError
 from database.sql import quote_identifier as sql_quote_identifier
+from database.sql import raise_on_readonly_write
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -49,6 +50,7 @@ class DatabaseStrategy(ABC):
 
         Handles cursor creation, SQL execution, and cleanup.
         """
+        raise_on_readonly_write(cn, sql)
         sql = self.standardize_sql(sql)
         cursor = cn.dbapi_connection.cursor()
         try:
@@ -187,10 +189,37 @@ class DatabaseStrategy(ABC):
 
     @abstractmethod
     def configure_connection(self, conn: Any) -> None:
-        """Configure connection settings.
+        """Apply the session settings every connection takes.
 
-        Args:
-            conn: Database connection to configure with database-specific settings
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw DBAPI connection to configure.
+
+        Notes
+        -----
+        - Session settings only. Anything that writes to the database
+          itself belongs in configure_writer_connection, which a
+          reader skips.
+        """
+
+    def configure_writer_connection(self, conn: Any) -> None:
+        """Apply the settings only a writer may set.
+
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw DBAPI connection to configure.
+
+        Notes
+        -----
+        - Runs after configure_connection, and only for a writer. A
+          dialect whose setup writes to the database - SQLite's
+          journal_mode lives in the database header - puts that here,
+          so a reader neither changes the database nor fails on one
+          whose file denies writing.
+        - No-op by default: most dialects configure a session and
+          nothing else.
         """
 
     @abstractmethod
@@ -207,6 +236,27 @@ class DatabaseStrategy(ABC):
 
         Args:
             raw_conn: The raw DBAPI connection (not wrapped)
+        """
+
+    @abstractmethod
+    def set_session_readonly(self, conn: Any) -> None:
+        """Put a session in read-only mode for the rest of its life.
+
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw DBAPI connection for this dialect.
+
+        Notes
+        -----
+        - Runs after configure_connection, which PostgreSQL requires:
+          psycopg refuses an auto-commit change once a statement has
+          opened a transaction.
+        - A backstop, not the guard: a caller can undo it with SET or
+          PRAGMA, which is why those two classify as writes.
+        - PostgreSQL still permits VACUUM under this setting, and does
+          not stop every write reached through a function, so the local
+          guard carries the rest.
         """
 
     @property

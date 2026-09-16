@@ -15,7 +15,7 @@ from database.connection import ConnectionWrapper, connect
 from database.exceptions import ConnectionFailure, DatabaseError
 from database.exceptions import DbConnectionError, IntegrityError
 from database.exceptions import IntegrityViolationError, OperationalError
-from database.exceptions import ProgrammingError, QueryError
+from database.exceptions import ProgrammingError, QueryError, ReadOnlyError
 from database.exceptions import TypeConversionError, UniqueViolation
 from database.exceptions import ValidationError
 from database.options import DatabaseOptions
@@ -200,5 +200,6 @@ __all__ = [
     'DatabaseError',
     'IntegrityViolationError',
     'QueryError',
+    'ReadOnlyError',
     'TypeConversionError',
 ]

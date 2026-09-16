@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import fields
+from dataclasses import replace
 from functools import wraps
 from typing import Any, Self, TextIO, TypeVar
 
@@ -27,8 +27,8 @@ import pandas as pd
 import sqlalchemy as sa
 from database.cursor import extract_column_info, get_dict_cursor, load_data
 from database.cursor import process_multiple_result_sets
-from database.exceptions import DbConnectionError, ValidationError
-from database.exceptions import is_retryable_error
+from database.exceptions import DbConnectionError, ReadOnlyError
+from database.exceptions import ValidationError, is_retryable_error
 from database.options import DatabaseOptions, use_iterdict_data_loader
 from database.sql import _split_qualified_identifier, make_placeholders
 from database.sql import prepare_query, quote_identifier
@@ -40,7 +40,7 @@ from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool, StaticPool
 
-from libb import attrdict, is_null, load_options, peel
+from libb import attrdict, is_null, peel
 
 __all__ = [
     'ConnectionWrapper',
@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
+_CONNECTION_ROLES = frozenset({'writer', 'reader'})
 
 
 def _split_schema_for_inspector(table: str) -> tuple[str | None, str]:
@@ -73,7 +74,8 @@ def _split_schema_for_inspector(table: str) -> tuple[str | None, str]:
 
 def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
                                pool_size: int, pool_recycle: int,
-                               pool_timeout: int) -> str:
+                               pool_timeout: int,
+                               readonly: bool = False) -> str:
     """Build a stable, password-free cache key for the engine registry.
 
     The key must identify an engine uniquely per (drivername, host, port,
@@ -91,12 +93,16 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     - Parts are joined through repr() so a '|' inside a username,
       database, or appname cannot shift the boundary between two fields
       and make unlike configurations share an engine.
+    - readonly belongs in the key because the read-only session
+      setting outlives a return to the pool; one shared engine would
+      hand a writer a connection the server refuses to write on.
     """
     return '|'.join(repr(part) for part in (
         options.drivername, options.hostname, options.port,
         options.username, options.database, options.appname,
         options.timeout,
         use_pool, pool_size, pool_recycle, pool_timeout,
+        readonly,
     ))
 
 
@@ -212,15 +218,41 @@ def check_connection(func: Callable[..., T] | None = None, *, max_retries: int =
 
 def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
                            pool_size: int = 5, pool_recycle: int = 300,
-                           pool_timeout: int = 30,
+                           pool_timeout: int = 30, readonly: bool = False,
                            engine_factory: Callable[..., Engine] = sa.create_engine,
                            **kwargs: Any) -> Engine:
     """Get or create a SQLAlchemy engine for the given options.
+
+    Parameters
+    ----------
+    options : DatabaseOptions
+        Connection settings.
+    use_pool : bool, default False
+        Whether the engine pools connections.
+    pool_size : int, default 5
+        Hard ceiling on pooled connections.
+    pool_recycle : int, default 300
+        Seconds before a pooled connection is discarded.
+    pool_timeout : int, default 30
+        Seconds a caller waits for a pooled connection.
+    readonly : bool, default False
+        Whether connections from this engine carry the read-only
+        session setting. Engines are registered separately per value,
+        so a writer never checks out a read-only connection.
+    engine_factory : Callable[..., Engine], default sa.create_engine
+        Test seam for engine construction.
+    **kwargs : Any
+        Extra create_engine keyword arguments.
+
+    Returns
+    -------
+    Engine
+        A cached engine, or a newly built one.
     """
     is_memory_sqlite = (options.drivername == 'sqlite'
                         and options.database == ':memory:')
     key = _build_engine_registry_key(options, use_pool, pool_size,
-                                     pool_recycle, pool_timeout)
+                                     pool_recycle, pool_timeout, readonly)
 
     with _engine_registry_lock:
         if not is_memory_sqlite and key in _engine_registry:
@@ -286,12 +318,25 @@ class ConnectionWrapper:
     """
 
     def __init__(self, sa_connection: sa.engine.Connection | None = None,
-                 options: 'DatabaseOptions | None' = None) -> None:
-        """Initialize a connection wrapper
+                 options: 'DatabaseOptions | None' = None,
+                 readonly: bool = False) -> None:
+        """Initialize a connection wrapper.
+
+        Parameters
+        ----------
+        sa_connection : sa.engine.Connection | None, default None
+            Live SQLAlchemy connection this wrapper tracks.
+        options : DatabaseOptions | None, default None
+            Settings the connection was opened with. For a reader,
+            hostname and port already name the reader endpoint.
+        readonly : bool, default False
+            Whether writes are rejected before they leave the process.
+            connect() sets it for role='reader'.
         """
         self.sa_connection = sa_connection
         self.engine = sa_connection.engine if sa_connection else None
         self.options = options
+        self.readonly = readonly
         self.dbapi_connection = sa_connection.connection if sa_connection else None
         self._dialect = get_dialect_name(sa_connection) if sa_connection else None
         self.calls = 0
@@ -338,7 +383,7 @@ class ConnectionWrapper:
                 or getattr(self.sa_connection, 'invalidated', False)):
             self.sa_connection = self.engine.connect()
             self.dbapi_connection = self.sa_connection.connection
-            configure_connection(self.sa_connection)
+            configure_connection(self.sa_connection, readonly=self.readonly)
 
     def _invalidate(self) -> None:
         """Discard a broken connection so the next cursor() rebuilds it.
@@ -357,6 +402,35 @@ class ConnectionWrapper:
         """
         self.time += elapsed
         self.calls += 1
+
+    def _reject_if_readonly(self, operation: str) -> None:
+        """Refuse an unconditional write on a read-only connection.
+
+        Parameters
+        ----------
+        operation : str
+            Name of the calling method, quoted back in the error.
+
+        Raises
+        ------
+        ReadOnlyError
+            When this connection was opened for reading only.
+
+        Notes
+        -----
+        - For a method that writes whatever its arguments, so it needs
+          no look at the SQL. Three reasons it is not redundant with
+          the classifier: PostgreSQL's sequence reset runs 'select
+          setval(...)', which classifies as a select; copy_from never
+          builds a statement; and an empty row collection returns early
+          before any SQL exists, which would otherwise report a clean
+          zero on a reader.
+        - update_or_insert takes both statements from the caller, so it
+          is no stronger than execute() unless rejected here.
+        """
+        if self.readonly:
+            raise ReadOnlyError(
+                f'{operation} is not allowed on a read-only connection')
 
     @property
     def is_pooled(self) -> bool:
@@ -539,30 +613,35 @@ class ConnectionWrapper:
     def vacuum_table(self, table: str) -> None:
         """Optimize a table by reclaiming space.
         """
+        self._reject_if_readonly('vacuum_table')
         strategy = get_db_strategy(self)
         strategy.vacuum_table(self, table)
 
     def reindex_table(self, table: str) -> None:
         """Rebuild indexes for a table.
         """
+        self._reject_if_readonly('reindex_table')
         strategy = get_db_strategy(self)
         strategy.reindex_table(self, table)
 
     def cluster_table(self, table: str, index: str | None = None) -> None:
         """Order table data according to an index.
         """
+        self._reject_if_readonly('cluster_table')
         strategy = get_db_strategy(self)
         strategy.cluster_table(self, table, index)
 
     def reset_table_sequence(self, table: str, identity: str | None = None) -> None:
         """Reset a table's sequence/identity column to the max value + 1.
         """
+        self._reject_if_readonly('reset_table_sequence')
         strategy = get_db_strategy(self)
         strategy.reset_sequence(self, table, identity)
 
     def insert_row(self, table: str, fields: list[str], values: list[Any]) -> int:
         """Insert a row into a table using the supplied list of fields and values.
         """
+        self._reject_if_readonly('insert_row')
         if len(fields) != len(values):
             raise ValidationError('fields must be same length as values')
 
@@ -576,6 +655,7 @@ class ConnectionWrapper:
     def insert_rows(self, table: str, rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> int:
         """Insert multiple rows into a table.
         """
+        self._reject_if_readonly('insert_rows')
         if not rows:
             logger.debug('Skipping insert of empty rows')
             return 0
@@ -604,6 +684,7 @@ class ConnectionWrapper:
         """Update the specified datafields to the supplied datavalues in a table row
         identified by the keyfields and keyvalues.
         """
+        self._reject_if_readonly('update_row')
         if len(keyfields) != len(keyvalues):
             raise ValidationError('keyfields must be same length as keyvalues')
         if len(datafields) != len(datavalues):
@@ -624,6 +705,7 @@ class ConnectionWrapper:
     def update_or_insert(self, update_sql: str, insert_sql: str, *args: Any) -> int:
         """Try to update first; if no rows are updated, then insert.
         """
+        self._reject_if_readonly('update_or_insert')
 
         with Transaction(self) as tx:
             rc = tx.execute(update_sql, *args)
@@ -696,6 +778,7 @@ class ConnectionWrapper:
         covered by a unique constraint or unique index) > primary-key
         auto-detect.
         """
+        self._reject_if_readonly('upsert_rows')
         if not rows:
             logger.debug('Skipping upsert of empty rows')
             return 0
@@ -809,54 +892,124 @@ class ConnectionWrapper:
                   columns: list[str] | None = None) -> int:
         """Bulk load data from a file-like object using COPY.
         """
+        self._reject_if_readonly('copy_from')
         strategy = get_db_strategy(self)
         return strategy.copy_from(self, table, file, columns)
 
 
-def configure_connection(sa_connection: sa.engine.Connection) -> None:
+def configure_connection(sa_connection: sa.engine.Connection,
+                         readonly: bool = False) -> None:
     """Configure a SQLAlchemy connection with database-specific settings.
+
+    Parameters
+    ----------
+    sa_connection : sa.engine.Connection
+        Connection to configure.
+    readonly : bool, default False
+        Whether to put the session in read-only mode, so the server
+        refuses a write the local guard cannot classify. A writer
+        takes the dialect's writer-only settings instead.
     """
     strategy = get_db_strategy(sa_connection)
     strategy.configure_connection(sa_connection.connection)
     strategy.register_type_adapters(sa_connection.connection)
+    if readonly:
+        # Last, because configure_connection turns auto-commit on and
+        # psycopg refuses to change auto-commit once a statement has
+        # opened a transaction.
+        strategy.set_session_readonly(sa_connection.connection)
+    else:
+        strategy.configure_writer_connection(sa_connection.connection)
 
 
-@load_options(cls=DatabaseOptions)
-def connect(options: DatabaseOptions | dict[str, Any] | str,
-            config: Any | None = None, **kw: Any) -> ConnectionWrapper:
-    """Connect to a database using SQLAlchemy for connection management
+def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
+            config: Any | None = None, *, role: str = 'writer',
+            **kw: Any) -> ConnectionWrapper:
+    """Connect to a database using SQLAlchemy for connection management.
 
-    Args:
-        options: Can be:
-                - DatabaseOptions object
-                - String path to configuration
-                - Dictionary of options
-                - Options specified as keyword arguments
-        config: Configuration object (for loading from config files)
-        **kw: Additional keyword arguments to override options
-
-    Connection pooling options:
-        use_pool: Whether to use connection pooling (default: False)
-        pool_max_connections: Maximum connections in pool (default: 5)
-        pool_max_idle_time: Maximum seconds a connection can be idle (default: 300)
-        pool_wait_timeout: Maximum seconds to wait for a connection (default: 30)
+    Parameters
+    ----------
+    options : DatabaseOptions | dict[str, Any] | str | None, default None
+        A DatabaseOptions object, a dotted config path, a dict of
+        options, or None when the options arrive as keyword arguments.
+    config : Any | None, default None
+        Configuration object a dotted path is resolved against.
+    role : str, default 'writer'
+        Which cluster endpoint to open. Keyword only. 'writer' uses
+        hostname and port. 'reader' uses reader_hostname and
+        reader_port, falls back to the writer's own value for whichever
+        of the two is unset, and rejects writes.
+    **kw : Any
+        Individual options, used when options is None.
 
     Returns
-        ConnectionWrapper object for connecting to the database
-    """
-    if isinstance(options, DatabaseOptions):
-        for field in fields(options):
-            kw.pop(field.name, None)
-    else:
-        options_func = load_options(cls=DatabaseOptions)(lambda o, c: o)
-        options = options_func(options, config, **kw)
+    -------
+    ConnectionWrapper
+        A live connection. Its 'readonly' attribute is True for a
+        reader, and its 'options' are the ones passed in, unresolved,
+        so handing them back to connect() reopens the same role.
 
-    engine = get_engine_for_options(options, use_pool=options.use_pool,
-                                    pool_size=options.pool_max_connections,
-                                    pool_recycle=options.pool_max_idle_time,
-                                    pool_timeout=options.pool_wait_timeout)
+    Raises
+    ------
+    ValidationError
+        When role names neither 'writer' nor 'reader', when config is
+        a string, or when a reader asks for an in-memory SQLite
+        database.
+
+    Notes
+    -----
+    - A reader rejects an insert, update, delete, DDL statement, row
+      lock, or maintenance call in-process, before it reaches the
+      replica, and its session is read-only on the server as well.
+    - A reader and a writer to one endpoint hold separate engines, so
+      the read-only session setting cannot reach a writer through the
+      pool.
+    - SQLite has no reader endpoint, so reader_hostname and reader_port
+      are ignored there; role='reader' opens the same database and
+      applies the guard.
+    - Pooling comes from options: use_pool, pool_max_connections,
+      pool_max_idle_time, pool_wait_timeout.
+    """
+    if role not in _CONNECTION_ROLES:
+        raise ValidationError(
+            f'role must be one of {sorted(_CONNECTION_ROLES)}, got {role!r}')
+    if isinstance(config, str):
+        # role is keyword only, so a caller writing connect(options,
+        # 'reader') lands the role here, where it would otherwise be
+        # dropped in silence and hand back a writer.
+        raise ValidationError(
+            f'config must be a configuration object, got the string '
+            f"{config!r}; pass the role by keyword, as in "
+            f"connect(options, role='reader')")
+
+    if isinstance(options, str):
+        options = DatabaseOptions.from_config(options, config=config)
+    elif isinstance(options, dict):
+        options = DatabaseOptions(**options)
+    elif options is None:
+        options = DatabaseOptions(**kw)
+
+    readonly = role == 'reader'
+    engine_options = options
+    if readonly:
+        if options.drivername == 'sqlite' and options.database == ':memory:':
+            raise ValidationError(
+                "role='reader' cannot open an in-memory SQLite database: "
+                "each connection to ':memory:' owns a private, empty one")
+        engine_options = replace(
+            options,
+            hostname=options.reader_hostname or options.hostname,
+            port=options.reader_port or options.port)
+
+    engine = get_engine_for_options(
+        engine_options,
+        use_pool=engine_options.use_pool,
+        pool_size=engine_options.pool_max_connections,
+        pool_recycle=engine_options.pool_max_idle_time,
+        pool_timeout=engine_options.pool_wait_timeout,
+        readonly=readonly)
 
     sa_connection = engine.connect()
-    configure_connection(sa_connection)
+    configure_connection(sa_connection, readonly=readonly)
 
-    return ConnectionWrapper(sa_connection, options)
+    return ConnectionWrapper(sa_connection, options, readonly=readonly)
