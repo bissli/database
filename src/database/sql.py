@@ -9,12 +9,16 @@ Public API:
 - has_placeholders(sql) - Check for parameter placeholders
 - has_named_placeholders(sql, dialect) - Check for named placeholders only
 - standardize_placeholders(sql, dialect) - Convert %s <-> ?
+- is_write_sql(sql, dialect) - Classify SQL as writing or reading
+- raise_on_readonly_write(cn, sql) - Guard a read-only connection
+- split_statements(sql, dialect) - Split on unprotected semicolons
+- mask_protected_text(sql, dialect) - Blank literals and comments
 """
 import re
 from collections import namedtuple
 from typing import Any
 
-from database.exceptions import DatabaseError, ValidationError
+from database.exceptions import DatabaseError, ReadOnlyError, ValidationError
 
 from libb import issequence
 
@@ -29,6 +33,46 @@ _UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by %
 _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening tag
 _NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')  # Named pyformat placeholder
 _NAMED_COLON_RE = re.compile(r'(?<!:):\w+')  # sqlite named placeholder, ':' cast excluded
+
+# Leading keyword of a statement that only reads
+_READ_LEAD_WORDS = frozenset({'select', 'with', 'values', 'table', 'show'})
+_LEAD_WORD_RE = re.compile(r'[A-Za-z_][A-Za-z_0-9]*')
+_EXPLAIN_PREFIX_RE = re.compile(
+    r'^explain\b(?:\s*\([^)]*\))?(?:\s+(?:analyze|verbose|query\s+plan))*', re.I)
+_NESTED_WRITE_RE = re.compile(
+    r'\b(?:insert|update|delete|merge|into|truncate)\b', re.I)
+_ROW_LOCK_RE = re.compile(
+    r'\bfor\s+(?:no\s+key\s+)?update\b|\bfor\s+(?:key\s+)?share\b', re.I)
+
+# Every word _NESTED_WRITE_RE or _ROW_LOCK_RE can match, as a plain
+# substring. A body holding none of them cannot match either pattern,
+# and the substring scan runs in C where the alternations do not.
+_WRITE_HINTS = ('insert', 'update', 'delete', 'merge', 'into', 'truncate',
+                'for', 'key', 'share')
+_PRAGMA_NAME_RE = re.compile(r'^pragma\s+(?:\w+\s*\.\s*)?(\w+)', re.I)
+_ANALYZE_RE = re.compile(r'\banalyze\b', re.I)
+_IDENT_CHARS = frozenset('_$')
+_MASKABLE_RE = re.compile(r'[\'"$]|--|/\*')
+
+# SQLite pragmas that only report. Every other pragma counts as a write,
+# because the assignment forms include 'query_only', which turns the
+# server-side half of the read-only guard back off.
+_READ_PRAGMAS = frozenset({
+    'collation_list',
+    'database_list',
+    'foreign_key_check',
+    'foreign_key_list',
+    'function_list',
+    'index_info',
+    'index_list',
+    'index_xinfo',
+    'integrity_check',
+    'module_list',
+    'pragma_list',
+    'quick_check',
+    'table_info',
+    'table_xinfo',
+    })
 
 # Placeholder info: position, end, name (for named params), context, already in parens
 PH = namedtuple('PH', 'pos end name ctx in_parens')
@@ -247,6 +291,315 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
     return _PH_RE.sub(replace, sql)
 
 
+def mask_protected_text(sql: str, dialect: str = 'postgresql') -> str | None:
+    """Blank out every literal and comment, or report the text unscannable.
+
+    Parameters
+    ----------
+    sql : str
+        Statement text.
+    dialect : str, default 'postgresql'
+        Governs the two dialect-specific rules: PostgreSQL nests block
+        comments, honors a backslash escape inside an E'' string, and
+        has dollar quoting; SQLite has none of the three.
+
+    Returns
+    -------
+    str | None
+        The text with each literal and comment replaced by spaces,
+        preserving length and offsets. None when a literal, comment, or
+        dollar-quoted body never closes, so no offset after it can be
+        trusted.
+
+    Notes
+    -----
+    - Separate from _protected_ranges, which serves placeholder
+      processing and must keep going on text this rejects. This one
+      fails closed instead, so a caller reading it as a permission
+      check cannot be fooled by an unterminated quote.
+    - Leaves regexp_replace() calls alone. _protected_ranges masks the
+      whole call, which would hide a write sitting after it.
+    - Text carrying no quote, comment opener, or dollar sign is
+      returned unchanged, which keeps the scan off a large generated
+      statement that has nothing to mask.
+    """
+    if not sql:
+        return sql
+    if not _MASKABLE_RE.search(sql):
+        return sql
+
+    out = list(sql)
+    n = len(sql)
+    i = 0
+
+    while i < n:
+        char = sql[i]
+
+        if char in {"'", '"'}:
+            escaped = (dialect == 'postgresql' and char == "'"
+                       and i and sql[i - 1] in 'Ee'
+                       and not (i > 1 and (sql[i - 2].isalnum()
+                                           or sql[i - 2] in _IDENT_CHARS)))
+            j = i + 1
+            closed = False
+            while j < n:
+                if escaped and sql[j] == '\\':
+                    j += 2
+                    continue
+                if sql[j] == char:
+                    if j + 1 < n and sql[j + 1] == char:
+                        j += 2
+                        continue
+                    j += 1
+                    closed = True
+                    break
+                j += 1
+            if not closed:
+                return None
+            out[i:j] = ' ' * (j - i)
+            i = j
+            continue
+
+        if char == '-' and sql.startswith('--', i):
+            j = sql.find('\n', i + 2)
+            j = n if j == -1 else j
+            out[i:j] = ' ' * (j - i)
+            i = j
+            continue
+
+        if char == '/' and sql.startswith('/*', i):
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if dialect == 'postgresql' and sql.startswith('/*', j):
+                    depth += 1
+                    j += 2
+                    continue
+                if sql.startswith('*/', j):
+                    depth -= 1
+                    j += 2
+                    continue
+                j += 1
+            if depth:
+                return None
+            out[i:j] = ' ' * (j - i)
+            i = j
+            continue
+
+        if dialect == 'postgresql' and char == '$':
+            match = _DOLLAR_OPEN_RE.match(sql, i)
+            if match:
+                tag = match.group(0)
+                close = sql.find(tag, match.end())
+                if close == -1:
+                    return None
+                j = close + len(tag)
+                out[i:j] = ' ' * (j - i)
+                i = j
+                continue
+
+        i += 1
+
+    return ''.join(out)
+
+
+def split_statements(sql: str, dialect: str = 'postgresql') -> list[str]:
+    """Split SQL on the semicolons that are not inside a literal.
+
+    Parameters
+    ----------
+    sql : str
+        One or more statements.
+    dialect : str, default 'postgresql'
+        Dialect whose literal and comment rules apply.
+
+    Returns
+    -------
+    list[str]
+        The statements, stripped, with blank ones dropped. A single
+        element when there is nothing to split, and the whole text as
+        one element when it cannot be scanned.
+
+    Notes
+    -----
+    - A semicolon inside a string or a comment does not split.
+      Splitting on the raw text executes a statement hidden behind
+      '--' and breaks a query holding a semicolon in a literal.
+    - Text with no semicolon at all skips the scan, which keeps the
+      cost off the single-statement path every query takes.
+    """
+    if ';' not in sql:
+        stripped = sql.strip()
+        return [stripped] if stripped else []
+
+    masked = mask_protected_text(sql, dialect)
+    if masked is None:
+        return [sql.strip()]
+    return _split_on_semicolons(masked, sql)
+
+
+def _split_on_semicolons(masked: str, original: str) -> list[str]:
+    """Split original where masked carries an unprotected semicolon.
+
+    Parameters
+    ----------
+    masked : str
+        mask_protected_text output for original, so every semicolon
+        left in it sits outside a literal and a comment.
+    original : str
+        Text to slice, offset for offset with masked. Callers that
+        only need the masked form pass it for both, which is what
+        keeps is_write_sql from masking twice.
+
+    Returns
+    -------
+    list[str]
+        Stripped statements, with blank ones dropped.
+    """
+    if ';' not in masked:
+        stripped = original.strip()
+        return [stripped] if stripped else []
+
+    statements = []
+    start = 0
+    for pos, char in enumerate(masked):
+        if char != ';':
+            continue
+        piece = original[start:pos].strip()
+        if piece:
+            statements.append(piece)
+        start = pos + 1
+    tail = original[start:].strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def is_write_sql(sql: str, dialect: str = 'postgresql') -> bool:
+    """Classify one or more statements as writing or reading.
+
+    Parameters
+    ----------
+    sql : str
+        Statement text, semicolon separated for a multi-statement call.
+    dialect : str, default 'postgresql'
+        Dialect whose literal, comment, and pragma rules apply.
+
+    Returns
+    -------
+    bool
+        True when any statement in sql can write. False only where
+        every statement leads with a reading keyword and carries no
+        data-modifying clause and no row lock.
+
+    Notes
+    -----
+    - Fails closed. An unrecognized leading keyword, a body the mask
+      cannot scan, and a body whose first token is not a word all read
+      as writes, so a statement form this function has never seen is
+      blocked rather than waved through.
+    - A row-locking select ('for update', 'for share') counts as a
+      write, because a standby refuses the lock.
+    - 'set', 'reset', and every assigning pragma count as writes, which
+      is what stops a caller clearing the server-side read-only
+      setting. A reporting pragma such as 'pragma table_info(t)' reads.
+    - 'explain' without 'analyze' reads: the server plans the inner
+      statement without running it.
+    - Blind to a write reached through a function, as in
+      'select setval(...)'. The session read-only setting refuses most
+      of those, though not every one, so this is a guard and not a
+      proof.
+    - Runs only for a read-only connection, and short-circuits on a
+      cheap substring scan before either alternation, so a large
+      generated statement does not pay for the regexes.
+    """
+    if not sql:
+        return False
+
+    masked = mask_protected_text(sql, dialect)
+    if masked is None:
+        return True
+
+    for statement in _split_on_semicolons(masked, masked):
+        body = statement.strip()
+        explain = _EXPLAIN_PREFIX_RE.match(body)
+        if explain is not None:
+            if not _ANALYZE_RE.search(explain.group(0)):
+                continue
+            body = body[explain.end():]
+        body = body.lstrip('( \t\r\n')
+        if not body:
+            continue
+        lead = _LEAD_WORD_RE.match(body)
+        if lead is None:
+            return True
+        keyword = lead.group(0).lower()
+        if keyword == 'pragma':
+            if _pragma_reads(body):
+                continue
+            return True
+        if keyword not in _READ_LEAD_WORDS:
+            return True
+        lowered = body.lower()
+        if not any(hint in lowered for hint in _WRITE_HINTS):
+            continue
+        if _NESTED_WRITE_RE.search(body) or _ROW_LOCK_RE.search(body):
+            return True
+    return False
+
+
+def _pragma_reads(body: str) -> bool:
+    """Return True for a pragma that only reports.
+
+    Parameters
+    ----------
+    body : str
+        A statement already known to lead with 'pragma', masked so no
+        literal or comment remains.
+
+    Returns
+    -------
+    bool
+        True only for a whitelisted pragma name carrying no assignment.
+    """
+    if '=' in body:
+        return False
+    name = _PRAGMA_NAME_RE.match(body)
+    return name is not None and name.group(1).lower() in _READ_PRAGMAS
+
+
+def raise_on_readonly_write(cn: Any, sql: str) -> None:
+    """Reject a write before it travels to a read-only connection.
+
+    Parameters
+    ----------
+    cn : Any
+        Connection-like object; read-only when its 'readonly' attribute
+        is true, and its 'dialect' names the dialect to classify under.
+    sql : str
+        Statement text about to be executed.
+
+    Raises
+    ------
+    ReadOnlyError
+        When cn is read-only and sql can write.
+
+    Notes
+    -----
+    - Classification runs only for a read-only connection, so a writer
+      pays nothing for the guard.
+    - An object carrying no 'readonly' attribute is treated as a
+      writer, which keeps a raw DBAPI connection working unchanged.
+    """
+    if not getattr(cn, 'readonly', False):
+        return
+    if not is_write_sql(sql, getattr(cn, 'dialect', 'postgresql')):
+        return
+    statement = ' '.join(sql.split())[:120]
+    raise ReadOnlyError(
+        f'write rejected on a read-only connection: {statement}')
+
+
 def _find_contexts(sql: str, dialect: str = 'postgresql') -> list[PH]:
     """Find placeholders with their contexts in one pass."""
     protected = _protected_ranges(sql, dialect)
@@ -278,6 +631,15 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
     - Single-line comments (--) and block comments (/* */).
     - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) - PostgreSQL only.
     - regexp_replace(...) calls.
+
+    Notes
+    -----
+    - A block comment closes at the first '*/' here, so a nested
+      PostgreSQL comment leaves its tail unprotected. Placeholder
+      processing wants that: it keeps going on text it cannot parse
+      rather than refusing the query. mask_protected_text nests
+      instead, because a permission check has to fail closed. Do not
+      make one match the other.
     """
     protected: set[int] = set()
     n = len(sql)

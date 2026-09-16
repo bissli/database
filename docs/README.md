@@ -10,6 +10,7 @@ This document provides detailed API documentation and advanced usage information
 - [Connection Management](#connection-management)
   - [Creating Connections](#creating-connections)
   - [Connection Options](#connection-options)
+  - [Reader Endpoints and Read-Only Connections](#reader-endpoints-and-read-only-connections)
   - [Connection Pooling](#connection-pooling)
   - [Configuration File Pattern](#configuration-file-pattern)
 - [Query Operations](#query-operations)
@@ -140,6 +141,9 @@ options = DatabaseOptions(
     cleanup=True,              # Auto-close on garbage collection
     check_connection=True,     # Enable auto-reconnect
     data_loader=None,          # Custom data loader function (defaults to pandas)
+    # Reader endpoint parameters
+    reader_hostname=None,      # Host serving the cluster's replicas
+    reader_port=0,             # Port on that host
     # Connection pooling parameters
     use_pool=False,            # Enable connection pooling
     pool_max_connections=5,    # Maximum connections in pool
@@ -149,6 +153,109 @@ options = DatabaseOptions(
 
 cn = db.connect(options)
 ```
+
+### Reader Endpoints and Read-Only Connections
+
+An Aurora cluster publishes two endpoints: a writer, and a reader serving
+its replicas. `connect()` takes a `role` naming which one to open.
+
+```python
+import database as db
+
+# The default. Opens hostname:port and writes freely.
+writer = db.connect(options)
+
+# Opens reader_hostname:reader_port and refuses every write.
+reader = db.connect(options, role='reader')
+```
+
+`role` is keyword only, and accepts `'writer'` and `'reader'`. Any other
+value raises `ValidationError` before a connection opens, as does passing
+the role positionally, where it would otherwise land in `config` and be
+dropped. A reader carries `cn.readonly == True`, and `cn.options` are the
+options as passed in, so handing them back to `connect()` reopens the
+same role.
+
+#### Endpoint selection
+
+A reader takes `reader_hostname` and `reader_port` from the options, and
+falls back to `hostname` or `port` for whichever of the two is unset. Each
+falls back on its own, so a cluster sharing one port needs only the
+hostname:
+
+```python
+# config.py
+postgresql = Setting()
+postgresql.hostname = 'cluster.cluster-abc123.us-east-1.rds.amazonaws.com'
+postgresql.reader_hostname = 'cluster.cluster-ro-abc123.us-east-1.rds.amazonaws.com'
+postgresql.port = 5432
+```
+
+A database declaring no reader field still answers `role='reader'`. The
+connection lands on the writer endpoint and keeps the read-only guard, so a
+partial config stays usable.
+
+SQLite has no reader endpoint, so `reader_hostname` and `reader_port` are
+ignored there: `role='reader'` opens the same database file and applies
+the guard. A SQLite reader also leaves the file itself alone, skipping the
+`journal_mode` and `synchronous` pragmas a writer sets, so it can open a
+database whose file permissions deny writing.
+
+`role='reader'` with `database=':memory:'` raises `ValidationError`. Each
+connection to `':memory:'` owns a private database, so a reader would get
+an empty one and report every table as missing.
+
+#### What a reader refuses
+
+Two layers reject a write, and both are active on every reader.
+
+The first runs in process, before anything reaches the network:
+
+- `execute()` with an INSERT, UPDATE, DELETE, MERGE, TRUNCATE, or DDL
+  statement, a data-modifying CTE, a row-locking SELECT (`for update`,
+  `for share`), `SET`, `RESET`, or `PRAGMA`
+- `insert_row`, `insert_rows`, `update_row`, `update_or_insert`,
+  `upsert_rows`, `copy_from`
+- `vacuum_table`, `reindex_table`, `cluster_table`,
+  `reset_table_sequence`
+- the same statements inside a `transaction()` block
+
+Each raises `ReadOnlyError`, a subclass of `DatabaseError`:
+
+```python
+reader = db.connect(options, role='reader')
+
+db.select(reader, 'select count(*) from orders')     # fine
+
+db.execute(reader, 'delete from orders')
+# ReadOnlyError: write rejected on a read-only connection: delete from orders
+```
+
+The second layer is the session itself. PostgreSQL readers run with
+`default_transaction_read_only = on`; SQLite readers run with `PRAGMA
+query_only = ON`. That catches a write the statement text cannot reveal,
+such as `select setval(...)` or a statement issued on the raw DBAPI
+connection. The classifier treats `SET` and `PRAGMA` as writes, which is
+what keeps a caller from clearing either setting.
+
+Reads are untouched. `select`, `select_row`, `select_scalar`,
+`select_column`, `table_data`, the schema helpers, and a `transaction()`
+block that only reads all behave as they do on a writer. So do `EXPLAIN`
+without `ANALYZE`, which plans a statement without running it, and a
+reporting pragma such as `PRAGMA table_info(t)`.
+
+Two limits are worth knowing. A write reached through a function, as in
+`select setval(...)`, reads as a select to the classifier and is caught
+only by the session setting. And `cn.dbapi_connection` and the SQLAlchemy
+methods reached through attribute delegation, such as `exec_driver_sql`,
+bypass the guard by design: they are the documented escape hatch out of
+the wrapper, and a statement issued there answers to the session setting
+alone.
+
+#### Pooling
+
+A reader and a writer pointed at one endpoint hold separate engines, so
+the read-only session setting never reaches a writer through the pool.
 
 ### Configuration File Pattern
 
@@ -1282,7 +1389,7 @@ The following is a complete reference of the public API functions and types.
 
 | Function                     | Description                        | Parameters                                                                                      | Returns                            |
 | ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `connect(options, **kwargs)` | Create database connection         | `options`: Connection options dictionary or object<br>`**kwargs`: Additional connection options | `ConnectionWrapper`                |
+| `connect(options, config=None, role='writer', **kwargs)` | Create database connection | `options`: Connection options dictionary or object<br>`config`: Configuration object a dotted path resolves against<br>`role`: `'writer'` or `'reader'`<br>`**kwargs`: Additional connection options | `ConnectionWrapper` |
 | `execute(cn, sql, *args)`    | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                  | Row count or specified return data |
 | `transaction(cn)`            | Create transaction context manager | `cn`: Database connection                                                                       | `Transaction` context manager      |
 
@@ -1338,3 +1445,4 @@ The following is a complete reference of the public API functions and types.
 | `IntegrityViolationError` | Custom constraint errors           |
 | `QueryError`              | Query execution errors             |
 | `TypeConversionError`     | Type conversion errors             |
+| `ReadOnlyError`           | Write on a read-only connection    |

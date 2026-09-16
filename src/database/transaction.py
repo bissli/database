@@ -141,6 +141,25 @@ class Transaction:
         """
         return get_dict_cursor(self.connection)
 
+    @property
+    def readonly(self) -> bool:
+        """Whether the underlying connection rejects writes.
+
+        Notes
+        -----
+        - The strategy layer's raise_on_readonly_write reads this
+          attribute off whatever it is handed, and a Transaction does
+          reach those helpers (see strategy/postgres.py's reset
+          sequence). Without it the guard would read a transaction as
+          a writer.
+        """
+        return getattr(self.connection, 'readonly', False)
+
+    @property
+    def dialect(self) -> str:
+        """Dialect of the underlying connection."""
+        return self.connection.dialect
+
     def __enter__(self):
         _local.active_transactions[id(self.connection)] = True
 

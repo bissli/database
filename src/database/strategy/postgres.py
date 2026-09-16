@@ -274,6 +274,27 @@ select skeys(hstore(null::{quoted_table})) as column
         """
         raw_conn.autocommit = False
 
+    def set_session_readonly(self, conn: Any) -> None:
+        """Put a PostgreSQL session in read-only mode.
+
+        Parameters
+        ----------
+        conn : Any
+            Pooled or raw psycopg connection.
+
+        Notes
+        -----
+        - Every transaction on the session then starts read only, so
+          the server rejects INSERT, UPDATE, DELETE, DDL, and a
+          row-locking SELECT.
+        - VACUUM and ANALYZE run outside a transaction block and stay
+          permitted; the local guard is what stops those.
+        """
+        raw_conn = conn
+        if hasattr(conn, 'driver_connection'):
+            raw_conn = conn.driver_connection
+        raw_conn.execute('SET default_transaction_read_only = on')
+
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
         """Get the definition of a constraint or unique index by name.

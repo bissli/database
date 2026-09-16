@@ -42,11 +42,13 @@ class StubConnection:
     insert_rows = ConnectionWrapper.insert_rows
     update_row = ConnectionWrapper.update_row
     upsert_rows = ConnectionWrapper.upsert_rows
+    _reject_if_readonly = ConnectionWrapper._reject_if_readonly
 
     def __init__(
             self, dialect='postgresql', columns=(), primary_keys=(),
-            rowcount=None):
+            rowcount=None, readonly=False):
         self.dialect = dialect
+        self.readonly = readonly
         self.columns = list(columns)
         self.primary_keys = list(primary_keys)
         self.recorder = RecordingCursor(rowcount)

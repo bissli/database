@@ -69,6 +69,7 @@ def make_cursor(mocker):
 
         connwrapper = mocker.Mock()
         connwrapper.in_transaction = in_transaction
+        connwrapper.readonly = False
 
         strategy = mocker.Mock()
         strategy.standardize_sql.side_effect = lambda sql: sql

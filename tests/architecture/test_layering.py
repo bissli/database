@@ -136,6 +136,7 @@ _EXPECTED_ALL: frozenset[str] = frozenset({
     'OperationalError',
     'ProgrammingError',
     'QueryError',
+    'ReadOnlyError',
     'TypeConversionError',
     'UniqueViolation',
     'ValidationError',
