@@ -9,10 +9,9 @@ Public API:
 - has_placeholders(sql) - Check for parameter placeholders
 - has_named_placeholders(sql, dialect) - Check for named placeholders only
 - standardize_placeholders(sql, dialect) - Convert %s <-> ?
-- is_write_sql(sql, dialect) - Classify SQL as writing or reading
-- raise_on_readonly_write(cn, sql) - Guard a read-only connection
 - split_statements(sql, dialect) - Split on unprotected semicolons
 - mask_protected_text(sql, dialect) - Blank literals and comments
+- raise_on_readonly_disarm(cn, sql) - Keep a reader's backstop armed
 """
 import re
 from collections import namedtuple
@@ -34,45 +33,18 @@ _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening ta
 _NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')  # Named pyformat placeholder
 _NAMED_COLON_RE = re.compile(r'(?<!:):\w+')  # sqlite named placeholder, ':' cast excluded
 
-# Leading keyword of a statement that only reads
-_READ_LEAD_WORDS = frozenset({'select', 'with', 'values', 'table', 'show'})
-_LEAD_WORD_RE = re.compile(r'[A-Za-z_][A-Za-z_0-9]*')
-_EXPLAIN_PREFIX_RE = re.compile(
-    r'^explain\b(?:\s*\([^)]*\))?(?:\s+(?:analyze|verbose|query\s+plan))*', re.I)
-_NESTED_WRITE_RE = re.compile(
-    r'\b(?:insert|update|delete|merge|into|truncate)\b', re.I)
-_ROW_LOCK_RE = re.compile(
-    r'\bfor\s+(?:no\s+key\s+)?update\b|\bfor\s+(?:key\s+)?share\b', re.I)
-
-# Every word _NESTED_WRITE_RE or _ROW_LOCK_RE can match, as a plain
-# substring. A body holding none of them cannot match either pattern,
-# and the substring scan runs in C where the alternations do not.
-_WRITE_HINTS = ('insert', 'update', 'delete', 'merge', 'into', 'truncate',
-                'for', 'key', 'share')
-_PRAGMA_NAME_RE = re.compile(r'^pragma\s+(?:\w+\s*\.\s*)?(\w+)', re.I)
-_ANALYZE_RE = re.compile(r'\banalyze\b', re.I)
 _IDENT_CHARS = frozenset('_$')
 _MASKABLE_RE = re.compile(r'[\'"$]|--|/\*')
 
-# SQLite pragmas that only report. Every other pragma counts as a write,
-# because the assignment forms include 'query_only', which turns the
-# server-side half of the read-only guard back off.
-_READ_PRAGMAS = frozenset({
-    'collation_list',
-    'database_list',
-    'foreign_key_check',
-    'foreign_key_list',
-    'function_list',
-    'index_info',
-    'index_list',
-    'index_xinfo',
-    'integrity_check',
-    'module_list',
-    'pragma_list',
-    'quick_check',
-    'table_info',
-    'table_xinfo',
-    })
+# Statement that turns a reader's server-side read-only setting back
+# off. Words first, as a plain substring test: the mask below is a
+# per-character loop, and a statement naming none of these cannot
+# match the pattern.
+_DISARM_WORDS = ('query_only', 'default_transaction_read_only', 'reset')
+_DISARM_RE = re.compile(
+    r'\bset\s+(?:session\s+|local\s+)?default_transaction_read_only\b'
+    r'|\breset\s+(?:all\b|default_transaction_read_only\b)'
+    r'|\bpragma\s+(?:\w+\s*\.\s*)?query_only\s*=', re.I)
 
 # Placeholder info: position, end, name (for named params), context, already in parens
 PH = namedtuple('PH', 'pos end name ctx in_parens')
@@ -433,31 +405,8 @@ def split_statements(sql: str, dialect: str = 'postgresql') -> list[str]:
         return [stripped] if stripped else []
 
     masked = mask_protected_text(sql, dialect)
-    if masked is None:
-        return [sql.strip()]
-    return _split_on_semicolons(masked, sql)
-
-
-def _split_on_semicolons(masked: str, original: str) -> list[str]:
-    """Split original where masked carries an unprotected semicolon.
-
-    Parameters
-    ----------
-    masked : str
-        mask_protected_text output for original, so every semicolon
-        left in it sits outside a literal and a comment.
-    original : str
-        Text to slice, offset for offset with masked. Callers that
-        only need the masked form pass it for both, which is what
-        keeps is_write_sql from masking twice.
-
-    Returns
-    -------
-    list[str]
-        Stripped statements, with blank ones dropped.
-    """
-    if ';' not in masked:
-        stripped = original.strip()
+    if masked is None or ';' not in masked:
+        stripped = sql.strip()
         return [stripped] if stripped else []
 
     statements = []
@@ -465,139 +414,57 @@ def _split_on_semicolons(masked: str, original: str) -> list[str]:
     for pos, char in enumerate(masked):
         if char != ';':
             continue
-        piece = original[start:pos].strip()
+        piece = sql[start:pos].strip()
         if piece:
             statements.append(piece)
         start = pos + 1
-    tail = original[start:].strip()
+    tail = sql[start:].strip()
     if tail:
         statements.append(tail)
     return statements
 
 
-def is_write_sql(sql: str, dialect: str = 'postgresql') -> bool:
-    """Classify one or more statements as writing or reading.
-
-    Parameters
-    ----------
-    sql : str
-        Statement text, semicolon separated for a multi-statement call.
-    dialect : str, default 'postgresql'
-        Dialect whose literal, comment, and pragma rules apply.
-
-    Returns
-    -------
-    bool
-        True when any statement in sql can write. False only where
-        every statement leads with a reading keyword and carries no
-        data-modifying clause and no row lock.
-
-    Notes
-    -----
-    - Fails closed. An unrecognized leading keyword, a body the mask
-      cannot scan, and a body whose first token is not a word all read
-      as writes, so a statement form this function has never seen is
-      blocked rather than waved through.
-    - A row-locking select ('for update', 'for share') counts as a
-      write, because a standby refuses the lock.
-    - 'set', 'reset', and every assigning pragma count as writes, which
-      is what stops a caller clearing the server-side read-only
-      setting. A reporting pragma such as 'pragma table_info(t)' reads.
-    - 'explain' without 'analyze' reads: the server plans the inner
-      statement without running it.
-    - Blind to a write reached through a function, as in
-      'select setval(...)'. The session read-only setting refuses most
-      of those, though not every one, so this is a guard and not a
-      proof.
-    - Runs only for a read-only connection, and short-circuits on a
-      cheap substring scan before either alternation, so a large
-      generated statement does not pay for the regexes.
-    """
-    if not sql:
-        return False
-
-    masked = mask_protected_text(sql, dialect)
-    if masked is None:
-        return True
-
-    for statement in _split_on_semicolons(masked, masked):
-        body = statement.strip()
-        explain = _EXPLAIN_PREFIX_RE.match(body)
-        if explain is not None:
-            if not _ANALYZE_RE.search(explain.group(0)):
-                continue
-            body = body[explain.end():]
-        body = body.lstrip('( \t\r\n')
-        if not body:
-            continue
-        lead = _LEAD_WORD_RE.match(body)
-        if lead is None:
-            return True
-        keyword = lead.group(0).lower()
-        if keyword == 'pragma':
-            if _pragma_reads(body):
-                continue
-            return True
-        if keyword not in _READ_LEAD_WORDS:
-            return True
-        lowered = body.lower()
-        if not any(hint in lowered for hint in _WRITE_HINTS):
-            continue
-        if _NESTED_WRITE_RE.search(body) or _ROW_LOCK_RE.search(body):
-            return True
-    return False
-
-
-def _pragma_reads(body: str) -> bool:
-    """Return True for a pragma that only reports.
-
-    Parameters
-    ----------
-    body : str
-        A statement already known to lead with 'pragma', masked so no
-        literal or comment remains.
-
-    Returns
-    -------
-    bool
-        True only for a whitelisted pragma name carrying no assignment.
-    """
-    if '=' in body:
-        return False
-    name = _PRAGMA_NAME_RE.match(body)
-    return name is not None and name.group(1).lower() in _READ_PRAGMAS
-
-
-def raise_on_readonly_write(cn: Any, sql: str) -> None:
-    """Reject a write before it travels to a read-only connection.
+def raise_on_readonly_disarm(cn: Any, sql: str) -> None:
+    """Refuse a statement that would unlock a read-only connection.
 
     Parameters
     ----------
     cn : Any
         Connection-like object; read-only when its 'readonly' attribute
-        is true, and its 'dialect' names the dialect to classify under.
+        is true, and its 'dialect' names the dialect to scan under.
     sql : str
         Statement text about to be executed.
 
     Raises
     ------
     ReadOnlyError
-        When cn is read-only and sql can write.
+        When cn is read-only and sql assigns the dialect's read-only
+        session setting.
 
     Notes
     -----
-    - Classification runs only for a read-only connection, so a writer
-      pays nothing for the guard.
-    - An object carrying no 'readonly' attribute is treated as a
-      writer, which keeps a raw DBAPI connection working unchanged.
+    - Not a write classifier. The server refuses the writes; this only
+      stops a caller turning that refusal off, which both dialects
+      otherwise allow in one statement.
+    - Runs only for a read-only connection, and only once a plain
+      substring scan has found one of the setting names, so an
+      ordinary statement never reaches the mask.
+    - Text the mask cannot scan is refused, because an offset after an
+      unterminated literal cannot place the match.
     """
-    if not getattr(cn, 'readonly', False):
+    if not getattr(cn, 'readonly', False) or not sql:
         return
-    if not is_write_sql(sql, getattr(cn, 'dialect', 'postgresql')):
+    lowered = sql.lower()
+    if not any(word in lowered for word in _DISARM_WORDS):
+        return
+    dialect = getattr(cn, 'dialect', 'postgresql')
+    masked = mask_protected_text(sql, dialect)
+    if masked is not None and not _DISARM_RE.search(masked):
         return
     statement = ' '.join(sql.split())[:120]
     raise ReadOnlyError(
-        f'write rejected on a read-only connection: {statement}')
+        f'a read-only connection may not change its read-only '
+        f'setting: {statement}')
 
 
 def _find_contexts(sql: str, dialect: str = 'postgresql') -> list[PH]:

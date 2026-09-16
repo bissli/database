@@ -109,16 +109,21 @@ options = {
 reader = db.connect(options, role='reader')
 
 db.select(reader, 'SELECT count(*) FROM orders')   # served by a replica
-db.execute(reader, 'DELETE FROM orders')           # raises ReadOnlyError
+db.insert_row(reader, 'orders', ('id',), (1,))      # raises ReadOnlyError
+db.execute(reader, 'DELETE FROM orders')           # refused by the server
 ```
 
-A reader rejects every write in process, before the statement reaches the
-replica, and its session is read-only on the server as well. A database
-declaring no reader endpoint still answers `role='reader'`, falling back to
-the writer endpoint and keeping the guard. `role` is keyword only.
+A reader is read-only in two places. The library refuses its own write
+methods in process, before a statement exists. The session is read-only on
+the server, so a statement written by hand is refused there, at statement
+start, before a row moves. A reader may not change that session setting.
+
+A database declaring no reader endpoint still answers `role='reader'`,
+falling back to the writer endpoint and keeping both. `role` is keyword
+only, and defaults to `'writer'`, so an existing caller is unaffected.
 
 SQLite has no reader endpoint, so the reader host values are ignored there
-and `role='reader'` opens the same file with the guard applied.
+and `role='reader'` opens the same file read-only.
 
 For endpoint selection, the full list of refused operations, and pooling
 behavior, see the [Reader Endpoints documentation](docs/README.md#reader-endpoints-and-read-only-connections).

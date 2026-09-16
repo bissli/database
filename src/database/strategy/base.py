@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, TextIO
 from database.cache import cacheable_strategy
 from database.exceptions import ValidationError
 from database.sql import quote_identifier as sql_quote_identifier
-from database.sql import raise_on_readonly_write
+from database.sql import raise_on_readonly_disarm
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -50,7 +50,7 @@ class DatabaseStrategy(ABC):
 
         Handles cursor creation, SQL execution, and cleanup.
         """
-        raise_on_readonly_write(cn, sql)
+        raise_on_readonly_disarm(cn, sql)
         sql = self.standardize_sql(sql)
         cursor = cn.dbapi_connection.cursor()
         try:
@@ -238,7 +238,6 @@ class DatabaseStrategy(ABC):
             raw_conn: The raw DBAPI connection (not wrapped)
         """
 
-    @abstractmethod
     def set_session_readonly(self, conn: Any) -> None:
         """Put a session in read-only mode for the rest of its life.
 
@@ -247,17 +246,27 @@ class DatabaseStrategy(ABC):
         conn : Any
             Pooled or raw DBAPI connection for this dialect.
 
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this. The
+            base class refuses the reader rather than handing back a
+            connection whose writes nothing stops.
+
         Notes
         -----
+        - Concrete, not abstract, so a strategy for a dialect with no
+          reader endpoint keeps working untouched. Only a caller
+          asking for role='reader' on such a dialect reaches this.
         - Runs after configure_connection, which PostgreSQL requires:
           psycopg refuses an auto-commit change once a statement has
           opened a transaction.
-        - A backstop, not the guard: a caller can undo it with SET or
-          PRAGMA, which is why those two classify as writes.
         - PostgreSQL still permits VACUUM under this setting, and does
-          not stop every write reached through a function, so the local
-          guard carries the rest.
+          not stop a write reached through a function.
         """
+        raise NotImplementedError(
+            f'{type(self).__name__} has no read-only session setting, so '
+            f"role='reader' is not available for this dialect")
 
     @property
     @abstractmethod

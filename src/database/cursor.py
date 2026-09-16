@@ -12,7 +12,7 @@ from typing import Any
 
 from database.exceptions import QueryError
 from database.sql import has_named_placeholders, has_placeholders
-from database.sql import raise_on_readonly_write, split_statements
+from database.sql import raise_on_readonly_disarm, split_statements
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
 from database.types import columns_from_cursor_description
@@ -157,7 +157,7 @@ class Cursor:
     @dumpsql()
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
         """Execute a database operation."""
-        raise_on_readonly_write(self.connwrapper, operation)
+        raise_on_readonly_disarm(self.connwrapper, operation)
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)
@@ -285,7 +285,7 @@ class Cursor:
             logger.warning('executemany called with no parameter sequences')
             return 0
 
-        raise_on_readonly_write(self.connwrapper, operation)
+        raise_on_readonly_disarm(self.connwrapper, operation)
         auto_commit = kwargs.pop('auto_commit', True)
 
         operation = self.strategy.standardize_sql(operation)

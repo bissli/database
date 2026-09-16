@@ -101,29 +101,33 @@ def test_writer_connection_is_left_writable(sqlite_reader_pair):
     'delete from test_table',
     'create table reader_ddl_probe (a int)',
     'drop table test_table',
-    'PRAGMA query_only = OFF',
     ])
-def test_reader_refuses_a_write_statement(sqlite_reader_pair, sql):
-    """Verify execute() rejects each write form before it leaves.
+def test_reader_raw_write_refused_by_server(sqlite_reader_pair, sql):
+    """Verify the server backstop blocks raw DML and DDL on a reader.
 
-    Mutation: dropping raise_on_readonly_write from Cursor.execute.
-        The PRAGMA case matters on its own: SQLite lets a caller turn
-        query_only back off, so only the local guard stops it.
-    Oracle: ReadOnlyError, which SQLite itself never raises.
+    Mutation: dropping PRAGMA query_only from configure_connection,
+        which leaves a raw statement nothing to answer to, since the
+        library reads no SQL to decide what writes.
+    Oracle: sqlite3.OperationalError from the server; row count still 3
+        on the writer confirms the data did not land.
     """
-    _, reader = sqlite_reader_pair
+    writer, reader = sqlite_reader_pair
 
-    with pytest.raises(ReadOnlyError):
+    with pytest.raises(sqlite3.OperationalError):
         db.execute(reader, sql)
+
+    assert db.select_scalar(writer, 'select count(*) from test_table') == 3
 
 
 def test_query_only_survives_a_refused_pragma(sqlite_reader_pair):
     """Verify a refused 'PRAGMA query_only = OFF' leaves it on.
 
-    Mutation: adding 'pragma' to _READ_LEAD_WORDS, which lets the
-        statement through, clears query_only, and leaves the reader
-        writable behind the guard's back.
-    Oracle: SQLite's report of query_only after the refusal.
+    Mutation: removing the disarm check from raise_on_readonly_disarm,
+        which lets the PRAGMA through, clears query_only, and leaves the
+        reader writable with no server backstop.
+    Oracle: ReadOnlyError on the PRAGMA; SQLite's report of query_only
+        still 1 after the refusal; a following write still refused by
+        the server, proving the backstop stayed armed.
     """
     _, reader = sqlite_reader_pair
     raw = reader.dbapi_connection.driver_connection
@@ -133,13 +137,16 @@ def test_query_only_survives_a_refused_pragma(sqlite_reader_pair):
 
     assert raw.execute('PRAGMA query_only').fetchone()[0] == 1
 
+    with pytest.raises(sqlite3.OperationalError):
+        db.execute(reader, 'delete from test_table')
+
 
 def test_reader_refuses_every_data_operation(sqlite_reader_pair):
     """Verify the named write helpers are refused, not just raw SQL.
 
-    Mutation: dropping raise_on_readonly_write from
-        Cursor.executemany, which leaves insert_rows and upsert_rows
-        unguarded, since neither goes through Cursor.execute.
+    Mutation: dropping _reject_if_readonly from insert_rows or
+        upsert_rows, which lets a batch through to the driver on a
+        connection the caller asked to be read-only.
     Oracle: ReadOnlyError from each of the four public entry points.
     """
     _, reader = sqlite_reader_pair
@@ -180,20 +187,21 @@ def test_reader_leaves_the_data_untouched(sqlite_reader_pair):
 
     Mutation: guarding after the statement runs rather than before -
         the error would surface but the row would already be written.
-    Oracle: the writer's own row count, unchanged after eight refused
-        writes.
+    Oracle: the writer's own row count, unchanged after refused writes
+        from both the server backstop and the wrapper guard.
     """
     writer, reader = sqlite_reader_pair
 
     row = {'name': 'Zed', 'value': 1}
-    for attempt in (
-            lambda: db.execute(reader, 'delete from test_table'),
-            lambda: db.insert_row(reader, 'test_table', ['name'], ['Zed']),
-            lambda: db.insert_rows(reader, 'test_table', (row,)),
-            lambda: db.vacuum_table(reader, 'test_table'),
-            ):
-        with pytest.raises(ReadOnlyError):
-            attempt()
+
+    with pytest.raises(sqlite3.OperationalError):
+        db.execute(reader, 'delete from test_table')
+    with pytest.raises(ReadOnlyError):
+        db.insert_row(reader, 'test_table', ['name'], ['Zed'])
+    with pytest.raises(ReadOnlyError):
+        db.insert_rows(reader, 'test_table', (row,))
+    with pytest.raises(ReadOnlyError):
+        db.vacuum_table(reader, 'test_table')
 
     assert db.select_scalar(writer, 'select count(*) from test_table') == 3
     assert db.select_scalar(reader, 'select count(*) from test_table') == 3
@@ -202,11 +210,11 @@ def test_reader_leaves_the_data_untouched(sqlite_reader_pair):
 def test_reader_survives_a_connection_rebuild(sqlite_reader_pair):
     """Verify the read-only setting is reapplied after a reconnect.
 
-    Mutation: calling configure_connection without readonly in
+    Mutation: calling configure_connection without the readonly flag in
         _ensure_connection, which silently hands back a writable
         connection the first time the server drops one.
     Oracle: SQLite's report of query_only after the wrapper rebuilds,
-        plus a still-refused write.
+        plus a still-refused write from the server backstop.
     """
     _, reader = sqlite_reader_pair
 
@@ -215,7 +223,7 @@ def test_reader_survives_a_connection_rebuild(sqlite_reader_pair):
 
     raw = reader.dbapi_connection.driver_connection
     assert raw.execute('PRAGMA query_only').fetchone()[0] == 1
-    with pytest.raises(ReadOnlyError):
+    with pytest.raises(sqlite3.OperationalError):
         db.execute(reader, 'delete from test_table')
 
 
@@ -300,7 +308,7 @@ def test_reader_refuses_an_empty_batch(sqlite_reader_pair):
     """Verify an empty row collection is refused, not silently zeroed.
 
     insert_rows and upsert_rows return early on an empty collection,
-    before any SQL exists for the classifier to judge, so a job
+    before any statement exists for the server to refuse, so a job
     misrouted to the reader would report a clean zero.
 
     Mutation: dropping _reject_if_readonly from insert_rows or
@@ -341,9 +349,9 @@ def test_comment_hidden_statement_never_runs(sqlite_reader_pair):
 
 
 def test_transaction_reports_the_connection_readonly_flag(sqlite_reader_pair):
-    """Verify a Transaction carries the flag the strategy guard reads.
+    """Verify a Transaction carries the flag the disarm guard reads.
 
-    raise_on_readonly_write reads 'readonly' off whatever it is handed,
+    raise_on_readonly_disarm reads 'readonly' off whatever it is handed,
     and strategy helpers do receive a Transaction.
 
     Mutation: deleting Transaction.readonly, which makes the property

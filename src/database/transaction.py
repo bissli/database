@@ -147,11 +147,10 @@ class Transaction:
 
         Notes
         -----
-        - The strategy layer's raise_on_readonly_write reads this
-          attribute off whatever it is handed, and a Transaction does
-          reach those helpers (see strategy/postgres.py's reset
-          sequence). Without it the guard would read a transaction as
-          a writer.
+        - The wrapper's write methods read this attribute off
+          whatever they are handed, and a Transaction reaches them
+          (see strategy/postgres.py's reset sequence). Without it a
+          transaction would read as a writer.
         """
         return getattr(self.connection, 'readonly', False)
 
