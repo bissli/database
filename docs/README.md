@@ -165,7 +165,7 @@ import database as db
 # The default. Opens hostname:port and writes freely.
 writer = db.connect(options)
 
-# Opens reader_hostname:reader_port and refuses every write.
+# Opens reader_hostname:reader_port and is read-only.
 reader = db.connect(options, role='reader')
 ```
 
@@ -192,12 +192,12 @@ postgresql.port = 5432
 ```
 
 A database declaring no reader field still answers `role='reader'`. The
-connection lands on the writer endpoint and keeps the read-only guard, so a
-partial config stays usable.
+connection lands on the writer endpoint and stays read-only, so a partial
+config remains usable.
 
 SQLite has no reader endpoint, so `reader_hostname` and `reader_port` are
-ignored there: `role='reader'` opens the same database file and applies
-the guard. A SQLite reader also leaves the file itself alone, skipping the
+ignored there: `role='reader'` opens the same database file read-only.
+A SQLite reader also leaves the file itself alone, skipping the
 `journal_mode` and `synchronous` pragmas a writer sets, so it can open a
 database whose file permissions deny writing.
 
@@ -209,48 +209,58 @@ an empty one and report every table as missing.
 
 Two layers reject a write, and both are active on every reader.
 
-The first runs in process, before anything reaches the network:
+The first is the library's own write methods, which write whatever their
+arguments and so need no look at any SQL:
 
-- `execute()` with an INSERT, UPDATE, DELETE, MERGE, TRUNCATE, or DDL
-  statement, a data-modifying CTE, a row-locking SELECT (`for update`,
-  `for share`), `SET`, `RESET`, or `PRAGMA`
 - `insert_row`, `insert_rows`, `update_row`, `update_or_insert`,
   `upsert_rows`, `copy_from`
 - `vacuum_table`, `reindex_table`, `cluster_table`,
   `reset_table_sequence`
-- the same statements inside a `transaction()` block
+- the same methods called on a `transaction()` block
 
-Each raises `ReadOnlyError`, a subclass of `DatabaseError`:
+Each raises `ReadOnlyError`, a subclass of `DatabaseError`, in process,
+before a statement exists:
 
 ```python
 reader = db.connect(options, role='reader')
 
-db.select(reader, 'select count(*) from orders')     # fine
+db.select(reader, 'select count(*) from orders')   # fine
 
-db.execute(reader, 'delete from orders')
-# ReadOnlyError: write rejected on a read-only connection: delete from orders
+db.insert_row(reader, 'orders', ('id',), (1,))
+# ReadOnlyError: insert_row is not allowed on a read-only connection
 ```
 
-The second layer is the session itself. PostgreSQL readers run with
-`default_transaction_read_only = on`; SQLite readers run with `PRAGMA
-query_only = ON`. That catches a write the statement text cannot reveal,
-such as `select setval(...)` or a statement issued on the raw DBAPI
-connection. The classifier treats `SET` and `PRAGMA` as writes, which is
-what keeps a caller from clearing either setting.
+The second layer is the session. A PostgreSQL reader runs with
+`default_transaction_read_only = on`, a SQLite reader with `PRAGMA
+query_only = ON`. A statement written by hand answers to that setting,
+whatever its text:
+
+```python
+db.execute(reader, 'delete from orders')
+# psycopg.errors.ReadOnlySqlTransaction:
+# cannot execute DELETE in a read-only transaction
+```
+
+The server refuses at statement start, before a row moves, so a write
+never lands on a replica. This layer also catches what no reading of the
+statement text could: a write reached through a function, such as
+`select setval(...)`, and a statement issued on the raw DBAPI connection.
+
+A reader may not turn that setting off. `SET default_transaction_read_only`,
+`RESET default_transaction_read_only`, `RESET ALL`, and an assigning
+`PRAGMA query_only` raise `ReadOnlyError`. That check reads the statement
+only far enough to recognize those four forms; it does not classify writes,
+and everything else goes to the server.
 
 Reads are untouched. `select`, `select_row`, `select_scalar`,
 `select_column`, `table_data`, the schema helpers, and a `transaction()`
-block that only reads all behave as they do on a writer. So do `EXPLAIN`
-without `ANALYZE`, which plans a statement without running it, and a
-reporting pragma such as `PRAGMA table_info(t)`.
+block that only reads all behave as they do on a writer.
 
-Two limits are worth knowing. A write reached through a function, as in
-`select setval(...)`, reads as a select to the classifier and is caught
-only by the session setting. And `cn.dbapi_connection` and the SQLAlchemy
+One limit is worth knowing. `cn.dbapi_connection` and the SQLAlchemy
 methods reached through attribute delegation, such as `exec_driver_sql`,
-bypass the guard by design: they are the documented escape hatch out of
-the wrapper, and a statement issued there answers to the session setting
-alone.
+are the documented escape hatch out of the wrapper. A statement issued
+there answers to the session setting alone, and a caller who reaches that
+far can also turn the setting off.
 
 #### Pooling
 

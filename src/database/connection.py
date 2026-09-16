@@ -418,15 +418,14 @@ class ConnectionWrapper:
 
         Notes
         -----
-        - For a method that writes whatever its arguments, so it needs
-          no look at the SQL. Three reasons it is not redundant with
-          the classifier: PostgreSQL's sequence reset runs 'select
-          setval(...)', which classifies as a select; copy_from never
-          builds a statement; and an empty row collection returns early
-          before any SQL exists, which would otherwise report a clean
-          zero on a reader.
-        - update_or_insert takes both statements from the caller, so it
-          is no stronger than execute() unless rejected here.
+        - Every method listed writes whatever its arguments, so the
+          guard needs no look at the SQL and refuses in-process,
+          before a statement reaches the replica.
+        - It also covers three cases the server-side setting reports
+          late or not at all: copy_from never builds a statement, an
+          empty row collection returns before any SQL exists and would
+          otherwise report a clean zero, and PostgreSQL's sequence
+          reset runs 'select setval(...)'.
         """
         if self.readonly:
             raise ReadOnlyError(
@@ -958,15 +957,15 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
 
     Notes
     -----
-    - A reader rejects an insert, update, delete, DDL statement, row
-      lock, or maintenance call in-process, before it reaches the
-      replica, and its session is read-only on the server as well.
+    - A reader refuses the library's own write and maintenance
+      methods in-process, and its session is read-only on the server,
+      which refuses a hand-written statement at statement start.
     - A reader and a writer to one endpoint hold separate engines, so
       the read-only session setting cannot reach a writer through the
       pool.
     - SQLite has no reader endpoint, so reader_hostname and reader_port
-      are ignored there; role='reader' opens the same database and
-      applies the guard.
+      are ignored there; role='reader' opens the same database
+      read-only.
     - Pooling comes from options: use_pool, pool_max_connections,
       pool_max_idle_time, pool_wait_timeout.
     """

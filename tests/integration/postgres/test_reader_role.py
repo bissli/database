@@ -6,15 +6,16 @@ Two contracts need a real server to prove:
   falling back to the writer's own value for whichever is unset. The
   oracle is whether the connection succeeds when only one of the two
   pairs points at the live container.
-- The read-only guarantee. The in-process guard refuses a write, and
-  the session-level setting refuses one that gets past it. The oracle
-  for the second is a raw DBAPI statement that never touches the
-  guard.
+- The read-only guarantee. The server session setting refuses a write,
+  and the disarm guard refuses any statement that would turn it off.
+  The oracle for the server layer is a raw DBAPI statement that never
+  reaches the disarm guard.
 """
 import io
 
 import config
 import database as db
+import psycopg
 import pytest
 from database.exceptions import ReadOnlyError
 
@@ -126,8 +127,9 @@ def test_reader_session_is_read_only_on_the_server(pg_reader):
     """Verify the session-level setting reached the server.
 
     Mutation: dropping the strategy.set_session_readonly call from
-        configure_connection, which leaves only the local guard and so
-        lets a write through any path that skips it.
+        configure_connection, which leaves no server-side guard and
+        lets a write through any path that skips the wrapper's method
+        guards.
     Oracle: the server's own report of default_transaction_read_only.
     """
     assert db.select_scalar(
@@ -148,32 +150,67 @@ def test_writer_session_is_left_writable(pg_conn):
         pg_conn, "insert into test_table (name, value) values ('Writer', 1)") == 1
 
 
-@pytest.mark.parametrize('sql', [
-    "insert into test_table (name, value) values ('Zed', 1)",
-    'update test_table set value = 0',
-    'delete from test_table',
-    'create table reader_ddl_probe (a int)',
-    'select * from test_table for update',
-    'SET default_transaction_read_only = off',
-    ])
-def test_reader_refuses_a_write_statement(pg_reader, sql):
-    """Verify execute() rejects each write form before it leaves.
+def test_reader_server_refuses_raw_dml(pg_reader, pg_conn):
+    """Verify PostgreSQL refuses DML on a reader session.
 
-    Mutation: dropping raise_on_readonly_write from Cursor.execute,
-        which sends the statement to the replica and surfaces a
-        driver error mid-transaction instead.
-    Oracle: ReadOnlyError, which no server can raise.
+    Mutation: dropping set_session_readonly, so the server permits
+        writes that arrive through database.execute() or any path that
+        does not call a wrapper write method.
+    Oracle: psycopg.errors.ReadOnlySqlTransaction on execute(), and
+        the writer row count stays at 6.
+    """
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        db.execute(
+            pg_reader,
+            "insert into test_table (name, value) values ('Zed', 1)")
+
+    assert db.select_scalar(pg_conn, 'select count(*) from test_table') == 6
+
+
+def test_reader_disarm_guard_refuses_set_readonly_off(pg_reader):
+    """Verify the disarm guard blocks SET default_transaction_read_only = off.
+
+    Mutation: removing raise_on_readonly_disarm from Cursor.execute,
+        which would let a caller silence the server-side backstop with
+        one SET statement.
+    Oracle: ReadOnlyError (in-process, before the server sees it); a
+        subsequent insert still raises psycopg.errors.ReadOnlySqlTransaction,
+        confirming the backstop is still armed.
     """
     with pytest.raises(ReadOnlyError):
-        db.execute(pg_reader, sql)
+        db.execute(pg_reader, 'SET default_transaction_read_only = off')
+
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        db.execute(
+            pg_reader,
+            "insert into test_table (name, value) values ('Zed', 1)")
+
+
+def test_reader_disarm_guard_refuses_reset_all(pg_reader):
+    """Verify the disarm guard blocks RESET ALL on a reader.
+
+    Mutation: removing raise_on_readonly_disarm from Cursor.execute,
+        which would let RESET ALL clear default_transaction_read_only
+        and open the session to writes.
+    Oracle: ReadOnlyError (in-process, before the server sees it); a
+        subsequent insert still raises psycopg.errors.ReadOnlySqlTransaction,
+        confirming the backstop is still armed.
+    """
+    with pytest.raises(ReadOnlyError):
+        db.execute(pg_reader, 'RESET ALL')
+
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        db.execute(
+            pg_reader,
+            "insert into test_table (name, value) values ('Zed', 1)")
 
 
 def test_reader_refuses_every_data_operation(pg_reader):
-    """Verify the named write helpers are refused, not just raw SQL.
+    """Verify the named write helpers are refused at the wrapper.
 
-    Mutation: dropping raise_on_readonly_write from
-        Cursor.executemany, which leaves insert_rows and upsert_rows
-        unguarded, since neither goes through Cursor.execute.
+    Mutation: dropping _reject_if_readonly from insert_row, insert_rows,
+        update_row, upsert_rows, or copy_from, which would leave that
+        entry point unguarded.
     Oracle: ReadOnlyError from each of the five public entry points.
     """
     rows = ({'name': 'Zed', 'value': 1},)
@@ -194,10 +231,9 @@ def test_reader_refuses_every_maintenance_operation(pg_reader):
     """Verify maintenance calls are refused at the wrapper.
 
     Mutation: dropping _reject_if_readonly from reset_table_sequence,
-        whose statement is 'select setval(...)' and so reads as a
-        select to the SQL classifier; or dropping it from
-        vacuum_table, which PostgreSQL permits even under
-        default_transaction_read_only.
+        vacuum_table, reindex_table, or cluster_table; reset_table_sequence
+        is the most dangerous gap because its SQL reads as a SELECT and
+        would reach the server unblocked.
     Oracle: ReadOnlyError from each of the four maintenance methods.
     """
     with pytest.raises(ReadOnlyError):
@@ -213,22 +249,22 @@ def test_reader_refuses_every_maintenance_operation(pg_reader):
 def test_reader_transaction_refuses_a_write(pg_reader):
     """Verify a transaction on a reader cannot write through either path.
 
-    Mutation: dropping raise_on_readonly_write from Cursor.execute.
-        Both paths land there - the plain one through
-        ConnectionWrapper.execute, the returnid one through
-        Transaction.cursor - and a transaction is the one context
-        where a refused write must also leave no open transaction
-        behind, which the following read proves.
-    Oracle: ReadOnlyError from the plain path and the returnid path,
-        then a working read on the same connection.
+    Mutation: dropping set_session_readonly, which would let the server
+        accept the write inside the transaction and land the row.
+    Oracle: psycopg.errors.ReadOnlySqlTransaction from the plain path
+        and the returnid path; then a working read on the same
+        connection proves transaction cleanup succeeded.
     """
-    with pytest.raises(ReadOnlyError), db.transaction(pg_reader) as tx:
-        tx.execute("insert into test_table (name, value) values ('Zed', 1)")
-
-    with pytest.raises(ReadOnlyError):
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
         with db.transaction(pg_reader) as tx:
             tx.execute(
-                "insert into test_table (name, value) values ('Zed', 1) returning id",
+                "insert into test_table (name, value) values ('Zed', 1)")
+
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        with db.transaction(pg_reader) as tx:
+            tx.execute(
+                "insert into test_table (name, value) values ('Zed', 1)"
+                ' returning id',
                 returnid='id')
 
     assert db.select_scalar(pg_reader, 'select count(*) from test_table') == 6
@@ -246,18 +282,19 @@ def test_reader_transaction_still_reads(pg_reader):
 
 
 def test_server_refuses_a_write_that_skips_the_guard(pg_reader):
-    """Verify the session setting catches what the classifier cannot.
+    """Verify the session setting catches writes that bypass the wrapper.
 
     Mutation: dropping set_session_readonly, leaving a write through a
-        function ('select setval(...)') or a raw DBAPI statement with
-        nothing at all standing in its way.
+        function call ('select setval(...)') or a raw DBAPI statement
+        with nothing at all standing in its way.
     Oracle: a statement issued on the raw psycopg connection, which
-        never reaches raise_on_readonly_write.
+        never reaches raise_on_readonly_disarm.
     """
     raw = pg_reader.dbapi_connection.driver_connection
 
     with pytest.raises(Exception, match='read-only transaction'):
-        raw.execute("insert into test_table (name, value) values ('Bypass', 1)")
+        raw.execute(
+            "insert into test_table (name, value) values ('Bypass', 1)")
     raw.rollback()
 
     with pytest.raises(Exception, match='read-only transaction'):
