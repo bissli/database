@@ -719,10 +719,9 @@ Try to update a row, insert if it doesn't exist:
 ```python
 db.update_or_insert(
     cn,
-    update_sql='UPDATE users SET active = %s WHERE email = %s',
-    insert_sql='INSERT INTO users (email, active) VALUES (%s, %s)',
-    True, 'new@example.com'
-)
+    'UPDATE users SET active = %s WHERE email = %s',
+    'INSERT INTO users (active, email) VALUES (%s, %s)',
+    True, 'new@example.com')
 ```
 
 #### upsert_rows
