@@ -4,7 +4,6 @@ from functools import wraps
 from typing import Any
 
 import pandas as pd
-import pyarrow as pa
 from database.exceptions import ValidationError
 from database.strategy import get_available_dialects, get_strategy_class
 from database.strategy import is_supported_dialect
@@ -94,6 +93,9 @@ def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
 
     Always returns a DataFrame, never None, with columns preserved for empty results.
     """
+    # Lazy: only this loader needs pyarrow.
+    import pyarrow as pa
+
     if not data:
         return _empty_dataframe(columns, dtype=pd.ArrowDtype(pa.null()))
 

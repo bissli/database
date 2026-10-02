@@ -1,3 +1,4 @@
+import subprocess
 import sys
 
 import pytest
@@ -535,6 +536,22 @@ class TestUseIterdictDataLoader:
 
         assert select_row.__name__ == 'select_row'
         assert select_row.__doc__ == 'Execute a query and return a single row.'
+
+
+def test_import_without_pyarrow():
+    """Verify database imports and selects when pyarrow is absent.
+
+    Mutation: a module-level `import pyarrow` in options.py or types.py.
+    Oracle: a child interpreter with pyarrow blocked in sys.modules.
+    """
+    code = (
+        "import sys; sys.modules['pyarrow'] = None; import database; "
+        "cn = database.connect({'drivername': 'sqlite', 'database': ':memory:', "
+        "'data_loader': database.options.iterdict_data_loader}); "
+        "print(cn.select('select ? as a', 2))")
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "[{'a': 2}]" in result.stdout
 
 
 if __name__ == '__main__':
