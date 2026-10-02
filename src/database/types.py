@@ -51,18 +51,39 @@ PYARROW_FLOAT_TYPES = (
 
 # Type Converter - Handles Python -> Database value conversion
 
-def _check_special_string(value: str) -> None:
-    """Check if a string value should be converted to NULL."""
-    if value == '' or value.lower() in SPECIAL_STRINGS:
-        return None
-    return False
-
-
-def _normalize_special_string(py_value: Any) -> Any:
-    """Return None if value is a special null string, otherwise return value."""
-    if isinstance(py_value, str) and _check_special_string(py_value) is None:
+def _empty_string_to_none(py_value: Any) -> Any:
+    """None for an empty string, otherwise py_value unchanged.
+    """
+    if isinstance(py_value, str) and not py_value:
         return None
     return py_value
+
+
+def null_special_string(value: Any) -> Any:
+    """None for '' or a SPECIAL_STRINGS word in any case, else value unchanged.
+
+    Parameters
+    ----------
+    value : Any
+        A bound parameter. Only a str (np.str_ included) or a PyArrow
+        string scalar can map to None.
+
+    Returns
+    -------
+    Any
+        None, a PyArrow string scalar's str, or value unchanged.
+
+    Notes
+    -----
+    - The row-batch writers apply this to catch stringified pandas nulls
+      ('nan', 'None', 'NaT'). Cursor.execute and executemany map only ''
+      and bind every other str unchanged.
+    """
+    if PYARROW_AVAILABLE and isinstance(value, pa.StringScalar | pa.LargeStringScalar):
+        value = value.as_py()
+    if isinstance(value, str) and (not value or value.lower() in SPECIAL_STRINGS):
+        return None
+    return value
 
 
 def _convert_pyarrow_value(value: Any) -> Any:
@@ -89,14 +110,14 @@ def _convert_pyarrow_value(value: Any) -> Any:
     # Preferred: as_py() method
     if hasattr(value, 'as_py'):
         try:
-            return _normalize_special_string(value.as_py())
+            return _empty_string_to_none(value.as_py())
         except (ValueError, TypeError, AttributeError):
             pass
 
     # Scalar fallback: .value property
     if pa and isinstance(value, pa.Scalar):
         try:
-            return _normalize_special_string(value.value)
+            return _empty_string_to_none(value.value)
         except (ValueError, TypeError, AttributeError):
             pass
 
@@ -167,9 +188,7 @@ def _convert_pandas_nullable(val: Any) -> Any:
     """Convert Pandas nullable value to Python type."""
     if pd.isna(val):
         return None
-    if isinstance(val, str) and _check_special_string(val) is None:
-        return None
-    return val
+    return _empty_string_to_none(val)
 
 
 class TypeConverter:
@@ -182,17 +201,27 @@ class TypeConverter:
     def convert_value(value: Any) -> Any:
         """Convert a single value to a database-compatible format.
 
-        Hot path: most parameter values are plain Python builtins
-        (int, float, str, bool, bytes, datetime). Short-circuit those
-        with exact type() checks before falling into the
-        numpy/pandas/pyarrow isinstance chain, which is significantly
-        more expensive on every call. Subclasses (numpy/pandas types
-        that inherit from Python builtins) fall through to the slow
-        path so their special handling still runs.
+        Parameters
+        ----------
+        value : Any
+            A bound parameter: a builtin, NumPy, pandas or PyArrow value.
+
+        Returns
+        -------
+        Any
+            A driver-ready value. None for None, NaN, infinity, NaT,
+            pd.NA, a PyArrow null and ''. Any other str, 'nan' and
+            'None' included, comes back unchanged.
         """
         if value is None:
             return None
 
+        # Notes:
+        # - Exact type() checks short-circuit plain builtins before the
+        #   numpy/pandas/pyarrow isinstance chain, which costs more on
+        #   every call.
+        # - A NumPy or pandas subclass of a builtin fails the exact check
+        #   and falls through, so its own handling still runs.
         value_type = type(value)
         if value_type is int or value_type is bool:
             return value
@@ -201,9 +230,7 @@ class TypeConverter:
                 return None
             return value
         if value_type is str:
-            if _check_special_string(value) is None:
-                return None
-            return value
+            return value or None
         if value_type is bytes or value_type is datetime.date or value_type is datetime.datetime:
             return value
 
@@ -213,7 +240,7 @@ class TypeConverter:
         if pd and hasattr(pd, 'NaT') and isinstance(value, type(pd.NaT)):
             return None
 
-        if isinstance(value, str) and _check_special_string(value) is None:
+        if isinstance(value, str) and not value:
             return None
 
         if isinstance(value, (*NUMPY_FLOAT_TYPES, *NUMPY_INT_TYPES,

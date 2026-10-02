@@ -157,10 +157,12 @@ def test_postgres_type_consistency(psql_docker, pg_conn, value_dict):
 
 
 def test_postgres_nan_nat_handling(psql_docker, pg_conn):
-    """Test handling of NaN, NaT and similar special values with PostgreSQL.
+    """Verify NaN, NaT, NA, None and '' bind as NULL through execute.
 
-    Verifies that Python's float('nan'), NumPy NaN, Pandas NaT, and similar
-    special values are properly converted to NULL when sent to the database.
+    Mutation: dropping the NaN guard on the builtin-float fast path, or
+        the '' arm of the str fast path, in TypeConverter.convert_value.
+    Oracle: hand-labeled values, each of which an integer column
+        rejects unless it binds as NULL, against the integer 42.
     """
     # Create a test table with integer column (to ensure NaN/NaT gets converted to NULL)
     with db.transaction(pg_conn) as tx:
@@ -185,9 +187,6 @@ def test_postgres_nan_nat_handling(psql_docker, pg_conn):
             ('Python None', None),
             ('Pandas NA', pd.NA),
             ('Empty string', ''),
-            ('String "nan"', 'nan'),
-            ('String "null"', 'null'),
-            ('String "none"', 'none'),
             ('Regular integer', 42)  # This one should work
         ]
 
@@ -242,9 +241,6 @@ def test_postgres_cursor_executemany(psql_docker, pg_conn):
         ('Python None', None),
         ('Pandas NA', pd.NA),
         ('Empty string', ''),
-        ('String "nan"', 'nan'),
-        ('String "null"', 'null'),
-        ('String "none"', 'none'),
         ('Regular integer', 42)
     ]
 

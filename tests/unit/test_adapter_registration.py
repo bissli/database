@@ -136,44 +136,42 @@ def test_sqlite_date_converter_runs_once_per_fetched_value():
     assert type(value) is datetime.date
 
 
-def test_sqlite_bind_converts_special_string_to_null(sqlite_conn):
-    """Verify inbound conversion runs at bind time, on special strings only.
+def test_sqlite_bind_nulls_only_the_empty_string(sqlite_conn):
+    """Verify inbound conversion runs at bind time, on '' only.
 
     Mutation: dropping the TypeConverter.convert_params call in
-        Cursor.execute, which stores the literal text 'null'.
-    Oracle: two rows differing only in the bound value - 'null' lands
-        as SQL NULL, '0' lands unchanged.
+        Cursor.execute, which stores '' as text.
+    Oracle: two rows differing only in the bound value - '' lands as
+        SQL NULL, 'null' lands unchanged.
     """
     db.execute(
         sqlite_conn,
         'INSERT INTO conv_probe (label, txt) VALUES (?, ?)',
-        'special',
-        'null')
+        'empty',
+        '')
     db.execute(
         sqlite_conn,
         'INSERT INTO conv_probe (label, txt) VALUES (?, ?)',
-        'plain',
-        '0')
+        'spelled',
+        'null')
 
     assert db.select_column(
         sqlite_conn,
-        'SELECT txt FROM conv_probe ORDER BY label') == ['0', None]
+        'SELECT txt FROM conv_probe ORDER BY label') == [None, 'null']
 
 
 def test_type_converter_special_strings():
-    """Verify only the exact null-ish words, case-folded, become NULL.
+    """Verify convert_value nulls '' and binds every spelled null as text.
 
-    Mutation: dropping .lower() or the value == '' arm in
-        _check_special_string, or matching by prefix instead of set
-        membership.
-    Oracle: hand-picked boundary strings straddling the set - 'nap',
-        'nan ' and ' ' sit just outside it.
+    Mutation: restoring the SPECIAL_STRINGS lookup on the str fast path
+        of convert_value, or dropping its '' arm.
+    Oracle: hand-picked strings - '' is the one that maps, ' ' sits just
+        outside it, and each spelled null must come back unchanged.
     """
-    for special in ('', 'null', 'NULL', 'nan', 'NaN', 'none', 'None',
-                    'na', 'NA', 'nat', 'NaT'):
-        assert TypeConverter.convert_value(special) is None, special
+    assert TypeConverter.convert_value('') is None
 
-    for kept in ('nap', 'nan ', ' ', '0', 'false', 'n/a', 'nulls', 'hello'):
+    for kept in ('null', 'NULL', 'nan', 'NaN', 'none', 'None', 'na', 'NA',
+                 'nat', 'NaT', 'nan ', ' ', '0', 'n/a', 'hello'):
         assert TypeConverter.convert_value(kept) == kept
 
 
@@ -294,13 +292,13 @@ def test_convert_params_preserves_container_shape():
     Oracle: hand-written expected rows plus exact container and element
         types, which equality alone cannot tell apart (np.int64(1) == 1).
     """
-    single = TypeConverter.convert_params((np.int64(1), 'null'))
+    single = TypeConverter.convert_params((np.int64(1), ''))
     assert single == (1, None)
     assert type(single) is tuple
     assert type(single[0]) is int
 
     batch = TypeConverter.convert_params([
-        (np.int64(1), 'nan'),
+        (np.int64(1), ''),
         ('x', np.float64('nan')),
         ])
     assert batch == [(1, None), ('x', None)]
@@ -309,17 +307,17 @@ def test_convert_params_preserves_container_shape():
     assert type(batch[0][0]) is int
 
 
-def test_pyarrow_values_unbox_and_null_special_strings():
-    """Verify PyArrow scalars unbox to builtins and honor the null-string rule.
+def test_pyarrow_values_unbox_and_null_empty_strings():
+    """Verify PyArrow scalars unbox to builtins and honor the '' rule.
 
     Mutation: returning value.as_py() unwrapped in
-        _convert_pyarrow_value, so an Arrow string scalar holding
-        'null' binds as text.
-    Oracle: hand-written expectations - 'null' -> None, 3.5 -> 3.5,
-        and an Arrow array -> the plain list [1, 2, 3].
+        _convert_pyarrow_value, so an Arrow string scalar holding ''
+        binds as text.
+    Oracle: hand-written expectations - '' -> None, 'null' -> 'null',
+        3.5 -> 3.5, and an Arrow array -> the plain list [1, 2, 3].
     """
-    assert TypeConverter.convert_value(pa.scalar('null')) is None
-    assert TypeConverter.convert_value(pa.scalar('hello')) == 'hello'
+    assert TypeConverter.convert_value(pa.scalar('')) is None
+    assert TypeConverter.convert_value(pa.scalar('null')) == 'null'
 
     as_float = TypeConverter.convert_value(pa.scalar(3.5))
     assert as_float == 3.5
