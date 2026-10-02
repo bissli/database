@@ -53,6 +53,50 @@ def _is_memory_db(sqlite_conn: Any) -> bool:
     return False
 
 
+class JsonBindingCursor(sqlite3.Cursor):
+    """sqlite3 cursor that binds a dict or list parameter as JSON text.
+
+    A raw sqlite3 connection in the same process keeps raising
+    ProgrammingError on a dict or list.
+    """
+
+    def execute(self, sql: str, parameters: Any = (), /) -> 'JsonBindingCursor':
+        """Run sql with each dict or list parameter bound as JSON text.
+        """
+        return super().execute(sql, self._json_containers(parameters))
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> 'JsonBindingCursor':
+        """Run sql once per parameter set, dicts and lists bound as JSON text.
+        """
+        return super().executemany(
+            sql, (self._json_containers(params) for params in seq_of_parameters))
+
+    @staticmethod
+    def _json_containers(parameters: Any) -> Any:
+        """Parameters with each dict or list value replaced by json.dumps.
+
+        Parameters
+        ----------
+        parameters : dict or sequence
+            Named parameters (dict) or positional parameters.
+
+        Returns
+        -------
+        dict or tuple
+            A dict for named parameters, else a tuple.
+        """
+        # Exact types, as sqlite3 matches an adapter, so a dict
+        # subclass such as attrdict still raises.
+        if isinstance(parameters, dict):
+            return {
+                name: json.dumps(value) if type(value) in {dict, list} else value
+                for name, value in parameters.items()
+                }
+        return tuple(
+            json.dumps(value) if type(value) in {dict, list} else value
+            for value in parameters)
+
+
 @register_strategy('sqlite')
 class SQLiteStrategy(DatabaseStrategy):
     """SQLite-specific operations.
@@ -100,8 +144,6 @@ class SQLiteStrategy(DatabaseStrategy):
           keeps the stdlib's text form, ISO 8601 with a space separator.
         """
         # Adapters (Python -> SQLite)
-        sqlite3.register_adapter(dict, json.dumps)
-        sqlite3.register_adapter(list, json.dumps)
         sqlite3.register_adapter(datetime.date, datetime.date.isoformat)
         # The space keeps new rows comparable and sortable as text
         # against rows the stdlib adapter already wrote.
@@ -118,13 +160,14 @@ class SQLiteStrategy(DatabaseStrategy):
     def create_dict_cursor(self, raw_conn: Any) -> Any:
         """Create a cursor that returns rows as dictionaries.
 
-        Uses sqlite3.Row for SQLite connections.
+        Uses sqlite3.Row for SQLite connections, and binds a dict or list
+        parameter as JSON text.
         """
         sqlite_conn = raw_conn
         if hasattr(raw_conn, 'dbapi_connection'):
             sqlite_conn = raw_conn.dbapi_connection
         sqlite_conn.row_factory = sqlite3.Row
-        return sqlite_conn.cursor()
+        return sqlite_conn.cursor(factory=JsonBindingCursor)
 
     def get_type_map(self) -> dict[str, type]:
         """Return mapping of SQLite type names to Python types."""

@@ -429,12 +429,12 @@ def test_sqlite_executemany_converts_special_strings(sqlite_conn):
 
 
 def test_sqlite_list_adapter_binds_as_json(sqlite_conn):
-    """Verify a list value is stored as JSON text via the registered adapter.
+    """Verify a list value is stored as JSON text via JsonBindingCursor.
 
-    Mutation: dropping sqlite3.register_adapter(list, json.dumps) from
-        SQLiteStrategy.register_type_adapters - without it sqlite3
-        raises InterfaceError on the bind.
-    Oracle: hand-written '[1, 2, 3]' - without the adapter the call
+    Mutation: dropping factory=JsonBindingCursor from
+        SQLiteStrategy.create_dict_cursor - without it sqlite3 raises
+        ProgrammingError on the bind.
+    Oracle: hand-written '[1, 2, 3]' - without the cursor the call
         raises instead of returning the JSON text.
     """
     db.execute(
@@ -449,6 +449,58 @@ def test_sqlite_list_adapter_binds_as_json(sqlite_conn):
         'listval')
 
     assert result == '[1, 2, 3]'
+
+
+def test_sqlite_named_and_batch_binds_encode_json(sqlite_conn):
+    """Verify named and executemany binds store a dict as JSON text.
+
+    Mutation: dropping the dict branch of
+        JsonBindingCursor._json_containers, which binds the parameter
+        names, or dropping the executemany override, which raises.
+    Oracle: hand-written JSON strings for each bound dict.
+    """
+    db.execute(
+        sqlite_conn,
+        'INSERT INTO conv_probe (label, txt) VALUES (%(label)s, %(txt)s)',
+        {'label': 'named', 'txt': {'b': 2}})
+    db.insert_rows(
+        sqlite_conn,
+        'conv_probe',
+        [{'label': 'many', 'txt': {'c': [3]}}])
+
+    assert db.select_column(
+        sqlite_conn,
+        'SELECT txt FROM conv_probe ORDER BY label') == [
+        '{"c": [3]}',
+        '{"b": 2}',
+        ]
+
+
+def test_sqlite_json_binding_leaves_raw_sqlite3_connections_alone(sqlite_conn):
+    """Verify a package connect leaves dict and list unbindable on raw sqlite3.
+
+    Mutation: restoring sqlite3.register_adapter(dict, json.dumps) or
+        sqlite3.register_adapter(list, json.dumps) in
+        SQLiteStrategy.register_type_adapters, which is global to the
+        sqlite3 module.
+    Oracle: the stdlib's own ProgrammingError for an unsupported type,
+        raised after the package connection has bound both as JSON.
+    """
+    db.execute(
+        sqlite_conn,
+        'INSERT INTO conv_probe (label, txt) VALUES (?, ?), (?, ?)',
+        'dict',
+        {'a': 1},
+        'list',
+        [1])
+
+    raw = sqlite3.connect(':memory:')
+    try:
+        for value in ({'a': 1}, [1]):
+            with pytest.raises(sqlite3.ProgrammingError):
+                raw.execute('SELECT ?', (value,))
+    finally:
+        raw.close()
 
 
 if __name__ == '__main__':
