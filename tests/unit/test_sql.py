@@ -14,7 +14,7 @@ the same join the source uses.
 import datetime
 
 import pytest
-from database.exceptions import DatabaseError, ValidationError
+from database.exceptions import DatabaseError, QueryError, ValidationError
 from database.sql import has_named_placeholders, has_placeholders
 from database.sql import make_placeholders, prepare_query, quote_identifier
 from database.sql import standardize_placeholders
@@ -55,24 +55,39 @@ class TestPrepareQueryBasic:
              'postgresql',
              'SELECT * FROM users',
              ()),
-            ('SELECT * FROM t WHERE a = %s AND b = %s',
-             ([1, 2, 3],),
-             'postgresql',
-             'SELECT * FROM t WHERE a = %s AND b = %s',
-             ([1, 2, 3], None)),
             ],
         ids=['pg_basic', 'sqlite_conversion', 'nested_tuple', 'no_placeholders',
-             'empty_args', 'inner_longer_than_slots'])
+             'empty_args'])
     def test_basic_handling(self, sql, args, dialect, expected_sql, expected_args):
         """Verify the whole (sql, args) pair for plain positional binding.
 
-        Mutation: swapping the marker in _transform so sqlite emits '%s',
-            or dropping the `len(inner) == len(phs)` guard in _normalize
-            rule 3, which flattens a longer inner sequence against fewer
-            placeholders and silently truncates values.
+        Mutation: swapping the marker in _transform so sqlite emits '%s'.
         Oracle: hand-written full SQL strings and arg tuples.
         """
         assert prepare_query(sql, args, dialect) == (expected_sql, expected_args)
+
+    @pytest.mark.parametrize(
+        ('args', 'dialect'),
+        [
+            ((1,), 'postgresql'),
+            ((1, 2, 3), 'postgresql'),
+            ((1,), 'sqlite'),
+            ((1, 2, 3), 'sqlite'),
+            ((), 'sqlite'),
+            (([1, 2, 3],), 'postgresql'),
+            ],
+        ids=['pg_too_few', 'pg_too_many', 'sqlite_too_few', 'sqlite_too_many',
+             'none_for_two', 'inner_longer_than_slots'])
+    def test_arg_count_mismatch_raises(self, args, dialect):
+        """Verify a positional arg count unequal to the placeholders raises.
+
+        Mutation: dropping the count check in _transform, which binds NULL
+            to a missing placeholder and drops an extra arg.
+        Oracle: two placeholders against one, three or no args, and one
+            three-element list that rule 3 keeps as a single value.
+        """
+        with pytest.raises(QueryError, match='Parameter count mismatch'):
+            prepare_query('SELECT * FROM t WHERE a = %s AND b = %s', args, dialect)
 
 
 class TestDialectDefaults:
@@ -119,22 +134,40 @@ class TestPrepareQueryInClause:
             ([1, 2, 3], 'SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3)),
             ([[1, 2, 3]], 'SELECT * FROM users WHERE id IN (%s, %s, %s)', (1, 2, 3)),
             ([101], 'SELECT * FROM users WHERE id IN (%s)', (101,)),
-            ([[1, 2], [3, 4]], 'SELECT * FROM users WHERE id IN (%s, %s)', (1, 2)),
             ],
         ids=['tuple_in_list', 'single_tuple', 'direct_list', 'nested_list',
-             'single_item', 'list_of_lists'])
+             'single_item'])
     def test_in_clause_expansion_formats(self, args, expected_sql, expected_args):
         """Verify every accepted IN-arg shape lands on the same expansion.
 
-        Mutation: dropping `_is_flat(args)` from _normalize rule 2, which
-            wraps [[1,2],[3,4]] as one value instead of expanding the first
-            inner list; or emitting ',' in place of ', ' when _expand_in
-            joins the markers.
+        Mutation: emitting ',' in place of ', ' when _expand_in joins the
+            markers.
         Oracle: hand-written full SQL strings, not a join of the marker.
         """
         sql = 'SELECT * FROM users WHERE id IN %s'
 
         assert prepare_query(sql, args, 'postgresql') == (expected_sql, expected_args)
+
+    def test_no_args_for_a_sole_in_slot_match_nothing(self):
+        """Verify an empty spread list against one IN slot binds no values.
+
+        Mutation: returning the empty args unchanged from _normalize, which
+            fails the count check for `select(cn, sql, *ids)` with no ids.
+        Oracle: hand-written `IN (NULL)`, which matches no row.
+        """
+        sql = 'SELECT * FROM users WHERE id IN %s'
+
+        assert prepare_query(sql, (), 'postgresql') == ('SELECT * FROM users WHERE id IN (NULL)', ())
+
+    def test_two_lists_for_one_in_slot_raise(self):
+        """Verify two lists against one IN placeholder raise.
+
+        Mutation: dropping `_is_flat(args)` from _normalize rule 2, which
+            wraps [[1,2],[3,4]] as one value and binds both lists.
+        Oracle: one IN placeholder against two args.
+        """
+        with pytest.raises(QueryError, match='Parameter count mismatch'):
+            prepare_query('SELECT * FROM users WHERE id IN %s', [[1, 2], [3, 4]], 'postgresql')
 
     def test_in_clause_empty_sequence(self):
         """An empty IN sequence collapses to a parenthesized NULL, no args.
@@ -795,13 +828,13 @@ class TestPrepareQueryDollarQuotes:
 
         Mutation: `j = n if close == -1 else close + len(tag)` changed to
             fall back to `m.end()`, which would expose the trailing '%s'
-            and bind 'x' to it.
+            as a placeholder with no arg.
         Oracle: hand-written SQL unchanged and an empty arg tuple, since
             no placeholder survives the protected range.
         """
         sql = 'SELECT $$abc %s def'
 
-        assert prepare_query(sql, ('x',), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == (sql, ())
 
 
 class TestPrepareQueryComments:
@@ -846,12 +879,12 @@ class TestPrepareQueryComments:
         """An unclosed /* swallows the rest of the statement.
 
         Mutation: `j = n if j == -1 else j + 2` changed to leave j at the
-            comment start, which would bind 1 to the trailing '%s'.
+            comment start, which exposes the trailing '%s' placeholders.
         Oracle: hand-written SQL unchanged and an empty arg tuple.
         """
         sql = 'SELECT * FROM t /* %s WHERE id = %s'
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == (sql, ())
 
     def test_comment_marker_inside_string_literal_is_not_a_comment(self):
         """String protection wins over comment markers.
@@ -887,7 +920,7 @@ class TestPrepareQueryComments:
         """
         sql = "SELECT * FROM t WHERE s = 'abc %s"
 
-        assert prepare_query(sql, ('x',), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == (sql, ())
 
     def test_double_quoted_literal_is_protected(self):
         r"""A double-quoted literal's %s is not a real placeholder.
