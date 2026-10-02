@@ -191,7 +191,28 @@ from
 
     def copy_from(self, cn: 'ConnectionWrapper', table: str,
                   file: TextIO, columns: list[str] | None = None) -> int:
-        """Bulk load using PostgreSQL COPY.
+        """Bulk load CSV text into table with PostgreSQL COPY.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection whose raw DBAPI connection runs the COPY.
+        table : str
+            Table name, optionally schema-qualified.
+        file : TextIO
+            CSV text with no header row; an empty field loads as NULL.
+        columns : list[str] or None, default None
+            Target columns in file order; None means every column of table.
+
+        Returns
+        -------
+        int
+            Rows loaded.
+
+        Notes
+        -----
+        - A failed COPY logs at ERROR with the statement and traceback, then
+          re-raises.
         """
         quoted_table = self.quote_identifier(table)
 
@@ -202,13 +223,16 @@ from
             sql = f"COPY {quoted_table} FROM STDIN WITH (FORMAT csv, NULL '')"
 
         cursor = cn.dbapi_connection.cursor()
-        with cursor.copy(sql) as copy:
-            while data := file.read(8192):
-                copy.write(data)
-
-        rowcount = cursor.rowcount
-        cursor.close()
-        return rowcount
+        try:
+            with cursor.copy(sql) as copy:
+                while data := file.read(8192):
+                    copy.write(data)
+            return cursor.rowcount
+        except Exception:
+            logger.error('Error with copy:\nSQL:\n%s', sql, exc_info=True)
+            raise
+        finally:
+            cursor.close()
 
     @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
