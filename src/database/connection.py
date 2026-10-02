@@ -582,16 +582,36 @@ class ConnectionWrapper:
         logger.debug(f'Scalar query returned value of type {type(result).__name__}')
         return result
 
+    @use_iterdict_data_loader
     def select_scalar_or_none(self, sql: str, *args: Any) -> Any | None:
-        """Execute a query and return a single scalar value or None if no rows found.
+        """The first column of the query's one row, or None.
+
+        Parameters
+        ----------
+        sql : str
+            Query text.
+        *args : Any
+            Query parameters.
+
+        Returns
+        -------
+        Any | None
+            The value, or None for zero rows or a null value.
+
+        Raises
+        ------
+        ValidationError
+            When the query returns more than one row.
         """
-        try:
-            val = self.select_scalar(sql, *args)
-            if not is_null(val):
-                return val
+        data = self.select(sql, *args)
+        if len(data) > 1:
+            raise ValidationError(f'Expected at most one row, got {len(data)}')
+        if not data:
             return None
-        except ValidationError:
+        val = RowAdapter.create(self, data[0]).get_value()
+        if is_null(val):
             return None
+        return val
 
     def get_table_columns(self, table: str, bypass_cache: bool = False) -> list[str]:
         """Get all column names for a table using SQLAlchemy Inspector.
