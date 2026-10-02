@@ -375,6 +375,17 @@ class TestCreateUrlFromOptions:
         assert url.username == 'u@dom'
         assert url.password == 'p@w/d'
 
+    def test_open_mode_leaves_a_postgres_database_name_decoded(self):
+        """Verify open_mode set on PostgreSQL keeps the raw database name.
+
+        Mutation: skipping the database-name restore on open_mode alone,
+        without the sqlite drivername check, so 'my db' reaches libpq as
+        'my%20db'.
+        Oracle: the hand-written raw name, as the restore puts it back.
+        """
+        url = create_url_from_options(_options(database='my db', open_mode='ro'))
+        assert url.database == 'my db'
+
     def test_url_creator_receives_the_raw_database_name(self):
         """Verify the test seam gets the restored database name too.
 
@@ -447,18 +458,34 @@ class TestEngineRegistryKey:
         two = _build_engine_registry_key(_options(password='b'), False, 5, 300, 30)
         assert one == two
 
+    def test_open_mode_separates_two_otherwise_identical_options(self):
+        """Verify open_mode is in the key, since it is baked into the URL.
+
+        Mutation: leaving options.open_mode out of the key tuple, which
+        hands an immutable reader the engine a plain reader built.
+        Oracle: inequality against the same options with no open mode.
+        """
+        def key(open_mode):
+            options = DatabaseOptions(drivername='sqlite', database='x.db',
+                                      open_mode=open_mode)
+            return _build_engine_registry_key(options, False, 5, 300, 30, True)
+
+        assert key(None) != key('immutable')
+        assert key('ro') != key('immutable')
+
     def test_key_matches_hand_written_literal(self):
         """Verify the key's exact field set, order, and separator.
 
         Mutation: dropping options.database, options.appname,
-        options.timeout or readonly from the key tuple, reordering
-        username and database, or swapping repr() back to str() so a
-        '|' inside a field can shift the field boundary.
+        options.timeout, options.open_mode or readonly from the key
+        tuple, reordering username and database, or swapping repr()
+        back to str() so a '|' inside a field can shift the field
+        boundary.
         Oracle: hand-written key literal.
         """
         key = _build_engine_registry_key(_options(), False, 5, 300, 30, False)
         assert key == ("'postgresql'|'myhost'|5432|'myuser'|'mydb'|'myapp'"
-                       '|30|False|5|300|30|False')
+                       '|30|None|False|5|300|30|False')
 
     @pytest.mark.parametrize(('field', 'value'), [
         ('drivername', 'sqlite'),

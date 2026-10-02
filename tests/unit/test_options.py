@@ -190,6 +190,27 @@ def test_sqlite_journal_mode_accepts_only_durable_modes():
         assert repr(mode) in str(excinfo.value)
 
 
+def test_sqlite_open_mode_accepts_only_the_read_only_modes():
+    """Verify open_mode accepts None, 'ro' and 'immutable' and nothing else.
+
+    Mutation: SQLiteStrategy.validate_options not checking open_mode, or
+        OPEN_MODES gaining 'rw', 'rwc' or 'memory', which would open the
+        file writable behind a reader.
+    Oracle: SQLite's documented mode values; only 'ro' and immutable=1
+        open a file without write access.
+    """
+    for mode in (None, 'ro', 'immutable'):
+        options = DatabaseOptions(drivername='sqlite', database='x.db',
+                                  open_mode=mode)
+        assert options.open_mode == mode
+
+    for mode in ('rw', 'rwc', 'memory', 'RO'):
+        with pytest.raises(ValidationError) as excinfo:
+            DatabaseOptions(drivername='sqlite', database='x.db',
+                            open_mode=mode)
+        assert repr(mode) in str(excinfo.value)
+
+
 def test_supplied_appname_wins_over_script_name(monkeypatch):
     """Verify a supplied appname is never overwritten by the script name.
 

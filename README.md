@@ -123,7 +123,11 @@ falling back to the writer endpoint and keeping both. `role` is keyword
 only, and defaults to `'writer'`, so an existing caller is unaffected.
 
 SQLite has no reader endpoint, so the reader host values are ignored there
-and `role='reader'` opens the same file read-only.
+and `role='reader'` opens the same file read-only. A SQLite reader also
+takes `open_mode`, `'ro'` or `'immutable'`. Either raises at connect on a
+missing file and creates nothing. `'immutable'` also takes no lock on the
+file. Both are described in the
+[SQLite open modes documentation](docs/README.md#sqlite-open-modes).
 
 For endpoint selection, the full list of refused operations, and pooling
 behavior, see the [Reader Endpoints documentation](docs/README.md#reader-endpoints-and-read-only-connections).

@@ -79,8 +79,8 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     """Build a stable, password-free cache key for the engine registry.
 
     The key must identify an engine uniquely per (drivername, host, port,
-    user, database, appname, timeout, pool config) - but never expose the
-    password. Two options with the same credentials except different
+    user, database, appname, timeout, open_mode, pool config, readonly) -
+    but never expose the password. Two options with the same credentials except different
     passwords still collide; that is acceptable because the registry is
     process-local and the engine pool will fail-fast on the real
     connection if the password is wrong.
@@ -93,6 +93,7 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     - Parts are joined through repr() so a '|' inside a username,
       database, or appname cannot shift the boundary between two fields
       and make unlike configurations share an engine.
+    - open_mode belongs in the key for the same reason as timeout.
     - readonly belongs in the key because the read-only session
       setting outlives a return to the pool; one shared engine would
       hand a writer a connection the server refuses to write on.
@@ -100,7 +101,7 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     return '|'.join(repr(part) for part in (
         options.drivername, options.hostname, options.port,
         options.username, options.database, options.appname,
-        options.timeout,
+        options.timeout, options.open_mode,
         use_pool, pool_size, pool_recycle, pool_timeout,
         readonly,
     ))
@@ -135,14 +136,19 @@ def create_url_from_options(options: DatabaseOptions,
       it cannot inject libpq query parameters. make_url unquotes only
       username and password, so the raw name is put back here; without
       that, a database called 'my db' would be opened as 'my%20db'.
+    - The SQLite file: URI an open_mode builds is left as built. Its
+      path is percent-encoded on purpose, and the raw name would turn
+      the URI back into a plain filename.
     """
     strategy = get_strategy(options.drivername)
     url_string = strategy.build_connection_url(options)
+    keeps_uri = options.drivername == 'sqlite' and options.open_mode is not None
 
     if url_creator is not None:
         # For testing - parse and recreate using the provided factory
         parsed = sa.make_url(url_string)
-        if options.database and parsed.database != options.database:
+        if (options.database and not keeps_uri
+                and parsed.database != options.database):
             parsed = parsed.set(database=options.database)
         return url_creator(
             drivername=parsed.drivername,
@@ -155,7 +161,8 @@ def create_url_from_options(options: DatabaseOptions,
         )
 
     url = sa.make_url(url_string)
-    if options.database and url.database != options.database:
+    if (options.database and not keeps_uri
+            and url.database != options.database):
         url = url.set(database=options.database)
     return url
 
@@ -964,8 +971,8 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
     ------
     ValidationError
         When role names neither 'writer' nor 'reader', when config is
-        a string, or when a reader asks for an in-memory SQLite
-        database.
+        a string, when a reader asks for an in-memory SQLite database,
+        or when open_mode is set on a writer.
 
     Notes
     -----
@@ -1001,6 +1008,10 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
         options = DatabaseOptions(**kw)
 
     readonly = role == 'reader'
+    if options.open_mode is not None and not readonly:
+        raise ValidationError(
+            f"open_mode={options.open_mode!r} opens the file read-only; "
+            "pass role='reader'")
     engine_options = options
     if readonly:
         if options.drivername == 'sqlite' and options.database == ':memory:':
