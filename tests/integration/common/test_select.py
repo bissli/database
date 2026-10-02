@@ -52,6 +52,18 @@ class TestSelectOperations:
         row = db.select_row_or_none(db_conn, "SELECT * FROM test_table WHERE name = 'Nonexistent'")
         assert row is None
 
+    def test_select_row_or_none_raises_on_two_rows(self, db_conn):
+        """Verify select_row_or_none raises when the query returns two rows.
+
+        Mutation: returning None for any count other than one, which reads
+            a non-unique key as not found.
+        Oracle: test_table holds Alice and Bob, so the IN list matches two
+            rows.
+        """
+        with pytest.raises(db.ValidationError, match='got 2'):
+            db.select_row_or_none(
+                db_conn, "SELECT * FROM test_table WHERE name IN ('Alice', 'Bob')")
+
     def test_select_scalar(self, db_conn):
         """Test select_scalar returns single value."""
         count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')

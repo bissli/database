@@ -543,12 +543,31 @@ class ConnectionWrapper:
 
     @use_iterdict_data_loader
     def select_row_or_none(self, sql: str, *args: Any) -> attrdict | None:
-        """Execute a query and return a single row or None if no rows found.
+        """The query's one row, or None when it returns no row.
+
+        Parameters
+        ----------
+        sql : str
+            Query text.
+        *args : Any
+            Query parameters.
+
+        Returns
+        -------
+        attrdict | None
+            The row, or None for zero rows.
+
+        Raises
+        ------
+        ValidationError
+            When the query returns more than one row.
         """
         data = self.select(sql, *args)
-        if len(data) == 1:
-            return RowAdapter.create(self, data[0]).to_attrdict()
-        return None
+        if len(data) > 1:
+            raise ValidationError(f'Expected at most one row, got {len(data)}')
+        if not data:
+            return None
+        return RowAdapter.create(self, data[0]).to_attrdict()
 
     @use_iterdict_data_loader
     def select_scalar(self, sql: str, *args: Any) -> Any:
