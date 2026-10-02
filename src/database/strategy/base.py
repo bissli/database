@@ -203,19 +203,22 @@ class DatabaseStrategy(ABC):
           reader skips.
         """
 
-    def configure_writer_connection(self, conn: Any) -> None:
+    def configure_writer_connection(self, conn: Any,
+                                    options: 'DatabaseOptions') -> None:
         """Apply the settings only a writer may set.
 
         Parameters
         ----------
         conn : Any
             Pooled or raw DBAPI connection to configure.
+        options : DatabaseOptions
+            Options the connection was opened with.
 
         Notes
         -----
         - Runs after configure_connection, and only for a writer. A
-          dialect whose setup writes to the database - SQLite's
-          journal_mode lives in the database header - puts that here,
+          dialect whose setup writes to the database - SQLite's WAL
+          mode lives in the database header - puts that here,
           so a reader neither changes the database nor fails on one
           whose file denies writing.
         - No-op by default: most dialects configure a session and

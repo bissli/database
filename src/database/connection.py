@@ -376,14 +376,22 @@ class ConnectionWrapper:
         """Rebuild the connection if it is closed, invalidated, or discarded.
 
         A server-dropped connection leaves the closed flag False, so
-        invalidated and the None sentinel also trigger a reconnect.
+        invalidated and the None sentinel also trigger a reconnect. A
+        rebuilt connection whose setup raises is discarded, so the next
+        call tries again rather than using it half configured.
         """
         if (self.sa_connection is None
                 or getattr(self.sa_connection, 'closed', False)
                 or getattr(self.sa_connection, 'invalidated', False)):
-            self.sa_connection = self.engine.connect()
-            self.dbapi_connection = self.sa_connection.connection
-            configure_connection(self.sa_connection, readonly=self.readonly)
+            sa_connection = self.engine.connect()
+            try:
+                configure_connection(
+                    sa_connection, readonly=self.readonly, options=self.options)
+            except Exception:
+                sa_connection.invalidate()
+                raise
+            self.sa_connection = sa_connection
+            self.dbapi_connection = sa_connection.connection
 
     def _invalidate(self) -> None:
         """Discard a broken connection so the next cursor() rebuilds it.
@@ -897,7 +905,8 @@ class ConnectionWrapper:
 
 
 def configure_connection(sa_connection: sa.engine.Connection,
-                         readonly: bool = False) -> None:
+                         readonly: bool = False, *,
+                         options: DatabaseOptions) -> None:
     """Configure a SQLAlchemy connection with database-specific settings.
 
     Parameters
@@ -908,6 +917,9 @@ def configure_connection(sa_connection: sa.engine.Connection,
         Whether to put the session in read-only mode, so the server
         refuses a write the local guard cannot classify. A writer
         takes the dialect's writer-only settings instead.
+    options : DatabaseOptions
+        Options the connection was opened with. The writer-only
+        settings read them, such as SQLite's journal_mode.
     """
     strategy = get_db_strategy(sa_connection)
     strategy.configure_connection(sa_connection.connection)
@@ -918,7 +930,7 @@ def configure_connection(sa_connection: sa.engine.Connection,
         # opened a transaction.
         strategy.set_session_readonly(sa_connection.connection)
     else:
-        strategy.configure_writer_connection(sa_connection.connection)
+        strategy.configure_writer_connection(sa_connection.connection, options)
 
 
 def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
@@ -1009,6 +1021,13 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
         readonly=readonly)
 
     sa_connection = engine.connect()
-    configure_connection(sa_connection, readonly=readonly)
+    try:
+        configure_connection(sa_connection, readonly=readonly, options=options)
+    except Exception:
+        # Invalidate rather than close, so a pool does not keep the
+        # half-configured connection, which holds the file open and
+        # blocks a SQLite retry from switching out of WAL.
+        sa_connection.invalidate()
+        raise
 
     return ConnectionWrapper(sa_connection, options, readonly=readonly)
