@@ -188,17 +188,18 @@ class Cursor:
 
     def _execute_query(self, sql: str, args: tuple) -> None:
         """Execute query with parameter handling."""
-        # No placeholders - execute without parameters
-        if args and not has_placeholders(sql):
-            self.dbapi_cursor.execute(sql)
-            logger.debug('Executed query without placeholders (ignoring args)')
-            return
-
-        # Named parameters (dict)
+        # has_placeholders misses sqlite '$name' and '@name', which only
+        # the dialect-aware named check sees.
         dict_params = self._find_dict_params(args)
         if dict_params is not None and has_named_placeholders(
                 sql, getattr(self.connwrapper, 'dialect', 'postgresql')):
             self._execute_with_dict_params(sql, dict_params)
+            return
+
+        # No placeholders - execute without parameters
+        if args and not has_placeholders(sql):
+            self.dbapi_cursor.execute(sql)
+            logger.debug('Executed query without placeholders (ignoring args)')
             return
 
         # Multi-statement SQL with positional params
@@ -257,7 +258,20 @@ class Cursor:
         return split_statements(sql, getattr(self.connwrapper, 'dialect', 'postgresql'))
 
     def _execute_multi_statement(self, statements: list[str], args: tuple) -> None:
-        """Execute each statement, splitting the positional parameters."""
+        """Execute each statement, splitting the positional parameters.
+
+        Parameters
+        ----------
+        statements : list[str]
+            Statements in execution order.
+        args : tuple
+            Positional parameters for all statements, in text order.
+
+        Raises
+        ------
+        QueryError
+            When the parameter count differs from the placeholder count.
+        """
         params = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
 
         placeholder = self.strategy.get_placeholder_style()
@@ -276,18 +290,52 @@ class Cursor:
                 param_index += count
                 self.dbapi_cursor.execute(stmt, stmt_params)
             else:
-                self.dbapi_cursor.execute(stmt)
+                self._execute_without_params(stmt)
 
     def _execute_multi_statement_named(self, statements: list[str],
                                        params_dict: dict) -> None:
-        """Execute each statement with the named parameters it uses."""
+        """Execute each statement with the named parameters it uses.
+
+        Parameters
+        ----------
+        statements : list[str]
+            Statements in execution order.
+        params_dict : dict
+            Named parameters for all statements.
+        """
+        if getattr(self.connwrapper, 'dialect', 'postgresql') == 'sqlite':
+            # sqlite3 ignores a key the statement does not name, and
+            # binds the ':name', '$name', '@name' and '?NNN' forms alike.
+            for stmt in statements:
+                self.dbapi_cursor.execute(stmt, params_dict)
+            return
         for stmt in statements:
             param_names = re.findall(r'%\(([^)]+)\)s', stmt)
             if param_names:
                 stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
                 self.dbapi_cursor.execute(stmt, stmt_params)
             else:
-                self.dbapi_cursor.execute(stmt)
+                self._execute_without_params(stmt)
+
+    def _execute_without_params(self, stmt: str) -> None:
+        """Execute one statement of a parameterized multi-statement call.
+
+        Parameters
+        ----------
+        stmt : str
+            Statement holding no placeholder.
+
+        Notes
+        -----
+        - On PostgreSQL each '%%' becomes '%', as psycopg reads it in a
+          statement given parameters, which is how prepare_query and the
+          caller wrote it.
+        """
+        # Passing empty parameters instead would make psycopg read a
+        # bare modulo '%' as an incomplete placeholder.
+        if getattr(self.connwrapper, 'dialect', 'postgresql') == 'postgresql':
+            stmt = stmt.replace('%%', '%')
+        self.dbapi_cursor.execute(stmt)
 
     @dumpsql(is_many=True)
     def executemany(self, operation: str, seq_of_parameters: Sequence,
