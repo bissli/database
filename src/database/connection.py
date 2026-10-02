@@ -34,7 +34,7 @@ from database.sql import _split_qualified_identifier, make_placeholders
 from database.sql import prepare_query, quote_identifier
 from database.strategy import get_db_strategy, get_strategy
 from database.transaction import Transaction
-from database.types import RowAdapter
+from database.types import RowAdapter, null_special_string
 from database.utils import ensure_commit, get_dialect_name
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
@@ -688,7 +688,10 @@ class ConnectionWrapper:
         placeholders = make_placeholders(len(cols), self.dialect)
         sql = f'INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})'
 
-        all_params = [tuple(row.values()) for row in rows]
+        all_params = [
+            tuple(null_special_string(v) for v in row.values())
+            for row in rows
+            ]
 
         cursor = self.cursor()
         return cursor.executemany(sql, all_params)
@@ -888,7 +891,10 @@ class ConnectionWrapper:
             update_cols_ifnull=update_cols_ifnull if should_update else None,
         )
 
-        params = [[row.get(col) for col in columns] for row in rows]
+        params = [
+            [null_special_string(row.get(col)) for col in columns]
+            for row in rows
+            ]
 
         cursor = self.cursor()
         rc = cursor.executemany(sql, params, batch_size)

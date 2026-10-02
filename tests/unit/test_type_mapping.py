@@ -413,8 +413,17 @@ class TestTypeConverterScalars:
         assert TypeConverter.convert_value(largest_float) == largest_float
         assert TypeConverter.convert_value(0.0) == 0.0
 
+    def test_empty_string_becomes_null(self):
+        """Verify '' binds as NULL through convert_value.
+
+        Mutation: dropping the '' arm on the str fast path of
+            convert_value.
+        Oracle: '' against a one-space string just outside the rule.
+        """
+        assert TypeConverter.convert_value('') is None
+        assert TypeConverter.convert_value(' ') == ' '
+
     @pytest.mark.parametrize('value', [
-        '',
         'null',
         'NULL',
         'Null',
@@ -427,16 +436,16 @@ class TestTypeConverterScalars:
         'nat',
         'NaT',
         ])
-    def test_special_null_strings_are_case_insensitive(self, value):
-        """Verify every spelling of a null-ish string becomes None.
+    def test_spelled_null_strings_bind_as_text(self, value):
+        """Verify every spelling of a null-ish word comes back unchanged.
 
-        Mutation: dropping `.lower()` in `_check_special_string`, which
-            lets 'NULL' reach the column as text, or removing a member
-            of SPECIAL_STRINGS.
-        Oracle: hand-written spellings, each in a case the source never
-            stores literally.
+        Mutation: restoring the SPECIAL_STRINGS lookup on the str paths
+            of convert_value, which nulls Bloomberg's 'None' and a
+            ticker such as 'NA'.
+        Oracle: hand-written spellings in every case SPECIAL_STRINGS
+            would match.
         """
-        assert TypeConverter.convert_value(value) is None
+        assert TypeConverter.convert_value(value) == value
 
     @pytest.mark.parametrize('value', [
         ' ',
@@ -554,17 +563,18 @@ class TestTypeConverterScalars:
     def test_pyarrow_scalars_unwrap_and_null_out(self):
         """Verify a PyArrow scalar is unwrapped and still null-checked.
 
-        Mutation: dropping `_normalize_special_string` around the
-            `as_py()` result in `_convert_pyarrow_value` (a PyArrow
-            'null' string reaches the column as text), or dropping the
+        Mutation: dropping `_empty_string_to_none` around the
+            `as_py()` result in `_convert_pyarrow_value` (a PyArrow ''
+            reaches the column as text), or dropping the
             `pa.Scalar` clause in the second pyarrow branch of
             convert_value (BooleanScalar and Date32Scalar bypass
             conversion entirely).
-        Oracle: the plain-Python conversion of the same values - 'null'
-            is None, 'kept' survives, 1.5 is a float, True is a bool,
-            and a date stays a date with exact type identity.
+        Oracle: the plain-Python conversion of the same values - '' is
+            None, 'null' survives, 1.5 is a float, True is a bool, and a
+            date stays a date with exact type identity.
         """
-        assert TypeConverter.convert_value(pa.scalar('null')) is None
+        assert TypeConverter.convert_value(pa.scalar('')) is None
+        assert TypeConverter.convert_value(pa.scalar('null')) == 'null'
         assert TypeConverter.convert_value(pa.scalar('kept')) == 'kept'
         assert TypeConverter.convert_value(pa.scalar(None, type=pa.float64())) is None
 
@@ -607,12 +617,12 @@ class TestTypeConverterParams:
             batch recursion (returns rows untouched), or narrowing the
             batch guard to `tuple` only (silently skips list-of-lists
             rows).
-        Oracle: hand-written expected batches with both null spellings
-            resolved, for tuple rows and list rows.
+        Oracle: hand-written expected batches with '' resolved, for
+            tuple rows and list rows.
         """
-        rows = [(1, 'null'), (2, '')]
+        rows = [(1, ''), (2, '')]
         assert TypeConverter.convert_params(rows) == [(1, None), (2, None)]
-        assert TypeConverter.convert_params([[1, 'null'], [2, '']]) == [[1, None], [2, None]]
+        assert TypeConverter.convert_params([[1, ''], [2, '']]) == [[1, None], [2, None]]
 
     def test_sequence_container_type_is_preserved(self):
         """Verify the container class survives conversion, inside and out.
@@ -622,17 +632,17 @@ class TestTypeConverterParams:
         Oracle: type identity on the outer and inner containers, not
             just equality, since a list equals no tuple.
         """
-        converted = TypeConverter.convert_params(((1, 'null'), (2, 'nan')))
+        converted = TypeConverter.convert_params(((1, ''), (2, '')))
 
         assert type(converted) is tuple
         assert type(converted[0]) is tuple
         assert converted == ((1, None), (2, None))
 
-        flat = TypeConverter.convert_params(['null', 3])
+        flat = TypeConverter.convert_params(['', 3])
         assert type(flat) is list
         assert flat == [None, 3]
 
-        list_batch = TypeConverter.convert_params([[1, 'null']])
+        list_batch = TypeConverter.convert_params([[1, '']])
         assert type(list_batch[0]) is list
 
     def test_mixed_sequence_is_one_row_not_a_batch(self):
@@ -644,8 +654,8 @@ class TestTypeConverterParams:
         Oracle: hand-written expectation - the tuple parameter reaches
             the driver as given, while the sibling string is nulled.
         """
-        params = [(1, 'null'), 'null']
-        assert TypeConverter.convert_params(params) == [(1, 'null'), None]
+        params = [(1, ''), '']
+        assert TypeConverter.convert_params(params) == [(1, ''), None]
 
     def test_scalar_params_go_through_value_conversion(self):
         """Verify a lone parameter is converted, not returned as is.
@@ -653,10 +663,10 @@ class TestTypeConverterParams:
         Mutation: `return params` in place of
             `return TypeConverter.convert_value(params)` at the tail of
             convert_params.
-        Oracle: the same values through convert_value - 'nan' is None
+        Oracle: the same values through convert_value - '' is None
             and np.int64(7) is a Python int.
         """
-        assert TypeConverter.convert_params('nan') is None
+        assert TypeConverter.convert_params('') is None
         assert TypeConverter.convert_params(None) is None
         assert type(TypeConverter.convert_params(np.int64(7))) is int
 
@@ -665,11 +675,11 @@ class TestTypeConverterParams:
 
         Mutation: swapping the key and value in the dict comprehension
             of convert_params, or converting keys instead of values.
-        Oracle: hand-written expected dict, with a key that is itself a
-            special null string so a key conversion would erase it.
+        Oracle: hand-written expected dict, with a key that is itself ''
+            so a key conversion would erase it.
         """
-        params = {'null': 'null', 'kept': np.int64(5)}
-        assert TypeConverter.convert_params(params) == {'null': None, 'kept': 5}
+        params = {'': '', 'kept': np.int64(5)}
+        assert TypeConverter.convert_params(params) == {'': None, 'kept': 5}
 
 
 if __name__ == '__main__':
