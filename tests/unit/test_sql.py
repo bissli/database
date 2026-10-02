@@ -1209,7 +1209,7 @@ class TestHasNamedPlaceholders:
     def test_named_detection_by_dialect(self, sql, dialect, expected):
         """Only pyformat counts on postgres; sqlite also counts ':name'.
 
-        Mutation: appending _NAMED_COLON_RE for every dialect rather than
+        Mutation: appending _NAMED_SQLITE_RE for every dialect rather than
             for sqlite alone, which reads 'arr[1:3]' and a bare ':id' as
             bound names under postgres; or dropping it, which blinds
             sqlite to its own named style.

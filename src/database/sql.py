@@ -31,7 +31,7 @@ _REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
 _UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by % or s or (
 _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening tag
 _NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')  # Named pyformat placeholder
-_NAMED_COLON_RE = re.compile(r'(?<!:):\w+')  # sqlite named placeholder, ':' cast excluded
+_NAMED_SQLITE_RE = re.compile(r'(?<!:):\w+|(?<![\w$@])[$@]\w+')  # sqlite ':name', '$name', '@name'
 
 _IDENT_CHARS = frozenset('_$')
 _MASKABLE_RE = re.compile(r'[\'"$]|--|/\*')
@@ -210,7 +210,8 @@ def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool
         SQL to inspect, already standardized for the dialect.
     dialect : str, default 'postgresql'
         Which named syntaxes count. PostgreSQL recognizes pyformat
-        '%(name)s' only; sqlite also recognizes ':name'.
+        '%(name)s' only; sqlite also recognizes ':name', '$name' and
+        '@name'.
 
     Returns
     -------
@@ -231,7 +232,7 @@ def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool
         return False
     patterns = [_NAMED_PYFORMAT_RE]
     if dialect == 'sqlite':
-        patterns.append(_NAMED_COLON_RE)
+        patterns.append(_NAMED_SQLITE_RE)
     protected = _protected_ranges(sql, dialect)
     return any(m.start() not in protected
                for pattern in patterns
@@ -497,6 +498,7 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
       precedence over comments and dollar quotes.
     - Single-line comments (--) and block comments (/* */).
     - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) - PostgreSQL only.
+    - Backtick and bracket identifiers (`...` and [...]) - sqlite only.
     - regexp_replace(...) calls.
 
     Notes
@@ -513,7 +515,7 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
     i = 0
     while i < n:
         c = sql[i]
-        if c in {"'", '"'}:
+        if c in {"'", '"'} or (dialect == 'sqlite' and c == '`'):
             j = i + 1
             while j < n:
                 if sql[j] == c:
@@ -525,6 +527,12 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
                 j += 1
             else:
                 j = n
+            protected.update(range(i, j))
+            i = j
+            continue
+        if dialect == 'sqlite' and c == '[':
+            j = sql.find(']', i + 1)
+            j = n if j == -1 else j + 1
             protected.update(range(i, j))
             i = j
             continue
@@ -642,9 +650,36 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
 
 
 def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str) -> tuple[str, Any]:
-    """Transform SQL and args in single pass."""
+    """Rewrite each placeholder for the dialect and rebuild the args to match.
+
+    Parameters
+    ----------
+    sql : str
+        Statement text.
+    phs : list[PH]
+        Placeholders found in sql, in text order.
+    args : tuple | dict | None
+        Normalized args. A dict binds by name.
+    dialect : str
+        'postgresql' or 'sqlite'.
+
+    Returns
+    -------
+    tuple[str, Any]
+        The rewritten SQL, and a tuple of positional args or a dict of
+        named args.
+
+    Notes
+    -----
+    - A dict key no pyformat placeholder names is kept, because a native
+      sqlite '$name', '@name' or '?NNN' binds it after this rewrite.
+    """
     parts = []
-    new_args = {} if isinstance(args, dict) else []
+    if isinstance(args, dict):
+        pyformat_names = {ph.name for ph in phs}
+        new_args = {name: val for name, val in args.items() if name not in pyformat_names}
+    else:
+        new_args = []
     pos = 0
     is_pg = dialect == 'postgresql'
     marker = '?' if dialect == 'sqlite' else '%s'
@@ -720,8 +755,27 @@ def _named_ph(name: str, dialect: str) -> str:
 
 
 def _proc_named(ph: PH, args: dict, dialect: str) -> tuple[str, dict]:
-    """Process named placeholder."""
+    """SQL and args for one placeholder when the args bind by name.
+
+    Parameters
+    ----------
+    ph : PH
+        The placeholder. An unnamed one ('?' or '%s') takes no arg.
+    args : dict
+        Named args.
+    dialect : str
+        'postgresql' or 'sqlite'.
+
+    Returns
+    -------
+    tuple[str, dict]
+        The replacement SQL, and the args it binds.
+    """
     name = ph.name
+    if name is None:
+        # The '?' of a sqlite '?NNN' binds the key 'NNN' with the digits
+        # left in place after it.
+        return '?' if dialect == 'sqlite' else '%s', {}
     if name not in args:
         return _named_ph(name, dialect), {}
 
