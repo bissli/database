@@ -9,6 +9,7 @@ It handles SQLite's unique features and limitations such as:
 - Automatic rowid management (no explicit sequence resetting needed)
 - Metadata retrieval using SQLite PRAGMA statements
 """
+import datetime
 import json
 import logging
 import sqlite3
@@ -92,17 +93,27 @@ class SQLiteStrategy(DatabaseStrategy):
     def register_type_adapters(self, connection: Any) -> None:
         """Register dialect-specific type adapters and converters for SQLite.
 
-        SQLite needs adapters to handle complex types like dict and list,
-        and converters to handle date/datetime coming from the database.
+        Notes
+        -----
+        - The date, datetime and timestamp registrations replace the
+          stdlib defaults, which Python 3.12 deprecates. A bound datetime
+          keeps the stdlib's text form, ISO 8601 with a space separator.
         """
         # Adapters (Python -> SQLite)
         sqlite3.register_adapter(dict, json.dumps)
         sqlite3.register_adapter(list, json.dumps)
+        sqlite3.register_adapter(datetime.date, datetime.date.isoformat)
+        # The space keeps new rows comparable and sortable as text
+        # against rows the stdlib adapter already wrote.
+        sqlite3.register_adapter(
+            datetime.datetime,
+            lambda value: value.isoformat(' '))
 
         # Converters (SQLite -> Python)
         connection.execute('SELECT 1')
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
+        sqlite3.register_converter('timestamp', convert_datetime)
 
     def create_dict_cursor(self, raw_conn: Any) -> Any:
         """Create a cursor that returns rows as dictionaries.

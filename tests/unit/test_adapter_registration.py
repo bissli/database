@@ -354,6 +354,64 @@ def test_datetime_converter_round_trip(sqlite_conn):
     assert type(value) is datetime.datetime
 
 
+def test_sqlite_timestamp_column_reads_through_iso_parser():
+    """Verify a TIMESTAMP column parses full ISO 8601, offset and date-only.
+
+    Mutation: dropping register_converter('timestamp', convert_datetime)
+        from SQLiteStrategy.register_type_adapters, which leaves the
+        stdlib converter in place - it raises on both stored values.
+    Oracle: hand-computed datetimes, one with a +02:00 tzinfo built
+        from datetime.timezone.
+    """
+    cn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
+    db.execute(cn, 'CREATE TABLE ts_probe (label TEXT, ts TIMESTAMP)')
+    db.execute(
+        cn,
+        'INSERT INTO ts_probe VALUES (?, ?), (?, ?)',
+        'offset',
+        '2023-05-15T14:30:45+02:00',
+        'date_only',
+        '2023-05-15')
+
+    values = db.select_column(cn, 'SELECT ts FROM ts_probe ORDER BY label')
+    cn.close()
+
+    offset = datetime.timezone(datetime.timedelta(hours=2))
+    assert values == [
+        datetime.datetime(2023, 5, 15),
+        datetime.datetime(2023, 5, 15, 14, 30, 45, tzinfo=offset),
+        ]
+
+
+def test_sqlite_binds_dates_as_iso_text_without_stdlib_adapters(sqlite_conn):
+    """Verify bound dates store as stdlib-format ISO text via own adapters.
+
+    Mutation: isoformat() in place of isoformat(' ') in the datetime
+        adapter, or dropping either register_adapter call, which falls
+        back to the stdlib adapter Python 3.12 deprecates.
+    Oracle: hand-written ISO strings with a space separator, read back
+        from an undeclared-type column, plus the stdlib adapters' module
+        name 'sqlite3.dbapi2'.
+    """
+    db.execute(
+        sqlite_conn,
+        'INSERT INTO conv_probe (label, txt) VALUES (?, ?), (?, ?)',
+        'a',
+        datetime.datetime(2023, 5, 15, 14, 30, 45, 123456),
+        'b',
+        datetime.date(2023, 5, 15))
+
+    assert db.select_column(
+        sqlite_conn,
+        'SELECT txt FROM conv_probe ORDER BY label') == [
+        '2023-05-15 14:30:45.123456',
+        '2023-05-15',
+        ]
+    for bound_type in (datetime.date, datetime.datetime):
+        adapter = sqlite3.adapters[(bound_type, sqlite3.PrepareProtocol)]
+        assert getattr(adapter, '__module__', None) != 'sqlite3.dbapi2', bound_type
+
+
 def test_sqlite_executemany_converts_special_strings(sqlite_conn):
     """Verify batch insert converts special strings to NULL.
 
