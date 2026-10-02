@@ -24,15 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 def dumpsql(is_many: bool = False):
-    """Decorator for logging SQL queries and parameters.
+    """Decorator factory that logs a cursor call's SQL, parameters and time.
 
-    Uses lazy %-format on the logger so parameter __repr__ is only
-    invoked when a handler actually emits the record (i.e. when DEBUG
-    or ERROR are enabled). This matters on the hot path - every
-    execute/executemany call passes through here.
+    Parameters
+    ----------
+    is_many : bool, default False
+        True for executemany: log the row count in place of the rows.
 
-    Args:
-        is_many: If True, logs row count instead of args (for executemany)
+    Returns
+    -------
+    Callable
+        Decorator for a Cursor method that takes the operation first. A
+        failed call logs at ERROR with its traceback, then re-raises.
+
+    Notes
+    -----
+    - Every record uses lazy %-format, so a parameter's __repr__ runs only
+      when a handler emits the record.
     """
     def decorator(func):
         label = 'Executemany' if is_many else 'Query'
@@ -54,10 +62,16 @@ def dumpsql(is_many: bool = False):
                 return result
             except Exception:
                 if is_many:
-                    logger.error('Error with executemany:\nSQL:\n%s', operation)
+                    logger.error(
+                        'Error with executemany:\nSQL:\n%s',
+                        operation,
+                        exc_info=True)
                 else:
-                    logger.error('Error with query:\nSQL:\n%s\nargs: %s',
-                                 operation, args)
+                    logger.error(
+                        'Error with query:\nSQL:\n%s\nargs: %s',
+                        operation,
+                        args,
+                        exc_info=True)
                 raise
             finally:
                 elapsed = time.perf_counter() - start
