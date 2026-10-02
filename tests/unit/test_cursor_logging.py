@@ -232,6 +232,29 @@ def test_executemany_error_logs_its_own_label_and_reraises(make_cursor, caplog):
     assert rec.args == ('INSERT INTO t VALUES (%s)',)
 
 
+@pytest.mark.parametrize(('method', 'call_args', 'needle'), [
+    ('execute', ('DELETE FROM t WHERE id = %s', 7), 'Error with query'),
+    ('executemany', ('INSERT INTO t VALUES (%s)', [(1,)]), 'Error with executemany'),
+    ])
+def test_error_record_carries_the_exception(
+        make_cursor, caplog, method, call_args, needle):
+    """Verify a failed call's ERROR record carries the raised exception.
+
+    Mutation: dropping exc_info=True from either logger.error call in
+        the except branch of dumpsql.
+    Oracle: the exception instance handed to the stub driver.
+    """
+    error = ValueError('nope')
+    cursor = make_cursor(execute_error=error)
+    with caplog.at_level(logging.ERROR, logger=CURSOR_LOGGER):
+        with pytest.raises(ValueError, match='nope'):
+            getattr(cursor, method)(*call_args)
+
+    rec = _one_record(caplog, needle)
+    assert rec.exc_info is not None
+    assert rec.exc_info[1] is error
+
+
 def test_timing_uses_the_elapsed_delta(make_cursor, caplog, fake_clock):
     """Verify the timer reports stop minus start at four decimals.
 
