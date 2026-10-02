@@ -17,7 +17,8 @@ import re
 from collections import namedtuple
 from typing import Any
 
-from database.exceptions import DatabaseError, ReadOnlyError, ValidationError
+from database.exceptions import DatabaseError, QueryError, ReadOnlyError
+from database.exceptions import ValidationError
 
 from libb import issequence
 
@@ -600,6 +601,8 @@ def _parse_ctx(prefix: str) -> tuple[str, bool]:
 def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict | None:
     """Normalize args."""
     if not args:
+        if len(phs) == 1 and phs[0].ctx == 'in':
+            return ((),)
         return args
 
     # Notes:
@@ -669,6 +672,11 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
         The rewritten SQL, and a tuple of positional args or a dict of
         named args.
 
+    Raises
+    ------
+    QueryError
+        When the positional arg count differs from the placeholder count.
+
     Notes
     -----
     - A dict key no pyformat placeholder names is kept, because a native
@@ -679,6 +687,10 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
         pyformat_names = {ph.name for ph in phs}
         new_args = {name: val for name, val in args.items() if name not in pyformat_names}
     else:
+        if len(args or ()) != len(phs):
+            raise QueryError(
+                f'Parameter count mismatch: SQL needs {len(phs)} '
+                f'but {len(args or ())} were provided')
         new_args = []
     pos = 0
     is_pg = dialect == 'postgresql'
@@ -697,7 +709,7 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
             parts.append(sql_part)
             new_args.update(arg_upd)
         else:
-            val = args[i] if args and i < len(args) else None
+            val = args[i]
             sql_part, arg_list = _proc_pos(ph, val, marker)
             parts.append(sql_part)
             new_args.extend(arg_list)
