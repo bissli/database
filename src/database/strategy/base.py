@@ -8,6 +8,7 @@ behaviors while presenting a consistent interface to the rest of the application
 Each concrete strategy implements operations with database-specific SQL and techniques,
 but clients can work with any database through this consistent interface.
 """
+import logging
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
@@ -20,6 +21,8 @@ from database.sql import raise_on_readonly_disarm
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
     from database.options import DatabaseOptions
+
+logger = logging.getLogger(__name__)
 
 # Registry of dialect name -> strategy class
 # Defined here to avoid circular imports (concrete strategies import from base)
@@ -46,9 +49,31 @@ class DatabaseStrategy(ABC):
 
     @contextmanager
     def _cursor(self, cn: 'ConnectionWrapper', sql: str, params: tuple | None = None):
-        """Context manager for cursor lifecycle with SQL standardization.
+        """Run sql on a raw DBAPI cursor, yield the cursor, then close it.
 
-        Handles cursor creation, SQL execution, and cleanup.
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection whose raw DBAPI connection runs the statement.
+        sql : str
+            Statement text, standardized for the dialect before it runs.
+        params : tuple or None, default None
+            Positional parameters; None runs the statement with none.
+
+        Yields
+        ------
+        Any
+            The raw DBAPI cursor, after execute.
+
+        Raises
+        ------
+        ReadOnlyError
+            sql would turn off a reader's read-only session setting.
+
+        Notes
+        -----
+        - A failed execute, or an error raised in the with-body, logs at
+          ERROR with the SQL and traceback, then re-raises.
         """
         raise_on_readonly_disarm(cn, sql)
         sql = self.standardize_sql(sql)
@@ -56,6 +81,13 @@ class DatabaseStrategy(ABC):
         try:
             cursor.execute(sql, params or ())
             yield cursor
+        except Exception:
+            logger.error(
+                'Error with query:\nSQL:\n%s\nparams: %s',
+                sql,
+                params,
+                exc_info=True)
+            raise
         finally:
             cursor.close()
 
