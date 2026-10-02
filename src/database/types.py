@@ -11,6 +11,7 @@ import datetime
 import logging
 import math
 import sqlite3
+import sys
 from typing import Any, Self, TypeVar
 
 import dateutil.parser
@@ -18,13 +19,6 @@ import numpy as np
 import pandas as pd
 
 from libb import attrdict
-
-try:
-    import pyarrow as pa
-    PYARROW_AVAILABLE = True
-except ImportError:
-    pa = None
-    PYARROW_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +34,6 @@ PANDAS_NULLABLE_TYPES = (
     pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
     pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
     pd.Float64Dtype
-)
-PYARROW_FLOAT_TYPES = (
-    (pa.FloatScalar, pa.DoubleScalar, pa.Int8Scalar, pa.Int16Scalar,
-     pa.Int32Scalar, pa.Int64Scalar, pa.UInt8Scalar, pa.UInt16Scalar,
-     pa.UInt32Scalar, pa.UInt64Scalar, pa.StringScalar)
-    if PYARROW_AVAILABLE else ()
 )
 
 
@@ -79,7 +67,8 @@ def null_special_string(value: Any) -> Any:
       ('nan', 'None', 'NaT'). Cursor.execute and executemany map only ''
       and bind every other str unchanged.
     """
-    if PYARROW_AVAILABLE and isinstance(value, pa.StringScalar | pa.LargeStringScalar):
+    pa = sys.modules.get('pyarrow')
+    if pa and isinstance(value, pa.StringScalar | pa.LargeStringScalar):
         value = value.as_py()
     if isinstance(value, str) and (not value or value.lower() in SPECIAL_STRINGS):
         return None
@@ -97,7 +86,8 @@ def _convert_pyarrow_value(value: Any) -> Any:
     5. Use to_pandas() for tables
     6. Fall back to str()
     """
-    if not PYARROW_AVAILABLE or value is None:
+    pa = sys.modules.get('pyarrow')
+    if pa is None or value is None:
         return value
 
     # Check for null
@@ -256,9 +246,8 @@ class TypeConverter:
         if isinstance(value, PANDAS_NULLABLE_TYPES):
             return _convert_pandas_nullable(value)
 
-        if PYARROW_AVAILABLE:
-            if isinstance(value, PYARROW_FLOAT_TYPES):
-                return _convert_pyarrow_value(value)
+        pa = sys.modules.get('pyarrow')
+        if pa:
             if isinstance(value, pa.Scalar) or hasattr(value, '_is_arrow_scalar') or \
                isinstance(value, pa.Array | pa.ChunkedArray | pa.Table):
                 return _convert_pyarrow_value(value)
