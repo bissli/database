@@ -153,7 +153,8 @@ emails = db.select_column(cn, 'SELECT email FROM users')
 
 `select_row` and `select_scalar` raise `db.ValidationError` if the query
 returns zero or multiple rows. Use `select_row_or_none` /
-`select_scalar_or_none` when zero rows are valid.
+`select_scalar_or_none` when zero rows are valid. `select_row_or_none`
+still raises `db.ValidationError` on multiple rows.
 
 For more query operations, see the [Query Operations documentation](docs/README.md#query-operations).
 
