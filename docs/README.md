@@ -150,7 +150,8 @@ options = DatabaseOptions(
     pool_max_idle_time=300,    # Maximum seconds a connection can be idle
     pool_wait_timeout=30,      # Maximum seconds to wait for a connection
     # SQLite parameters
-    journal_mode='wal'         # 'wal', 'delete', 'truncate' or 'persist'
+    journal_mode='wal',        # 'wal', 'delete', 'truncate' or 'persist'
+    open_mode=None             # None, 'ro' or 'immutable'; needs role='reader'
 )
 
 cn = db.connect(options)
@@ -221,6 +222,52 @@ database whose file permissions deny writing.
 `role='reader'` with `database=':memory:'` raises `ValidationError`. Each
 connection to `':memory:'` owns a private database, so a reader would get
 an empty one and report every table as missing.
+
+#### SQLite open modes
+
+`open_mode` sets how a SQLite reader opens the file. It is SQLite only,
+defaults to `None`, and otherwise takes `'ro'` or `'immutable'`, in lower
+case. Any other value raises `ValidationError` when `DatabaseOptions` is
+built. Either mode on a writer raises `ValidationError` at `connect()`.
+A reader opened with either mode keeps
+every reader guard: `ReadOnlyError` from the library's write methods,
+`PRAGMA query_only` on the session, and no `journal_mode` or
+`synchronous` pragma.
+
+```python
+reader = db.connect({'drivername': 'sqlite', 'database': 'store.db',
+                     'open_mode': 'ro'}, role='reader')
+```
+
+With `open_mode=None` the file opens read-write at the OS level, the
+session refuses writes through `PRAGMA query_only`, and each read takes
+the usual shared lock. SQLite creates a missing file as an empty
+database, as it does for a writer.
+
+Both modes raise at `connect()` on a missing file and create nothing.
+
+`'ro'` opens the file with SQLite's `mode=ro` URI parameter. On a WAL
+file `'ro'` creates the `-shm` and `-wal` files beside it when they do
+not exist yet, so the directory must be writable then. With both present,
+as when a writer holds the file open, a read-only directory works. `'ro'`
+leaves the `-shm` and `-wal` files behind after close.
+
+`'immutable'` opens the file with `mode=ro&immutable=1`. SQLite takes no
+lock and reads no journal or `-wal` file, so the reader never waits on a
+writer's lock and a writer never waits on the reader. It is safe only
+when the file never changes while a connection holds it open. For a
+synced file, the usual way to meet that is all three of:
+
+- the file is replaced by rename, as a sync tool such as Dropbox does
+- its writer uses a rollback-journal mode such as `delete`
+- each read opens a fresh connection, with `use_pool` off
+
+A file rewritten in place under an immutable connection returns wrong
+rows or raises a corruption error.
+
+For a reader with `open_mode` set, the library percent-encodes a path
+holding `?`, `#` or a space before it reaches SQLite. With `open_mode`
+`None` the path reaches SQLite unencoded and opens as it is.
 
 #### What a reader refuses
 

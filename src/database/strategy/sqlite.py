@@ -12,6 +12,7 @@ It handles SQLite's unique features and limitations such as:
 import json
 import logging
 import sqlite3
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 JOURNAL_MODES = frozenset({'wal', 'delete', 'truncate', 'persist'})
+OPEN_MODES = {'ro': 'mode=ro', 'immutable': 'mode=ro&immutable=1'}
 
 
 def _raw_sqlite(conn: Any) -> Any:
@@ -61,8 +63,23 @@ class SQLiteStrategy(DatabaseStrategy):
         return 'sqlite'
 
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
-        """Build the SQLAlchemy connection URL for SQLite."""
-        return f'sqlite:///{options.database}'
+        """SQLAlchemy URL for options.database, as a URI when open_mode is set.
+
+        Parameters
+        ----------
+        options : DatabaseOptions
+            database names the file. open_mode None gives a plain path;
+            'ro' or 'immutable' gives a file: URI carrying that parameter.
+
+        Returns
+        -------
+        str
+            The URL.
+        """
+        if options.open_mode is None:
+            return f'sqlite:///{options.database}'
+        file_uri = Path(options.database).absolute().as_uri()
+        return f'sqlite:///{file_uri}?{OPEN_MODES[options.open_mode]}&uri=true'
 
     def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
         """Return SQLAlchemy create_engine kwargs for SQLite."""
@@ -109,7 +126,7 @@ class SQLiteStrategy(DatabaseStrategy):
 
     @classmethod
     def validate_options(cls, options: 'DatabaseOptions') -> None:
-        """Check the required fields and the journal mode.
+        """Check the required fields, the journal mode and the open mode.
 
         Parameters
         ----------
@@ -119,14 +136,19 @@ class SQLiteStrategy(DatabaseStrategy):
         Raises
         ------
         ValidationError
-            When database is unset, or journal_mode is not one of
-            JOURNAL_MODES, matched in lower case.
+            When database is unset, journal_mode is not one of
+            JOURNAL_MODES, or open_mode is neither None nor a key of
+            OPEN_MODES, each matched in exact lower case.
         """
         super().validate_options(options)
         if options.journal_mode not in JOURNAL_MODES:
             raise ValidationError(
                 f'journal_mode must be one of {sorted(JOURNAL_MODES)}, '
                 f'got {options.journal_mode!r}')
+        if options.open_mode is not None and options.open_mode not in OPEN_MODES:
+            raise ValidationError(
+                f'open_mode must be None or one of {sorted(OPEN_MODES)}, '
+                f'got {options.open_mode!r}')
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.

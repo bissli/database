@@ -129,6 +129,13 @@ class DatabaseOptions(ConfigOptions):
     - journal_mode is SQLite only, one of 'wal', 'delete', 'truncate',
       'persist', and PostgreSQL ignores it. A writer sets it on every
       connect. A reader leaves the file as it is.
+    - open_mode is SQLite only, one of None, 'ro', 'immutable', and
+      requires `connect(..., role='reader')`. Either mode raises on a
+      missing file and creates nothing. 'immutable' takes no lock and
+      reads no journal, so the file must not change while a connection
+      holds it. For a synced file that usually means: replaced by
+      rename, from a writer in a rollback-journal mode, with a fresh
+      connection per read.
     """
     drivername: str = 'postgresql'
     hostname: str = None
@@ -149,6 +156,7 @@ class DatabaseOptions(ConfigOptions):
     pool_wait_timeout: int = 30
     # SQLite parameters
     journal_mode: str = 'wal'
+    open_mode: str | None = None
 
     def __post_init__(self):
         if not is_supported_dialect(self.drivername):
