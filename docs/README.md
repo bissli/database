@@ -148,11 +148,28 @@ options = DatabaseOptions(
     use_pool=False,            # Enable connection pooling
     pool_max_connections=5,    # Maximum connections in pool
     pool_max_idle_time=300,    # Maximum seconds a connection can be idle
-    pool_wait_timeout=30       # Maximum seconds to wait for a connection
+    pool_wait_timeout=30,      # Maximum seconds to wait for a connection
+    # SQLite parameters
+    journal_mode='wal'         # 'wal', 'delete', 'truncate' or 'persist'
 )
 
 cn = db.connect(options)
 ```
+
+A SQLite writer sets `journal_mode` on every connect. `'wal'` pairs with
+`synchronous = NORMAL` and every other mode with `synchronous = FULL`.
+Only WAL is stored in the database file, so one writer on the default
+`'wal'` converts the file for every later opener. A store that must stay
+in `delete` mode needs `journal_mode='delete'` on every writer that opens
+it.
+
+Switching a WAL file to another mode raises `database is locked` while
+any other connection has read the file since opening it. A store already
+in WAL is converted with nothing else connected.
+
+In a rollback mode a reader's open transaction blocks a writer's commit.
+The commit waits up to the 5000 ms `busy_timeout`, then raises `database
+is locked`.
 
 ### Reader Endpoints and Read-Only Connections
 
@@ -1397,11 +1414,11 @@ The following is a complete reference of the public API functions and types.
 
 ### Core Functions
 
-| Function                     | Description                        | Parameters                                                                                      | Returns                            |
-| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `connect(options, config=None, role='writer', **kwargs)` | Create database connection | `options`: Connection options dictionary or object<br>`config`: Configuration object a dotted path resolves against<br>`role`: `'writer'` or `'reader'`<br>`**kwargs`: Additional connection options | `ConnectionWrapper` |
-| `execute(cn, sql, *args)`    | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                  | Row count or specified return data |
-| `transaction(cn)`            | Create transaction context manager | `cn`: Database connection                                                                       | `Transaction` context manager      |
+| Function                                                 | Description                        | Parameters                                                                                                                                                                                           | Returns                            |
+| -------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `connect(options, config=None, role='writer', **kwargs)` | Create database connection         | `options`: Connection options dictionary or object<br>`config`: Configuration object a dotted path resolves against<br>`role`: `'writer'` or `'reader'`<br>`**kwargs`: Additional connection options | `ConnectionWrapper`                |
+| `execute(cn, sql, *args)`                                | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                                                                                                                       | Row count or specified return data |
+| `transaction(cn)`                                        | Create transaction context manager | `cn`: Database connection                                                                                                                                                                            | `Transaction` context manager      |
 
 ### Query Operations
 

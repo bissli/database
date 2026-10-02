@@ -126,6 +126,9 @@ class DatabaseOptions(ConfigOptions):
       field falls back to hostname or port on its own, so the reader
       lands on the writer endpoint and keeps the read-only guard.
     - SQLite has no reader endpoint, so both fields are ignored there.
+    - journal_mode is SQLite only, one of 'wal', 'delete', 'truncate',
+      'persist', and PostgreSQL ignores it. A writer sets it on every
+      connect. A reader leaves the file as it is.
     """
     drivername: str = 'postgresql'
     hostname: str = None
@@ -144,6 +147,8 @@ class DatabaseOptions(ConfigOptions):
     pool_max_connections: int = 5
     pool_max_idle_time: int = 300
     pool_wait_timeout: int = 30
+    # SQLite parameters
+    journal_mode: str = 'wal'
 
     def __post_init__(self):
         if not is_supported_dialect(self.drivername):

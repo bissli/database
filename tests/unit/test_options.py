@@ -170,6 +170,26 @@ def test_sqlite_requires_only_database():
     assert 'database' in str(excinfo.value)
 
 
+def test_sqlite_journal_mode_accepts_only_durable_modes():
+    """Verify journal_mode accepts the four durable modes and nothing else.
+
+    Mutation: SQLiteStrategy.validate_options not checking journal_mode,
+        or JOURNAL_MODES gaining 'off' or 'memory'.
+    Oracle: SQLite's documented mode names; 'off' and 'memory' lose a
+        committed transaction on a crash.
+    """
+    for mode in ('wal', 'delete', 'truncate', 'persist'):
+        options = DatabaseOptions(drivername='sqlite', database='x.db',
+                                  journal_mode=mode)
+        assert options.journal_mode == mode
+
+    for mode in ('off', 'memory', 'WAL'):
+        with pytest.raises(ValidationError) as excinfo:
+            DatabaseOptions(drivername='sqlite', database='x.db',
+                            journal_mode=mode)
+        assert repr(mode) in str(excinfo.value)
+
+
 def test_supplied_appname_wins_over_script_name(monkeypatch):
     """Verify a supplied appname is never overwritten by the script name.
 

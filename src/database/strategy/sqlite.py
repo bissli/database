@@ -15,7 +15,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
-from database.exceptions import QueryError
+from database.exceptions import QueryError, ValidationError
 from database.sql import make_placeholders, quote_identifier
 from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from database.options import DatabaseOptions
 
 logger = logging.getLogger(__name__)
+
+JOURNAL_MODES = frozenset({'wal', 'delete', 'truncate', 'persist'})
 
 
 def _raw_sqlite(conn: Any) -> Any:
@@ -104,6 +106,27 @@ class SQLiteStrategy(DatabaseStrategy):
     def get_required_options(cls) -> list[str]:
         """Return required options for SQLite connections."""
         return ['database']
+
+    @classmethod
+    def validate_options(cls, options: 'DatabaseOptions') -> None:
+        """Check the required fields and the journal mode.
+
+        Parameters
+        ----------
+        options : DatabaseOptions
+            Options to validate.
+
+        Raises
+        ------
+        ValidationError
+            When database is unset, or journal_mode is not one of
+            JOURNAL_MODES, matched in lower case.
+        """
+        super().validate_options(options)
+        if options.journal_mode not in JOURNAL_MODES:
+            raise ValidationError(
+                f'journal_mode must be one of {sorted(JOURNAL_MODES)}, '
+                f'got {options.journal_mode!r}')
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
@@ -186,29 +209,42 @@ select name as column from pragma_table_info({quoted_table})
         sqlite_conn.row_factory = sqlite3.Row
         self.enable_autocommit(sqlite_conn)
 
-    def configure_writer_connection(self, conn: Any) -> None:
-        """Put the database in WAL mode, which only a writer may do.
+    def configure_writer_connection(self, conn: Any,
+                                    options: 'DatabaseOptions') -> None:
+        """Set the journal mode and the synchronous level it needs.
 
         Parameters
         ----------
         conn : Any
             Pooled or raw sqlite3 connection.
+        options : DatabaseOptions
+            journal_mode names the mode. 'wal' takes synchronous
+            NORMAL, every other mode FULL.
 
         Notes
         -----
-        - journal_mode is stored in the database header, so setting it
-          changes the file itself and fails on a database whose
-          permissions deny writing. query_only does not cover it,
-          which is why a reader has to skip it rather than rely on the
+        - Only WAL is stored in the database header. Setting it changes
+          the file for every later opener and fails on a database whose
+          permissions deny writing. query_only does not cover it, which
+          is why a reader has to skip it rather than rely on the
           session setting.
+        - A WAL file switched to another mode raises 'database is
+          locked' at once, whatever busy_timeout says, while any other
+          connection has read the file since opening it.
+        - Setting the mode the file already has needs only the shared
+          lock any read takes, so another connection's read or write
+          transaction never blocks it.
+        - synchronous is set in both branches, so a pooled connection
+          never keeps the level an earlier checkout chose.
         - Skipped for ':memory:', which has no on-disk log to write
           ahead of.
         """
         sqlite_conn = _raw_sqlite(conn)
         if _is_memory_db(sqlite_conn):
             return
-        sqlite_conn.execute('PRAGMA journal_mode = WAL')
-        sqlite_conn.execute('PRAGMA synchronous = NORMAL')
+        synchronous = 'NORMAL' if options.journal_mode == 'wal' else 'FULL'
+        sqlite_conn.execute(f'PRAGMA journal_mode = {options.journal_mode}')
+        sqlite_conn.execute(f'PRAGMA synchronous = {synchronous}')
 
     def enable_autocommit(self, raw_conn: Any) -> None:
         """Enable auto-commit mode for SQLite.
