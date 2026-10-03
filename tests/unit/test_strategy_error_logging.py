@@ -1,7 +1,4 @@
 """Unit tests for error logging on the strategy's raw DBAPI cursor paths.
-
-DatabaseStrategy._cursor and PostgresStrategy.copy_from bypass the
-dumpsql decorator, so each logs its own ERROR record before re-raising.
 """
 import io
 import logging
@@ -39,8 +36,7 @@ def raw_cn(mocker):
 def test_raw_execute_error_logs_and_closes_cursor(mocker, raw_cn, caplog):
     """Verify a failed raw execute logs its SQL and exception, then closes.
 
-    Mutation: dropping the except branch of DatabaseStrategy._cursor,
-        which leaves the failure with no log record.
+    Mutation: the except branch of DatabaseStrategy._cursor dropped.
     Oracle: the exception instance handed to the stub cursor.
     """
     error = ValueError('nope')
@@ -62,8 +58,7 @@ def test_raw_execute_error_logs_and_closes_cursor(mocker, raw_cn, caplog):
 def test_raw_fetch_error_logs_once(mocker, raw_cn, caplog):
     """Verify a fetch failure in the with-body logs exactly one record.
 
-    Mutation: narrowing the try in DatabaseStrategy._cursor to the
-        execute call alone, which misses an error raised at the yield.
+    Mutation: the try in DatabaseStrategy._cursor narrowed to execute.
     Oracle: the exception instance handed to the stub cursor's fetchall.
     """
     error = ValueError('nope')
@@ -81,10 +76,9 @@ def test_raw_fetch_error_logs_once(mocker, raw_cn, caplog):
 
 
 def test_copy_from_error_logs_and_closes_cursor(mocker, raw_cn, caplog):
-    """Verify a failed COPY logs its statement and closes the cursor.
+    """Verify a failed copy logs its statement and closes the cursor.
 
-    Mutation: cursor.close() after the copy block instead of in a
-        finally, or dropping the except branch of copy_from.
+    Mutation: cursor.close() outside a finally, or the except dropped.
     Oracle: the exception instance handed to the stub copy writer.
     """
     error = ValueError('nope')
@@ -99,6 +93,6 @@ def test_copy_from_error_logs_and_closes_cursor(mocker, raw_cn, caplog):
 
     records = _error_records(caplog, POSTGRES_LOGGER)
     assert len(records) == 1
-    assert 'COPY "t" FROM STDIN' in records[0].getMessage()
+    assert 'copy "t" from stdin' in records[0].getMessage()
     assert records[0].exc_info[1] is error
     raw_cursor.close.assert_called_once_with()

@@ -1,13 +1,4 @@
-"""Unit tests for connection URL construction and the engine registry.
-
-Two contracts live here:
-
-- The URL builder must percent-encode username, password, database, and
-  appname so that no character can corrupt URL parsing or inject extra
-  libpq parameters through the query string.
-- The engine registry key must identify an engine by its non-secret
-  fields only: two option sets differing solely in password share an
-  engine, and a difference in any identity or pool field does not.
+"""Tests for connection URL construction and the engine registry.
 """
 import sqlite3
 
@@ -22,7 +13,8 @@ from sqlalchemy.pool import NullPool, StaticPool
 
 
 def _options(**overrides):
-    """Build a minimal valid postgres DatabaseOptions for URL tests."""
+    """A minimal valid postgres DatabaseOptions, with overrides applied.
+    """
     base = {
         'drivername': 'postgresql',
         'hostname': 'myhost',
@@ -38,14 +30,13 @@ def _options(**overrides):
 
 
 def _parse(url):
-    """Parse a connection URL string with SQLAlchemy."""
+    """The URL string parsed by SQLAlchemy.
+    """
     return sa.engine.url.make_url(url)
 
 
 def _spy_factory():
-    """Return (factory, created) for get_engine_for_options' engine_factory.
-
-    Every call appends the fake engine it returns to created.
+    """(factory, created): a fake engine_factory and the engines it built.
     """
     created = []
 
@@ -58,7 +49,8 @@ def _spy_factory():
 
 
 class _FakeEngine:
-    """Stand-in for a SQLAlchemy Engine that records how it was built."""
+    """Stand-in for a SQLAlchemy Engine that records how it was built.
+    """
 
     def __init__(self, url, kwargs):
         self.url = url
@@ -66,17 +58,14 @@ class _FakeEngine:
         self.disposed = False
 
     def dispose(self):
-        """Match the one Engine method dispose_all_engines() calls."""
+        """Match the one Engine method dispose_all_engines() calls.
+        """
         self.disposed = True
 
 
 @pytest.fixture(autouse=True)
 def isolated_engine_registry():
     """Give each test a private engine registry.
-
-    The registry is a process-wide module global, so a fake engine left
-    behind would be handed to an unrelated test or to the atexit
-    disposal hook.
     """
     saved = dict(_engine_registry)
     _engine_registry.clear()
@@ -91,10 +80,7 @@ class TestPostgresUrlShape:
     def test_url_matches_hand_written_literal(self):
         """Verify the whole postgres URL, keepalive settings included.
 
-        Mutation: any change to the keepalive constants in
-        build_connection_url ('keepalives_idle=30' -> 300), to the
-        'postgresql+psycopg' driver token, or to the host/port/database
-        order in the URL f-string.
+        Mutation: a changed keepalive constant, driver token, or part order.
         Oracle: hand-written URL literal.
         """
         url = PostgresStrategy().build_connection_url(_options())
@@ -109,9 +95,8 @@ class TestPostgresUrlShape:
     def test_connect_timeout_carries_the_timeout_option(self):
         """Verify connect_timeout comes from options.timeout.
 
-        Mutation: connect_timeout built from options.pool_wait_timeout
-        (default 30) instead of options.timeout.
-        Oracle: timeout=45, chosen to differ from every pool default.
+        Mutation: connect_timeout built from options.pool_wait_timeout.
+        Oracle: timeout=45, unlike every pool default.
         """
         url = PostgresStrategy().build_connection_url(_options(timeout=45))
         assert _parse(url).query['connect_timeout'] == '45'
@@ -119,13 +104,10 @@ class TestPostgresUrlShape:
     def test_zero_timeout_omits_connect_timeout(self):
         """Verify a falsy timeout drops connect_timeout entirely.
 
-        Mutation: dropping the `if options.timeout:` guard, which sends
-        connect_timeout=0 - 'wait forever' to libpq, the opposite of the
-        caller's intent.
-        Oracle: the 0/45 boundary; the full expected query key set.
+        Mutation: dropping the `if options.timeout:` guard (0 waits forever).
+        Oracle: the full expected query key set.
         """
-        # Postgres validation rejects timeout=0, so reach the branch by
-        # clearing it after construction.
+        # Postgres validation rejects timeout=0 at construction.
         options = _options()
         options.timeout = 0
         url = PostgresStrategy().build_connection_url(options)
@@ -138,8 +120,7 @@ class TestPostgresUrlShape:
     def test_empty_appname_omits_application_name(self):
         """Verify a blank appname adds no application_name parameter.
 
-        Mutation: dropping the `if options.appname:` guard, which sends
-        an empty application_name to the server.
+        Mutation: dropping the `if options.appname:` guard.
         Oracle: the full expected query key set.
         """
         options = _options()
@@ -170,11 +151,8 @@ class TestCredentialEncoding:
     def test_password_is_percent_encoded(self, password, encoded):
         """Verify each dangerous password character is escaped.
 
-        Mutation: quote(options.password or '', safe='') losing safe=''
-        (leaves '/' raw) or dropping quote() altogether; quote_plus in
-        place of quote turns the space into '+'.
-        Oracle: hand-computed percent-encoding per character, plus a
-        SQLAlchemy re-parse of the authority section.
+        Mutation: quote() losing safe='', dropped, or swapped for quote_plus.
+        Oracle: hand-computed percent-encoding, plus a re-parse.
         """
         url = PostgresStrategy().build_connection_url(_options(password=password))
         assert f'://myuser:{encoded}@myhost:5432/mydb?' in url
@@ -191,11 +169,8 @@ class TestCredentialEncoding:
     def test_username_is_percent_encoded(self, username, encoded):
         """Verify a username cannot split the authority section.
 
-        Mutation: quote(options.username or '', safe='') losing safe=''
-        or dropping quote(); a raw ':' would be read as the start of the
-        password and a raw '@' as the start of the host.
-        Oracle: hand-computed percent-encoding, plus a re-parse showing
-        the password and host survive intact.
+        Mutation: quote() on the username losing safe='' or dropped.
+        Oracle: hand-computed percent-encoding, plus a re-parse.
         """
         url = PostgresStrategy().build_connection_url(_options(username=username))
         assert f'://{encoded}:mypass@myhost:5432/mydb?' in url
@@ -207,11 +182,8 @@ class TestCredentialEncoding:
     def test_database_cannot_inject_query_parameters(self):
         """Verify a '?' in the database name stays in the path.
 
-        Mutation: dropping quote() on options.database, which lets
-        'db?sslmode=disable' end the path and add a real libpq
-        parameter.
-        Oracle: hand-computed 'db%3Fsslmode%3Ddisable', plus the query
-        key set proving nothing was injected.
+        Mutation: dropping quote() on options.database.
+        Oracle: hand-computed 'db%3Fsslmode%3Ddisable' and the query key count.
         """
         url = PostgresStrategy().build_connection_url(
             _options(database='db?sslmode=disable'))
@@ -223,13 +195,10 @@ class TestCredentialEncoding:
     def test_missing_credentials_render_empty_not_none(self):
         """Verify absent credentials become empty strings in the URL.
 
-        Mutation: quote(options.username or '') losing the `or ''`
-        fallback - quote(None) raises TypeError, and a bare f-string
-        would put the literal 'None' in the URL.
+        Mutation: quote(options.username or '') losing the `or ''` fallback.
         Oracle: hand-written URL prefix for the credential-free case.
         """
-        # Postgres validation rejects blank credentials, so clear them
-        # after construction to reach the fallbacks.
+        # Postgres validation rejects blank credentials at construction.
         options = _options()
         options.username = None
         options.password = None
@@ -245,11 +214,8 @@ class TestAppnameInjection:
     def test_appname_with_ampersand_does_not_inject_params(self):
         """Verify an appname cannot smuggle in a second parameter.
 
-        Mutation: dropping quote_plus() around options.appname, which
-        turns 'evil&sslmode=disable' into a real sslmode parameter and
-        downgrades the connection to plaintext.
-        Oracle: hand-computed 'evil%26sslmode%3Ddisable', the exact
-        query key count, and a re-parse of application_name.
+        Mutation: dropping quote_plus() around options.appname.
+        Oracle: hand-computed encoding, query key count, and a re-parse.
         """
         url = PostgresStrategy().build_connection_url(
             _options(appname='evil&sslmode=disable'))
@@ -268,11 +234,8 @@ class TestAppnameInjection:
     def test_appname_specials_survive_a_round_trip(self, appname, encoded):
         """Verify the server receives the appname the caller passed.
 
-        Mutation: quote() in place of quote_plus() (encodes the space as
-        %20, which parse_qsl still decodes, but drops '+' handling), or
-        no encoding at all so '#' truncates the URL at the fragment.
-        Oracle: hand-computed form encoding per case, plus a re-parse
-        recovering the original text.
+        Mutation: quote() in place of quote_plus(), or no encoding at all.
+        Oracle: hand-computed form encoding per case, plus a re-parse.
         """
         url = PostgresStrategy().build_connection_url(_options(appname=appname))
         assert f'application_name={encoded}' in url
@@ -283,12 +246,10 @@ class TestCreateUrlFromOptions:
     """connection.create_url_from_options delegates by drivername."""
 
     def test_postgres_options_return_a_parsed_url_object(self):
-        """Verify the helper returns an sa.URL, not the raw string.
+        """Verify the helper returns an sa.URL.
 
-        Mutation: returning url_string instead of sa.make_url(
-        url_string) from create_url_from_options; the port would then
-        never be an int and callers lose .query.
-        Oracle: hand-written expected drivername, port int, and appname.
+        Mutation: returning url_string in place of sa.make_url(url_string).
+        Oracle: hand-written drivername, int port, and appname.
         """
         url = create_url_from_options(_options())
         assert isinstance(url, sa.URL)
@@ -303,11 +264,9 @@ class TestCreateUrlFromOptions:
     def test_sqlite_url_is_built_by_the_sqlite_strategy(
         self, database,
         expected):
-        """Verify sqlite options never route through the postgres URL.
+        """Verify sqlite options use the sqlite URL builder.
 
-        Mutation: get_strategy(options.drivername) hardcoded to
-        'postgresql' in create_url_from_options, or the sqlite builder
-        losing a slash from 'sqlite:///' so the path becomes a host.
+        Mutation: get_strategy hardcoded to 'postgresql', or a lost '/'.
         Oracle: hand-written URL literal for each path form.
         """
         url = create_url_from_options(
@@ -319,11 +278,8 @@ class TestCreateUrlFromOptions:
     def test_url_creator_receives_decoded_credentials_and_query(self):
         """Verify the url_creator hook gets every parsed component.
 
-        Mutation: dropping password=parsed.password (silent auth
-        failure) or replacing the query passthrough with {} (loses the
-        keepalive and application_name settings).
-        Oracle: hand-written expected kwargs dict, with the password
-        decoded back from its percent-encoded form.
+        Mutation: dropping password, or the query passthrough replaced by {}.
+        Oracle: hand-written expected kwargs, password decoded.
         """
         seen = {}
 
@@ -356,14 +312,9 @@ class TestCreateUrlFromOptions:
     def test_special_database_name_survives_the_round_trip(self, database):
         """Verify options.database wins over the percent-encoded path.
 
-        Mutation: dropping the url.set(database=options.database)
-        restoration in create_url_from_options, which opens 'my db' as
-        the literal 'my%20db' - make_url unquotes username and password
-        only, never the database. Dropping quote() on the database in
-        build_connection_url instead recovers the name but lets
-        'db?sslmode=disable' add a real libpq parameter.
-        Oracle: the caller's own database string, plus the hand-written
-        six-key query set and the decoded credentials.
+        Mutation: dropping the url.set restore (SQLAlchemy 2.0 then opens
+            'my%20db'), or quote() on the database.
+        Oracle: the caller's database string and the six-key query set.
         """
         url = create_url_from_options(
             _options(database=database, username='u@dom', password='p@w/d'))
@@ -378,10 +329,8 @@ class TestCreateUrlFromOptions:
     def test_open_mode_leaves_a_postgres_database_name_decoded(self):
         """Verify open_mode set on PostgreSQL keeps the raw database name.
 
-        Mutation: skipping the database-name restore on open_mode alone,
-        without the sqlite drivername check, so 'my db' reaches libpq as
-        'my%20db'.
-        Oracle: the hand-written raw name, as the restore puts it back.
+        Mutation: the restore keyed on open_mode without the sqlite check.
+        Oracle: the hand-written raw name.
         """
         url = create_url_from_options(_options(database='my db', open_mode='ro'))
         assert url.database == 'my db'
@@ -389,11 +338,8 @@ class TestCreateUrlFromOptions:
     def test_url_creator_receives_the_raw_database_name(self):
         """Verify the test seam gets the restored database name too.
 
-        Mutation: dropping the parsed.set(database=options.database)
-        restoration on the url_creator branch of
-        create_url_from_options, so the factory builds an engine for
-        'my%20db'.
-        Oracle: the caller's own name, read off a spy factory.
+        Mutation: url_creator fed the parts of a fresh make_url(url_string).
+        Oracle: the caller's own name, read off a spy creator.
         """
         seen = {}
 
@@ -413,11 +359,8 @@ class TestEngineRegistryKey:
     def test_password_is_absent_from_the_key(self):
         """Verify two configs differing only in password collide.
 
-        Mutation: adding options.password to the key tuple in
-        _build_engine_registry_key, which both leaks the secret into a
-        process-wide dict and defeats engine reuse after a rotation.
-        Oracle: byte equality of the two keys, plus a search for the
-        secret text.
+        Mutation: options.password added to the key tuple.
+        Oracle: equality of the two keys, plus a search for the secret.
         """
         first = _build_engine_registry_key(_options(password='secret_abc'),
                                            False, 5, 300, 30)
@@ -430,10 +373,8 @@ class TestEngineRegistryKey:
     def test_a_pipe_inside_a_field_cannot_shift_the_boundary(self):
         """Verify a '|' in one field does not forge another field's value.
 
-        Mutation: repr() back to str() in the _build_engine_registry_key
-        join, which lets 'u|x' + 'd' and 'u' + 'x|d' render identically.
-        Oracle: two option sets differing in where the '|' falls, whose
-        str()-joined forms are byte-identical.
+        Mutation: repr() back to str() in the key join.
+        Oracle: two option sets whose str()-joined keys are identical.
         """
         left = _build_engine_registry_key(
             _options(username='u|x', database='d'), False, 5, 300, 30)
@@ -443,12 +384,10 @@ class TestEngineRegistryKey:
         assert left != right
 
     def test_timeout_separates_two_otherwise_identical_options(self):
-        """Verify timeout is in the key, since it is baked into the URL.
+        """Verify timeout is part of the key.
 
-        Mutation: dropping options.timeout from the key tuple, which
-        hands the second caller the first caller's connect_timeout.
-        Oracle: the differential against password, which is deliberately
-        excluded and so must still collide.
+        Mutation: options.timeout dropped from the key tuple.
+        Oracle: password, excluded on purpose, still collides.
         """
         fast = _build_engine_registry_key(_options(timeout=1), False, 5, 300, 30)
         slow = _build_engine_registry_key(_options(timeout=99), False, 5, 300, 30)
@@ -459,11 +398,10 @@ class TestEngineRegistryKey:
         assert one == two
 
     def test_open_mode_separates_two_otherwise_identical_options(self):
-        """Verify open_mode is in the key, since it is baked into the URL.
+        """Verify open_mode is part of the key.
 
-        Mutation: leaving options.open_mode out of the key tuple, which
-        hands an immutable reader the engine a plain reader built.
-        Oracle: inequality against the same options with no open mode.
+        Mutation: options.open_mode left out of the key tuple.
+        Oracle: inequality against the same options with another open mode.
         """
         def key(open_mode):
             options = DatabaseOptions(drivername='sqlite', database='x.db',
@@ -476,11 +414,7 @@ class TestEngineRegistryKey:
     def test_key_matches_hand_written_literal(self):
         """Verify the key's exact field set, order, and separator.
 
-        Mutation: dropping options.database, options.appname,
-        options.timeout, options.open_mode or readonly from the key
-        tuple, reordering username and database, or swapping repr()
-        back to str() so a '|' inside a field can shift the field
-        boundary.
+        Mutation: a dropped or reordered key field, or str() for repr().
         Oracle: hand-written key literal.
         """
         key = _build_engine_registry_key(_options(), False, 5, 300, 30, False)
@@ -498,11 +432,8 @@ class TestEngineRegistryKey:
     def test_identity_field_changes_the_key(self, field, value):
         """Verify each identity field is part of the key.
 
-        Mutation: dropping any one of drivername, hostname, port,
-        username, database, or appname from the key tuple, which would
-        hand back an engine pointed at a different server or database.
-        Oracle: inequality against the baseline key, one field at a
-        time.
+        Mutation: any one identity field dropped from the key tuple.
+        Oracle: inequality against the baseline key, one field at a time.
         """
         baseline = _build_engine_registry_key(_options(), False, 5, 300, 30)
         changed = _build_engine_registry_key(_options(**{field: value}),
@@ -518,11 +449,8 @@ class TestEngineRegistryKey:
     def test_pool_setting_changes_the_key(self, position, value):
         """Verify each pool setting is part of the key.
 
-        Mutation: dropping pool_timeout (or any other pool argument)
-        from the key tuple, so a caller asking for a different pool
-        shape silently gets the first engine built.
-        Oracle: inequality against the baseline key, one argument at a
-        time.
+        Mutation: any one pool argument dropped from the key tuple.
+        Oracle: inequality against the baseline key, one argument at a time.
         """
         pool_args = [False, 5, 300, 30]
         baseline = _build_engine_registry_key(_options(), *pool_args)
@@ -533,12 +461,8 @@ class TestEngineRegistryKey:
     def test_readonly_changes_the_key(self):
         """Verify the reader role gets its own engine.
 
-        Mutation: dropping readonly from the key tuple, which lets one
-        pooled engine serve both roles - a writer then checks out a
-        connection whose session the server holds read only, and every
-        write on it fails.
-        Oracle: inequality between the two keys, with every other
-        field held equal.
+        Mutation: readonly dropped from the key tuple.
+        Oracle: inequality between the two keys, all else equal.
         """
         writer = _build_engine_registry_key(_options(), False, 5, 300, 30, False)
         reader = _build_engine_registry_key(_options(), False, 5, 300, 30, True)
@@ -551,10 +475,7 @@ class TestEngineRegistry:
     def test_engine_is_reused_across_equal_option_objects(self):
         """Verify a second call with the same identity reuses the engine.
 
-        Mutation: flipping the registry lookup guard in
-        get_engine_for_options to `if is_memory_sqlite and key in
-        _engine_registry`, which rebuilds an engine per call and leaks
-        connection pools.
+        Mutation: the registry lookup guard flipped to `if is_memory_sqlite`.
         Oracle: a spy factory counting create_engine calls.
         """
         factory, created = _spy_factory()
@@ -568,11 +489,8 @@ class TestEngineRegistry:
     def test_engines_are_not_shared_across_databases(self):
         """Verify a different database gets its own engine.
 
-        Mutation: dropping options.database from the key tuple in
-        _build_engine_registry_key, which would serve queries for one
-        database on a connection to another.
-        Oracle: a spy factory counting create_engine calls, plus the
-        registry size.
+        Mutation: options.database dropped from the key tuple.
+        Oracle: a spy factory's call count, plus the registry size.
         """
         factory, created = _spy_factory()
         first = get_engine_for_options(_options(database='alpha'),
@@ -586,12 +504,8 @@ class TestEngineRegistry:
     def test_readonly_engines_are_not_shared_with_writers(self):
         """Verify get_engine_for_options forwards readonly to the key.
 
-        Mutation: dropping readonly=readonly from the
-        _build_engine_registry_key call inside get_engine_for_options,
-        which leaves the key correct in isolation while the two roles
-        still collapse onto one engine in practice.
-        Oracle: a spy factory counting create_engine calls for the two
-        roles over one identical option set.
+        Mutation: readonly dropped from the key call in get_engine_for_options.
+        Oracle: a spy factory's call count for the two roles.
         """
         factory, created = _spy_factory()
         writer = get_engine_for_options(_options(), readonly=False,
@@ -602,11 +516,9 @@ class TestEngineRegistry:
         assert len(created) == 2
 
     def test_unpooled_engine_uses_nullpool(self):
-        """Verify the default path disables pooling outright.
+        """Verify the default path disables pooling.
 
-        Mutation: flipping `elif not use_pool:` to `elif use_pool:` in
-        get_engine_for_options, which would leave the default engine on
-        SQLAlchemy's QueuePool.
+        Mutation: `elif not use_pool:` flipped to `elif use_pool:`.
         Oracle: hand-written expected kwargs dict.
         """
         factory, created = _spy_factory()
@@ -616,11 +528,8 @@ class TestEngineRegistry:
     def test_pooled_engine_gets_pool_and_postgres_guards(self):
         """Verify pooled engines carry the pool sizing and safety kwargs.
 
-        Mutation: dropping max_overflow=0, pool_pre_ping, or
-        pool_reset_on_return from PostgresStrategy.get_engine_kwargs, or
-        swapping pool_recycle and pool_timeout in get_engine_for_options.
-        Oracle: hand-written expected kwargs dict with three distinct
-        pool numbers.
+        Mutation: a dropped postgres pool guard, or recycle/timeout swapped.
+        Oracle: hand-written kwargs dict with three distinct pool numbers.
         """
         factory, created = _spy_factory()
         get_engine_for_options(_options(use_pool=True), use_pool=True,
@@ -639,12 +548,8 @@ class TestEngineRegistry:
     def test_caller_kwargs_win_over_defaults(self):
         """Verify explicit create_engine kwargs override the defaults.
 
-        Mutation: moving engine_kwargs.update(kwargs) above the pool
-        block (caller's poolclass=StaticPool then silently overwritten by
-        the elif-not-use_pool NullPool branch), or dropping the update so
-        a caller's echo=True is ignored.
-        Oracle: echo=True confirmed on the spy; poolclass=StaticPool
-        survives the NullPool branch.
+        Mutation: engine_kwargs.update(kwargs) moved above the pool block.
+        Oracle: echo=True and poolclass=StaticPool read off the spy.
         """
         factory, created = _spy_factory()
         get_engine_for_options(
@@ -658,8 +563,7 @@ class TestEngineRegistry:
     def test_dispose_all_engines(self):
         """Verify dispose_all_engines() disposes every registered engine.
 
-        Mutation: clearing the registry without calling engine.dispose()
-        in dispose_all_engines, so pooled connections leak at process exit.
+        Mutation: the registry cleared without calling engine.dispose().
         Oracle: a per-engine disposed flag plus an emptied registry.
         """
         factory, created = _spy_factory()
@@ -670,14 +574,10 @@ class TestEngineRegistry:
         assert _engine_registry == {}
 
     def test_memory_sqlite_engine_is_never_cached(self):
-        """Verify each ':memory:' connect gets a private database.
+        """Verify each ':memory:' call gets a private engine.
 
-        Mutation: is_memory_sqlite forced False in
-        get_engine_for_options, which caches the StaticPool engine and
-        leaks one in-memory database across independent connect()
-        calls.
-        Oracle: object identity of two engines, the create call count,
-        and an empty registry.
+        Mutation: is_memory_sqlite forced False in get_engine_for_options.
+        Oracle: engine identity, the create count, and an empty registry.
         """
         factory, created = _spy_factory()
         options = DatabaseOptions(drivername='sqlite', database=':memory:')
@@ -691,11 +591,8 @@ class TestEngineRegistry:
     def test_memory_sqlite_keeps_strategy_connect_args(self):
         """Verify check_same_thread merges into the strategy connect_args.
 
-        Mutation: replacing engine_kwargs.setdefault('connect_args', {})
-        with a fresh dict, which drops the sqlite detect_types flags and
-        breaks date/datetime conversion on in-memory databases.
-        Oracle: both keys present in one dict, with detect_types
-        carrying the declared-type and column-name flags.
+        Mutation: setdefault('connect_args', {}) replaced with a fresh dict.
+        Oracle: check_same_thread and both detect_types flags in one dict.
         """
         factory, created = _spy_factory()
         options = DatabaseOptions(drivername='sqlite', database=':memory:')
@@ -708,11 +605,8 @@ class TestEngineRegistry:
     def test_file_sqlite_engine_is_cached(self):
         """Verify only ':memory:' escapes the registry.
 
-        Mutation: widening the is_memory_sqlite test to any sqlite
-        database, which would rebuild a file-backed engine on every
-        connect().
-        Oracle: object identity across two calls, plus the create call
-        count.
+        Mutation: the is_memory_sqlite test widened to any sqlite database.
+        Oracle: engine identity across two calls, plus the create count.
         """
         factory, created = _spy_factory()
         options = DatabaseOptions(drivername='sqlite', database='memory.db')
@@ -728,9 +622,7 @@ class TestConnectPoolMapping:
     def test_connect_uses_nullpool_by_default(self, tmp_path):
         """Verify connect() without use_pool gives a NullPool engine.
 
-        Mutation: use_pool hardcoded to True (or options.use_pool dropped)
-        in connect(), which would allocate a 5-connection QueuePool per
-        database and leak file handles at process exit.
+        Mutation: use_pool hardcoded to True in connect().
         Oracle: pool class read off the live engine.
         """
         options = DatabaseOptions(
@@ -746,11 +638,8 @@ class TestConnectPoolMapping:
     def test_connect_maps_pool_options_onto_the_engine_pool(self, tmp_path):
         """Verify each pool option reaches its SQLAlchemy counterpart.
 
-        Mutation: swapping pool_recycle=options.pool_max_idle_time and
-        pool_timeout=options.pool_wait_timeout in connect(), or wiring
-        pool_size to the wrong field.
-        Oracle: three distinct values (7, 111, 222) read back off the
-        live QueuePool.
+        Mutation: pool_recycle and pool_timeout swapped in connect().
+        Oracle: distinct values 7, 111, 222 read off the live QueuePool.
         """
         options = DatabaseOptions(
             drivername='sqlite',
@@ -771,4 +660,4 @@ class TestConnectPoolMapping:
 
 
 if __name__ == '__main__':
-    __import__('pytest').main([__file__])
+    pytest.main([__file__])

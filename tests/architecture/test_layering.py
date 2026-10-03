@@ -1,31 +1,22 @@
-"""Architecture invariants for the database library.
-
-Each test encodes a structural rule that must hold permanently.
-Violations indicate someone broke a layering contract.
+"""Structural rules: layering, public API, source text.
 """
 import ast
 import pathlib
 
-_SRC = pathlib.Path(__file__).parent.parent.parent / 'src' / 'database'
-_STRATEGY_SRC = _SRC / 'strategy'
-_UNIT_TESTS = pathlib.Path(__file__).parent.parent / 'unit'
+import database
+from database.strategy import _STRATEGY_REGISTRY
+
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
 _SRC_ROOT = _REPO_ROOT / 'src'
-_TESTS_ROOT = pathlib.Path(__file__).parent.parent
-
-
-def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
-    """Return {id(child): parent_node} for every node in tree."""
-    parent_map: dict[int, ast.AST] = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parent_map[id(child)] = node
-    return parent_map
+_TESTS_ROOT = _REPO_ROOT / 'tests'
+_STRATEGY_SRC = _SRC_ROOT / 'database' / 'strategy'
+_UNIT_TESTS = _TESTS_ROOT / 'unit'
 
 
 def _is_inside_type_checking(node: ast.AST,
                              parent_map: dict[int, ast.AST]) -> bool:
-    """Return True if node is nested inside an 'if TYPE_CHECKING:' block."""
+    """True when node sits inside an `if TYPE_CHECKING:` block at any depth.
+    """
     parent = parent_map.get(id(node))
     while parent is not None:
         if isinstance(parent, ast.If):
@@ -38,37 +29,32 @@ def _is_inside_type_checking(node: ast.AST,
     return False
 
 
-def _connection_imports_outside_type_checking(py_file: pathlib.Path) -> list[str]:
-    tree = ast.parse(py_file.read_text())
-    parent_map = _build_parent_map(tree)
-    violations = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        if not (node.module or '').startswith('database.connection'):
-            continue
-        if not _is_inside_type_checking(node, parent_map):
-            names = [a.name for a in node.names]
-            violations.append(
-                f'{py_file.name}:{node.lineno}: '
-                f'from database.connection import {names} (not in TYPE_CHECKING)'
-            )
-    return violations
-
-
 def test_strategy_connection_imports_are_type_checking_only():
-    """strategy/*.py must only import database.connection under TYPE_CHECKING.
+    """Verify strategy/*.py imports database.connection only for typing.
 
-    The strategy layer accepts ConnectionWrapper as a parameter and uses
-    it via duck typing. Importing the wrapper at runtime would
-    re-introduce the circular import that was eliminated in commit
-    1b2cf70.
+    Mutation: a runtime database.connection import in a strategy module.
+    Oracle: an AST walk for an enclosing `if TYPE_CHECKING:` guard.
     """
     all_violations = []
     for py_file in sorted(_STRATEGY_SRC.glob('*.py')):
         if py_file.name == '__init__.py':
             continue
-        all_violations.extend(_connection_imports_outside_type_checking(py_file))
+        tree = ast.parse(py_file.read_text())
+        parent_map = {
+            id(child): node
+            for node in ast.walk(tree)
+            for child in ast.iter_child_nodes(node)
+            }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if not (node.module or '').startswith('database.connection'):
+                continue
+            if not _is_inside_type_checking(node, parent_map):
+                names = [a.name for a in node.names]
+                all_violations.append(
+                    f'{py_file.name}:{node.lineno}: '
+                    f'from database.connection import {names} (not in TYPE_CHECKING)')
 
     assert not all_violations, (
         'strategy/ files import database.connection outside TYPE_CHECKING:\n'
@@ -77,11 +63,10 @@ def test_strategy_connection_imports_are_type_checking_only():
 
 
 def test_unit_tests_do_not_import_connection_module():
-    """tests/unit/*.py must not import from database.connection directly.
+    """Verify no tests/unit/*.py file imports from database.connection.
 
-    Utility helpers (get_dialect_name, ensure_commit) live in
-    database.utils. Importing database.connection pulls in SQLAlchemy,
-    psycopg, pandas, etc. and couples unit tests to the heavy layer.
+    Mutation: a unit test importing from database.connection over utils.
+    Oracle: an AST scan of every `from ... import` in tests/unit.
     """
     violations = []
     for py_file in sorted(_UNIT_TESTS.glob('test_*.py')):
@@ -104,11 +89,12 @@ def test_unit_tests_do_not_import_connection_module():
 
 
 def test_all_registered_strategies_are_concrete():
-    """Every dialect in _STRATEGY_REGISTRY must have no unimplemented
-    abstract methods - otherwise the class can't be instantiated.
-    """
-    from database.strategy import _STRATEGY_REGISTRY
+    """Verify every registered strategy class can be instantiated.
 
+    Mutation: a new abstract method on DatabaseStrategy that a registered
+        strategy does not implement.
+    Oracle: each class's __abstractmethods__, empty for a concrete class.
+    """
     unimplemented = {}
     for dialect, cls in _STRATEGY_REGISTRY.items():
         missing = cls.__abstractmethods__
@@ -121,9 +107,6 @@ def test_all_registered_strategies_are_concrete():
     )
 
 
-# Snapshot of the public API. Update this set whenever a name is
-# intentionally added or removed from `database.__all__`; the test will
-# fail to force a deliberate review of the API change.
 _EXPECTED_ALL: frozenset[str] = frozenset({
     'Column',
     'ColumnInfo',
@@ -167,16 +150,11 @@ _EXPECTED_ALL: frozenset[str] = frozenset({
 
 
 def test_public_api_snapshot():
-    """database.__all__ must match the expected snapshot.
+    """Verify database.__all__ matches the _EXPECTED_ALL snapshot.
 
-    Added names: update _EXPECTED_ALL with the new names in the same
-    commit and explain the addition in the commit message.
-
-    Removed names: check all callers before removing - pre-1.0, this is
-    still a breaking change for downstream consumers.
+    Mutation: a name dropped from or added to database.__all__.
+    Oracle: the hand-written _EXPECTED_ALL set.
     """
-    import database
-
     actual = frozenset(database.__all__)
     added = actual - _EXPECTED_ALL
     removed = _EXPECTED_ALL - actual
@@ -197,13 +175,10 @@ def test_public_api_snapshot():
 
 
 def test_python_sources_contain_no_non_ascii_characters():
-    """Every .py file under src/ and tests/ must be pure ASCII.
+    """Verify every .py file under src/ and tests/ is pure ASCII.
 
-    Mutation: a Unicode dash or arrow put back into src/, e.g. sql.py's
-        '->' rewritten as the arrow U+2192, or the '-' in
-        strategy/base.py restored to the em dash U+2014.
-    Oracle: a byte-level scan comparing every character's ord() against
-        the 127 boundary, independent of any formatter or linter.
+    Mutation: a Unicode dash or arrow written into a .py file.
+    Oracle: a scan of every character's ord() against 128.
     """
     py_files = sorted(_SRC_ROOT.rglob('*.py'))
     py_files += sorted(_TESTS_ROOT.rglob('*.py'))
@@ -218,8 +193,7 @@ def test_python_sources_contain_no_non_ascii_characters():
         raw = py_file.read_bytes()
         if raw.isascii():
             continue
-        # surrogateescape keeps a non-UTF-8 byte reportable instead of
-        # raising, and maps it above 127 so the scan still flags it.
+        # surrogateescape maps a non-UTF-8 byte above 127 for the scan.
         text = raw.decode('utf-8', errors='surrogateescape')
         for lineno, line in enumerate(text.splitlines(), start=1):
             for col, char in enumerate(line, start=1):

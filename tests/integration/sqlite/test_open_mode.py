@@ -11,6 +11,8 @@ pytestmark = [pytest.mark.sqlite, pytest.mark.integration]
 
 
 def _delete_mode_file(directory):
+    """Path of a new delete-mode store.db in directory, table t, one row.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     db_file = directory / 'store.db'
     setup = sqlite3.connect(db_file)
@@ -23,6 +25,8 @@ def _delete_mode_file(directory):
 
 
 def _options(db_file, open_mode):
+    """Connect options for db_file opened in open_mode.
+    """
     return {'drivername': 'sqlite', 'database': str(db_file),
             'open_mode': open_mode}
 
@@ -31,10 +35,7 @@ def _options(db_file, open_mode):
 def test_reader_refuses_a_missing_file(tmp_path, open_mode):
     """Verify each open mode raises on a missing path and creates nothing.
 
-    Mutation: create_url_from_options writing options.database back over
-        the file: URI, which opens a new read-write file named
-        'missing.db?mode=ro', or mode=ro left out of either mode's URL,
-        since immutable=1 alone creates an empty file.
+    Mutation: options.database restored over the URI, or mode=ro left out.
     Oracle: the directory listing, empty before and after the connect.
     """
     with pytest.raises(sa.exc.OperationalError):
@@ -47,9 +48,7 @@ def test_reader_refuses_a_missing_file(tmp_path, open_mode):
 def test_reader_opens_a_path_holding_uri_delimiters(tmp_path, open_mode):
     """Verify each open mode reads a file whose directory holds '#' and '?'.
 
-    Mutation: the path put into the URI unencoded in place of
-        Path.as_uri(), so '#' or '?' ends the path early, or a second
-        'file:' prefix in front of the URI.
+    Mutation: the path unencoded in place of Path.as_uri(), or 'file:' twice.
     Oracle: the one row written by plain sqlite3 before the connect.
     """
     db_file = _delete_mode_file(tmp_path / 'a b#c?d')
@@ -65,9 +64,7 @@ def test_reader_opens_a_path_holding_uri_delimiters(tmp_path, open_mode):
 def test_reader_opens_a_path_holding_a_percent_escape(tmp_path, open_mode):
     """Verify each open mode reads a file whose directory name holds '%20'.
 
-    Mutation: create_url_from_options keeping the file: URI as make_url
-        returns it, which SQLAlchemy 2.1 unquotes, so SQLite opens the
-        missing 'p q' directory in place of 'p%20q'.
+    Mutation: create_url_from_options keeping the URI make_url unquoted.
     Oracle: the one row written by plain sqlite3 before the connect.
     """
     db_file = _delete_mode_file(tmp_path / 'p%20q')
@@ -82,11 +79,8 @@ def test_reader_opens_a_path_holding_a_percent_escape(tmp_path, open_mode):
 def test_immutable_reader_reads_through_an_exclusive_lock(tmp_path):
     """Verify open_mode='immutable' reads while another connection locks.
 
-    Mutation: immutable=1 left out of the URL, or 'immutable' built as
-        mode=ro, either of which waits on the lock and raises 'database
-        is locked'.
-    Oracle: the one row committed before a second sqlite3 connection
-        takes BEGIN EXCLUSIVE, which blocks every locking reader.
+    Mutation: immutable=1 left out of the URL.
+    Oracle: the committed row, read under another connection's lock.
     """
     db_file = _delete_mode_file(tmp_path)
     holder = sqlite3.connect(db_file, isolation_level=None)
@@ -105,10 +99,8 @@ def test_immutable_reader_reads_through_an_exclusive_lock(tmp_path):
 def test_open_mode_on_a_writer_raises(tmp_path, open_mode):
     """Verify a writer asking for a read-only open raises ValidationError.
 
-    Mutation: dropping the role check in connect, so the writer hook
-        runs on a read-only file and the write guard stays off.
-    Oracle: the connect inputs at the rule, open_mode set with the
-        default role='writer'.
+    Mutation: dropping the role check in connect.
+    Oracle: open_mode set with the default role='writer'.
     """
     db_file = _delete_mode_file(tmp_path)
 

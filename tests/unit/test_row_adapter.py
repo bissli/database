@@ -1,9 +1,4 @@
-"""Tests for the psycopg row factory and the structural row adapter.
-
-Covers DictRowFactory (database.row), which casts numeric column values
-by PostgreSQL type OID, and RowAdapter (database.types), which reshapes
-driver rows into dictionaries without converting any value.
-"""
+"""Tests for DictRowFactory and RowAdapter."""
 import datetime
 import math
 import sqlite3
@@ -15,12 +10,8 @@ from database.row import DictRowFactory
 from database.strategy import get_strategy
 from database.types import RowAdapter
 
-# Notes:
-# - OIDs are written out from the pg_catalog.pg_type catalog rather
-#   than read back through psycopg, so the expected mapping is an
-#   oracle independent of _build_postgres_types().
-# - OID_OID (the pg_catalog 'oid' type) carries an int and has no
-#   entry in postgres_types, which is what makes it the uncast case.
+# Literal pg_type OIDs keep the oracle independent of
+# _build_postgres_types.
 OID_BOOL = 16
 OID_INT8 = 20
 OID_TEXT = 25
@@ -45,10 +36,8 @@ class FakeCursor:
 def test_dict_row_factory_casts_numeric_values_by_type_code():
     """Verify each numeric value is cast to the type its OID maps to.
 
-    Mutation: dropping 'numeric' from the float row of type_mappings in
-    _build_postgres_types, or mapping bool to int there.
-    Oracle: hand-written 123.45, which Decimal('123.45') compares
-    unequal to, and True, which int 1 is not identical to.
+    Mutation: 'numeric' dropped from the float row, or bool mapped to int.
+    Oracle: float 123.45 by exact type, and True by identity.
     """
     factory = DictRowFactory(FakeCursor([
         FakeColumn('id', OID_INT8),
@@ -68,10 +57,8 @@ def test_dict_row_factory_casts_numeric_values_by_type_code():
 def test_dict_row_factory_leaves_non_numeric_values_untouched():
     """Verify a cast fires for Number values only, never for other types.
 
-    Mutation: dropping `isinstance(value, Number) and` from the
-    comprehension in DictRowFactory.__call__.
-    Oracle: identity of the input objects; datetime.date(a_date) raises
-    TypeError, and tuple([1, 2, 3]) compares unequal to the input list.
+    Mutation: dropping `isinstance(value, Number) and` from __call__.
+    Oracle: identity of the date, dict, and list input objects.
     """
     when = datetime.date(2023, 5, 15)
     payload = {'a': 1}
@@ -94,11 +81,8 @@ def test_dict_row_factory_leaves_non_numeric_values_untouched():
 def test_dict_row_factory_passes_through_unmapped_type_code():
     """Verify a column whose OID has no mapping is returned uncast.
 
-    Mutation: `postgres_types.get(c.type_code, str)` in
-    DictRowFactory.__init__, or dropping `and cast is not None` from
-    __call__.
-    Oracle: OID 26 is absent from postgres_types, so str(12345) is the
-    only other value the row could carry and None(12345) raises.
+    Mutation: a str default in postgres_types.get, or no None check.
+    Oracle: OID 26 is absent from postgres_types, so 12345 stays an int.
     """
     factory = DictRowFactory(FakeCursor([FakeColumn('obj_id', OID_OID)]))
 
@@ -109,11 +93,10 @@ def test_dict_row_factory_passes_through_unmapped_type_code():
 
 
 def test_dict_row_factory_preserves_sql_null():
-    """Verify NULL in a cast column stays None rather than becoming 0.0.
+    """Verify a null in a cast column stays None rather than becoming 0.0.
 
-    Mutation: dropping `isinstance(value, Number) and` from
-    DictRowFactory.__call__, which evaluates float(None) and int(None).
-    Oracle: None is not a Number, so None is the only correct output.
+    Mutation: dropping the Number check, which calls float(None).
+    Oracle: None is not a Number, so None must come back.
     """
     factory = DictRowFactory(FakeCursor([
         FakeColumn('amount', OID_NUMERIC),
@@ -128,10 +111,8 @@ def test_dict_row_factory_preserves_sql_null():
 def test_dict_row_factory_handles_cursor_without_description():
     """Verify a cursor with no result columns yields an empty mapping.
 
-    Mutation: dropping `or []` from DictRowFactory.__init__, which makes
-    construction raise TypeError for a statement returning no rows.
-    Oracle: psycopg leaves description None after such a statement, so
-    {} is the only non-raising result.
+    Mutation: dropping `or []` from DictRowFactory.__init__.
+    Oracle: psycopg's None description after a rowless statement.
     """
     factory = DictRowFactory(FakeCursor(None))
 
@@ -141,9 +122,8 @@ def test_dict_row_factory_handles_cursor_without_description():
 def test_postgres_dict_cursor_uses_dict_row_factory():
     """Verify the postgres strategy wires DictRowFactory into the cursor.
 
-    Mutation: create_dict_cursor passing psycopg's dict_row, or omitting
-    row_factory, which silently drops the numeric casting above.
-    Oracle: a spy connection recording the kwargs the strategy passed.
+    Mutation: create_dict_cursor passing dict_row or no row_factory.
+    Oracle: a spy connection recording the cursor kwargs.
     """
     class SpyConnection:
         """Records the keyword arguments passed to cursor().
@@ -167,13 +147,13 @@ def test_postgres_dict_cursor_uses_dict_row_factory():
 def test_sqlite_dict_cursor_returns_rows_keyed_by_column():
     """Verify the sqlite strategy sets sqlite3.Row on the raw connection.
 
-    Mutation: dropping `sqlite_conn.row_factory = sqlite3.Row` from
-    SQLiteStrategy.create_dict_cursor, or dropping the dbapi_connection
-    unwrap above it.
-    Oracle: hand-written {'a': 1, 'b': 'x'}, which the plain tuple
-    (1, 'x') a factory-less cursor returns compares unequal to.
+    Mutation: dropping the sqlite3.Row assignment or the dbapi unwrap.
+    Oracle: {'a': 1, 'b': 'x'}, which a plain tuple row does not equal.
     """
     class Wrapper:
+        """Exposes a raw connection as dbapi_connection.
+        """
+
         def __init__(self, connection):
             self.dbapi_connection = connection
 
@@ -188,10 +168,8 @@ def test_sqlite_dict_cursor_returns_rows_keyed_by_column():
 def test_row_adapter_dict_row_applies_no_type_conversion():
     """Verify a dict row is handed back with every value untouched.
 
-    Mutation: routing values through TypeConverter.convert_value in
-    RowAdapter.to_dict or get_value.
-    Oracle: identity of the input objects, plus the string 'null' and a
-    NaN float, which TypeConverter turns into None.
+    Mutation: routing values through TypeConverter.convert_value.
+    Oracle: input identity, 'null', and NaN, which TypeConverter nulls.
     """
     total = Decimal('123.45')
     when = datetime.date(2023, 5, 15)
@@ -212,11 +190,8 @@ def test_row_adapter_dict_row_applies_no_type_conversion():
 def test_row_adapter_sqlite_row_converts_to_plain_dict():
     """Verify a sqlite3.Row becomes a dict keyed by column name.
 
-    Mutation: dropping the keys() branch from RowAdapter.to_dict, which
-    returns the sqlite3.Row itself, or reading keys[-1] instead of
-    keys[0] in get_value().
-    Oracle: hand-written expected dict, which a sqlite3.Row compares
-    unequal to; the first column 123 differs from the last 45.6.
+    Mutation: dropping the keys() branch, or keys[-1] for keys[0].
+    Oracle: hand-written dict; the first column differs from the last.
     """
     connection = sqlite3.connect(':memory:')
     connection.row_factory = sqlite3.Row
@@ -238,11 +213,8 @@ def test_row_adapter_sqlite_row_converts_to_plain_dict():
 def test_row_adapter_namedtuple_row():
     """Verify a namedtuple row expands by field name and reads by key.
 
-    Mutation: dropping the _asdict branch from RowAdapter.to_dict, or the
-    hasattr(self.row, key) branch from get_value, which sends a string
-    key into tuple.__getitem__.
-    Oracle: hand-written expected dict, which a namedtuple compares
-    unequal to; field 0 (7) differs from field 1 ('bob').
+    Mutation: dropping the _asdict branch or the hasattr(row, key) read.
+    Oracle: hand-written dict; field 0 differs from field 1.
     """
     Record = namedtuple('Record', ['id', 'name'])
     row = Record(7, 'bob')
@@ -257,10 +229,8 @@ def test_row_adapter_namedtuple_row():
 def test_row_adapter_to_attrdict_allows_attribute_access():
     """Verify select_row's row supports both row.column and row['column'].
 
-    Mutation: RowAdapter.to_attrdict returning self.to_dict() instead of
-    wrapping it in attrdict.
-    Oracle: an attribute read, which raises AttributeError on a plain
-    dict, and the stored Decimal reached by key.
+    Mutation: to_attrdict returning a plain dict.
+    Oracle: an attribute read, which a plain dict refuses.
     """
     total = Decimal('1.50')
     row = {'name': 'alice', 'total': total}
@@ -274,8 +244,7 @@ def test_row_adapter_to_attrdict_allows_attribute_access():
 def test_row_adapter_get_value_raises_on_missing_key():
     """Verify an absent column raises instead of yielding None.
 
-    Mutation: RowAdapter.get_value using self.row.get(key), which turns a
-    misspelled column into a silent None.
+    Mutation: self.row.get(key), which returns None for a typo.
     Oracle: KeyError on a key the row does not carry.
     """
     adapter = RowAdapter({'id': 1})
@@ -287,10 +256,8 @@ def test_row_adapter_get_value_raises_on_missing_key():
 def test_row_adapter_create_ignores_connection(create_simple_mock_connection):
     """Verify create() wraps the row unchanged whatever the dialect is.
 
-    Mutation: RowAdapter.create dispatching on dialect, or re-wrapping
-    the row as RowAdapter(TypeConverter.convert_params(row)).
-    Oracle: the same row object comes back for both dialects, and the
-    string 'nan' survives, which TypeConverter would null out.
+    Mutation: create dispatching on dialect or converting the row.
+    Oracle: the same row object for both dialects, 'nan' intact.
     """
     row = {'note': 'nan', 'total': Decimal('123.45')}
 

@@ -1,3 +1,5 @@
+"""SQLiteStrategy maintenance and metadata methods on a live database.
+"""
 import io
 
 import database as db
@@ -7,122 +9,96 @@ from database.strategy import SQLiteStrategy
 
 @pytest.fixture
 def sqlite_strategy_conn():
-    """Create an SQLite database connection for testing strategy methods"""
-    # Create connection
-    conn = db.connect({
-        'drivername': 'sqlite',
-        'database': ':memory:'
-    })
-
-    # Create test schema with primary key and constraints
-    create_table = """
-    CREATE TABLE test_table (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        value INTEGER NOT NULL
-    )
+    """In-memory connection holding an autoincrement test_table, three rows.
     """
-    db.execute(conn, create_table)
-
-    # Create a second table for relationship testing
-    create_related_table = """
-    CREATE TABLE related_table (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        test_id INTEGER,
-        data TEXT,
-        FOREIGN KEY (test_id) REFERENCES test_table(id)
-    )
-    """
-    db.execute(conn, create_related_table)
-
-    # Insert test data
-    insert_data = """
-    INSERT INTO test_table (name, value) VALUES
-    ('Alice', 10),
-    ('Bob', 20),
-    ('Charlie', 30)
-    """
-    db.execute(conn, insert_data)
-
+    conn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
+    db.execute(conn, """
+create table test_table (
+    id integer primary key autoincrement,
+    name text not null unique,
+    value integer not null
+)
+""")
+    db.execute(conn, """
+insert into test_table (name, value) values
+('Alice', 10),
+('Bob', 20),
+('Charlie', 30)
+""")
     yield conn
     conn.close()
 
 
 def test_sqlite_vacuum(sqlite_strategy_conn):
-    """Test SQLite VACUUM operation"""
-    # SQLite VACUUM operation doesn't do much in memory
-    # but test that it doesn't fail
+    """Verify vacuum_table runs a database-wide vacuum and keeps the rows.
+
+    Mutation: 'vacuum {table}', which SQLite reads as a schema name.
+    Oracle: the three staged rows, still there afterward.
+    """
     db.vacuum_table(sqlite_strategy_conn, 'test_table')
 
-    # Verify data is intact after vacuum
-    count = db.select_scalar(sqlite_strategy_conn, 'SELECT COUNT(*) FROM test_table')
+    count = db.select_scalar(sqlite_strategy_conn, 'select count(*) from test_table')
     assert count == 3
 
 
 def test_sqlite_reindex(sqlite_strategy_conn):
-    """Test SQLite REINDEX operation"""
-    # Create an index to reindex
-    db.execute(sqlite_strategy_conn, 'CREATE INDEX idx_test_value ON test_table(value)')
+    """Verify reindex_table runs on a table carrying an index.
 
-    # Call reindex
+    Mutation: PostgreSQL's 'reindex table {table}' form.
+    Oracle: the staged rows read back in value order.
+    """
+    db.execute(sqlite_strategy_conn, 'create index idx_test_value on test_table(value)')
+
     db.reindex_table(sqlite_strategy_conn, 'test_table')
 
-    # Verify the index still works
-    rows = db.select(sqlite_strategy_conn, 'SELECT * FROM test_table ORDER BY value')
-    assert rows.iloc[0]['name'] == 'Alice'
-    assert rows.iloc[2]['name'] == 'Charlie'
+    names = db.select_column(
+        sqlite_strategy_conn, 'select name from test_table order by value')
+    assert names == ['Alice', 'Bob', 'Charlie']
 
 
 def test_sqlite_get_primary_keys(sqlite_strategy_conn):
-    """Test getting primary key information from SQLite"""
-    strategy = SQLiteStrategy()
-    primary_keys = strategy.get_primary_keys(sqlite_strategy_conn, 'test_table')
+    """Verify get_primary_keys returns the one primary key column.
 
-    assert 'id' in primary_keys
-    assert len(primary_keys) == 1
+    Mutation: reading pk = 0 in place of pk <> 0.
+    Oracle: test_table's declared primary key.
+    """
+    strategy = SQLiteStrategy()
+
+    assert strategy.get_primary_keys(sqlite_strategy_conn, 'test_table') == ['id']
 
 
 def test_sqlite_get_columns(sqlite_strategy_conn):
-    """Test getting column information from SQLite"""
-    strategy = SQLiteStrategy()
-    columns = strategy.get_columns(sqlite_strategy_conn, 'test_table')
+    """Verify get_columns returns every column in declaration order.
 
-    assert set(columns) == {'id', 'name', 'value'}
+    Mutation: selecting the type column in place of name, or filtering pk.
+    Oracle: test_table's declared columns.
+    """
+    strategy = SQLiteStrategy()
+
+    assert strategy.get_columns(sqlite_strategy_conn, 'test_table') == [
+        'id', 'name', 'value']
 
 
 def test_sqlite_get_sequence_columns(sqlite_strategy_conn):
-    """Test getting sequence columns from SQLite"""
+    """Verify get_sequence_columns reports the primary key column.
+
+    Mutation: get_sequence_columns returning [] for SQLite.
+    Oracle: test_table's autoincrement primary key.
+    """
     strategy = SQLiteStrategy()
-    sequence_columns = strategy.get_sequence_columns(sqlite_strategy_conn, 'test_table')
 
-    # In SQLite, AUTOINCREMENT columns are reported as sequence columns
-    assert 'id' in sequence_columns
-
-
-def test_sqlite_autoincrement(sqlite_strategy_conn):
-    """Test SQLite AUTO INCREMENT behavior"""
-    # Insert a few rows and check ID assignment
-    db.insert(sqlite_strategy_conn, 'INSERT INTO test_table (name, value) VALUES (?, ?)',
-              'David', 40)
-
-    row = db.select_row(sqlite_strategy_conn, "SELECT * FROM test_table WHERE name = 'David'")
-    assert row.id == 4  # Should be 4 since we already had 3 rows
-
-    # Delete the row
-    db.delete(sqlite_strategy_conn, "DELETE FROM test_table WHERE name = 'David'")
-
-    # Insert a new row - ID should be 5 (SQLite doesn't reuse IDs by default with AUTOINCREMENT)
-    db.insert(sqlite_strategy_conn, 'INSERT INTO test_table (name, value) VALUES (?, ?)',
-              'Eva', 50)
-
-    row = db.select_row(sqlite_strategy_conn, "SELECT * FROM test_table WHERE name = 'Eva'")
-    assert row.id >= 4  # Should be at least 4, might be higher
+    assert strategy.get_sequence_columns(sqlite_strategy_conn, 'test_table') == ['id']
 
 
 def test_sqlite_copy_from_returns_zero(sqlite_strategy_conn, caplog):
-    """Test SQLite copy_from returns 0 and logs warning since COPY not supported."""
+    """Verify copy_from loads nothing, returns 0 and logs a warning.
+
+    Mutation: copy_from returning None, or dropping the warning.
+    Oracle: the warning text copy_from logs.
+    """
     csv_data = io.StringIO('David,40\nEva,50\n')
-    rowcount = db.copy_from(sqlite_strategy_conn, 'test_table', csv_data, ['name', 'value'])
+    rowcount = db.copy_from(
+        sqlite_strategy_conn, 'test_table', csv_data, ['name', 'value'])
 
     assert rowcount == 0
     assert 'COPY operation not supported in SQLite' in caplog.text
@@ -139,12 +115,8 @@ def test_sqlite_metadata_reads_a_table_named_like_a_pragma_column(
         sqlite_strategy_conn, table, spelling):
     """Verify metadata methods read a table named after a pragma column.
 
-    Mutation: passing quote_identifier(table) or quote_identifier(index)
-        into a pragma in place of a bound name, which SQLite reads as the
-        pragma's own column; or binding the spelling unsplit, which looks
-        for a table named '"type"' or 'main.type'.
-    Oracle: hand-written columns of a two-column table whose unique index
-        is named after a pragma_index_info column.
+    Mutation: a quoted name into a pragma, or the spelling bound unsplit.
+    Oracle: a two-column table whose unique index is named seqno.
     """
     conn = sqlite_strategy_conn
     db.execute(conn, f'create table "{table}" (id integer primary key, z text)')

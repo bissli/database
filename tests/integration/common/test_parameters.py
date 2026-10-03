@@ -1,165 +1,135 @@
-"""
-Database-agnostic tests for parameter handling - IN clause expansion,
-named params, list params, and the "ignore extra args" path.
-
-These cases exercise the library's placeholder logic, which lives above
-the dialect layer and behaves identically on both backends.
+"""Placeholder-expansion tests run against PostgreSQL and SQLite.
 """
 import database as db
-
-
-def _temp_table_ddl(dialect, name, columns):
-    """Return CREATE TEMPORARY TABLE DDL appropriate to the dialect.
-
-    Both backends support CREATE TEMPORARY TABLE; this helper just abstracts
-    the SERIAL/AUTOINCREMENT and VARCHAR/TEXT differences.
-    """
-    return f'CREATE TEMPORARY TABLE {name} ({columns})'
+from tests.integration.common.conftest import col
 
 
 def test_list_parameters(db_conn):
-    """A flat list of args under a parenthesized IN clause expands one
-    placeholder per arg.
+    """Verify a parenthesized in list binds one positional argument per %s.
+
+    Mutation: packing the arguments into one tuple for the first %s.
+    Oracle: three inserted names, read back in value order.
     """
     names = ['InTest1', 'InTest2', 'InTest3']
     for i, name in enumerate(names):
-        db.execute(db_conn, 'INSERT INTO test_table (name, value) VALUES (%s, %s)',
-                   name, (i + 1) * 10)
+        db.execute(
+            db_conn,
+            'insert into test_table (name, value) values (%s, %s)',
+            name, (i + 1) * 10)
 
-    placeholders = ','.join(['%s'] * len(names))
-    query = f'SELECT name, value FROM test_table WHERE name IN ({placeholders}) ORDER BY value'
-
-    result = db.select_column(db_conn, query.replace('SELECT name, value', 'SELECT name'),
-                              *names)
+    result = db.select_column(
+        db_conn,
+        'select name from test_table where name in (%s, %s, %s) order by value',
+        *names)
     assert result == names
 
 
 def test_direct_list_parameters(db_conn):
-    """`IN %s` accepts a flat list and expands it in-place.
+    """Verify in %s expands a flat list, a one-item list, and a wrapped list.
 
-    Two equivalent shapes - flat `[1,2,3]` and wrapped `([1,2,3],)` - must
-    behave identically.
+    Mutation: binding the list as one array, or unwrapping only the flat form.
+    Oracle: the three inserted values, and 101 alone for the one-item forms.
     """
     test_values = [101, 102, 103]
-    for i, v in enumerate(test_values):
-        db.execute(db_conn, 'INSERT INTO test_table (name, value) VALUES (%s, %s)',
-                   f'DirectTest{i}', v)
+    for i, value in enumerate(test_values):
+        db.execute(
+            db_conn,
+            'insert into test_table (name, value) values (%s, %s)',
+            f'DirectTest{i}', value)
 
     values_back = db.select_column(
         db_conn,
-        'SELECT value FROM test_table WHERE value IN %s ORDER BY value',
-        test_values,
-    )
+        'select value from test_table where value in %s order by value',
+        test_values)
     assert values_back == test_values
 
     single = db.select_column(
-        db_conn,
-        'SELECT value FROM test_table WHERE value IN %s',
-        [101],
-    )
+        db_conn, 'select value from test_table where value in %s', [101])
     assert single == [101]
 
     wrapped = db.select_column(
-        db_conn,
-        'SELECT value FROM test_table WHERE value IN %s',
-        ([101],),
-    )
+        db_conn, 'select value from test_table where value in %s', ([101],))
     assert wrapped == [101]
 
 
-def test_direct_lists_for_multiple_in_clauses(db_conn, dialect):
-    """Two IN clauses in one query, each fed by a direct list."""
-    if dialect == 'postgresql':
-        ddl = _temp_table_ddl(dialect, 'multi_in_test',
-                              'id SERIAL PRIMARY KEY, category TEXT, status TEXT')
-    else:
-        ddl = _temp_table_ddl(dialect, 'multi_in_test',
-                              'id INTEGER PRIMARY KEY, category TEXT, status TEXT')
-    db.execute(db_conn, ddl)
+def test_direct_lists_for_multiple_in_clauses(db_conn):
+    """Verify two in %s clauses each expand their own list.
 
-    categories = ['cat1', 'cat2', 'cat3']
-    statuses = ['active', 'pending']
-    for cat in categories:
-        for status in statuses:
-            db.execute(db_conn,
-                       'INSERT INTO multi_in_test (category, status) VALUES (%s, %s)',
-                       cat, status)
+    Mutation: expanding the first list into both clauses.
+    Oracle: two categories times two statuses, sorted by hand.
+    """
+    db.execute(
+        db_conn, 'create temporary table multi_in_test (category text, status text)')
+    for category in ['cat1', 'cat2', 'cat3']:
+        for status in ['active', 'pending']:
+            db.execute(
+                db_conn,
+                'insert into multi_in_test (category, status) values (%s, %s)',
+                category, status)
 
     cats = db.select_column(
         db_conn,
-        'SELECT category FROM multi_in_test WHERE category IN %s AND status IN %s '
-        'ORDER BY category, status',
-        ['cat1', 'cat2'], ['active', 'pending'],
-    )
-    assert len(cats) == 4  # 2 categories x 2 statuses
-    assert set(cats) == {'cat1', 'cat2'}
+        'select category from multi_in_test where category in %s and status in %s '
+        'order by category, status',
+        ['cat1', 'cat2'], ['active', 'pending'])
+    assert cats == ['cat1', 'cat1', 'cat2', 'cat2']
 
 
-def test_named_params_in_clause(db_conn, dialect):
-    """Named-parameter IN-clause expansion must work on both backends.
+def test_named_params_in_clause(db_conn):
+    """Verify in %(name)s expands a tuple, one-item tuples included.
 
-    Library expands 'IN %(items)s' to '(%(items_0)s, %(items_1)s, ...)'.
-    On postgres that stays pyformat. On sqlite the library must translate
-    each expanded placeholder to ':items_0', ':items_1', ... so sqlite3
-    accepts them.
+    Mutation: binding a one-item tuple as a scalar, or leaving the
+        expanded %(items_0)s names in pyformat on SQLite.
+    Oracle: three hand-inserted products; each lookup names one vendor.
     """
-    if dialect == 'postgresql':
-        ddl = _temp_table_ddl(dialect, 'named_in_test',
-                              'id SERIAL PRIMARY KEY, category TEXT, vendor TEXT, '
-                              'description TEXT')
-    else:
-        ddl = _temp_table_ddl(dialect, 'named_in_test',
-                              'id INTEGER PRIMARY KEY, category TEXT, vendor TEXT, '
-                              'description TEXT')
-    db.execute(db_conn, ddl)
-    for cat, vendor, desc in [
+    db.execute(
+        db_conn,
+        'create temporary table named_in_test (category text, vendor text, description text)')
+    products = [
         ('Electronics', 'Apple', 'Smartphone'),
         ('Electronics', 'Samsung', 'Tablet'),
         ('Clothing', 'Nike', 'Running shoes'),
-    ]:
-        db.execute(db_conn,
-                   'INSERT INTO named_in_test (category, vendor, description) '
-                   'VALUES (%s, %s, %s)', cat, vendor, desc)
+        ]
+    for category, vendor, description in products:
+        db.execute(
+            db_conn,
+            'insert into named_in_test (category, vendor, description) values (%s, %s, %s)',
+            category, vendor, description)
 
     query = """
-        SELECT DISTINCT category, description
-        FROM named_in_test
-        WHERE category IN %(categories)s
-        AND vendor = %(vendor)s
-    """
+select distinct category, description
+from named_in_test
+where category in %(categories)s
+and vendor = %(vendor)s
+"""
 
-    single = db.select(db_conn, query, {'categories': ('Electronics',), 'vendor': 'Apple'})
-    assert len(single) == 1
+    single = db.select(
+        db_conn, query, {'categories': ('Electronics',), 'vendor': 'Apple'})
+    assert col(single, 'description') == ['Smartphone']
 
-    multi = db.select(db_conn, query,
-                      {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'})
-    assert len(multi) == 1
+    multi = db.select(
+        db_conn, query, {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'})
+    assert col(multi, 'description') == ['Running shoes']
 
     none = db.select(db_conn, query, {'categories': ('Books',), 'vendor': 'Apple'})
     assert len(none) == 0
 
 
-def test_no_placeholders_with_extra_args(db_conn, dialect):
-    """A SQL with zero placeholders must ignore any extra positional args.
+def test_no_placeholders_with_extra_args(db_conn):
+    """Verify SQL with no placeholder ignores any extra positional arguments.
 
-    This protects accidental-arg-passing from blowing up obviously-correct
-    static SQL.
+    Mutation: passing the arguments to the driver, which raises.
+    Oracle: two hand-inserted names and their count.
     """
-    if dialect == 'postgresql':
-        ddl = _temp_table_ddl(dialect, 'no_ph_test', 'id SERIAL PRIMARY KEY, name TEXT')
-    else:
-        ddl = _temp_table_ddl(dialect, 'no_ph_test',
-                              'id INTEGER PRIMARY KEY, name TEXT')
-    db.execute(db_conn, ddl)
-    db.execute(db_conn, "INSERT INTO no_ph_test (name) VALUES ('a'), ('b')")
+    db.execute(db_conn, 'create temporary table no_ph_test (name text)')
+    db.execute(db_conn, "insert into no_ph_test (name) values ('a'), ('b')")
 
-    names = db.select_column(db_conn, 'SELECT name FROM no_ph_test ORDER BY name',
-                             'ignored', 123, True)
+    names = db.select_column(
+        db_conn, 'select name from no_ph_test order by name', 'ignored', 123, True)
     assert names == ['a', 'b']
 
     with db.transaction(db_conn) as tx:
-        count = tx.select_scalar('SELECT COUNT(*) FROM no_ph_test', 'ignored_param')
-        assert count == 2
+        assert tx.select_scalar('select count(*) from no_ph_test', 'ignored_param') == 2
 
 
 if __name__ == '__main__':

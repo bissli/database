@@ -1,11 +1,16 @@
+"""PostgreSQL-only parameter-binding tests.
+"""
 import datetime
 
 import database as db
 
 
 def test_date_parameter_handling(psql_docker, pg_conn):
-    """Test handling of datetime.date objects as parameters."""
-    # Setup - insert test data with date field
+    """Verify a date argument matches a date column, inside a transaction too.
+
+    Mutation: binding the date as a value the date column does not equal.
+    Oracle: the one hand-inserted row for that date and identifier.
+    """
     db.execute(pg_conn, """
 create temporary table test_date_table (
     id serial primary key,
@@ -15,16 +20,12 @@ create temporary table test_date_table (
     value integer
 )
 """)
-
     test_date = datetime.date(2025, 3, 3)
-    test_identifier = 'TEST123'
+    db.insert(
+        pg_conn,
+        'insert into test_date_table (date, identifier, value) values (%s, %s, %s)',
+        test_date, 'TEST123', 100)
 
-    db.insert(pg_conn, """
-insert into test_date_table (date, identifier, value)
-values (%s, %s, %s)
-""", test_date, test_identifier, 100)
-
-    # Test 1: Using select directly with date parameter
     query = """
 select date, identifier, value
 from test_date_table
@@ -32,23 +33,20 @@ where date = %s
     and identifier = %s
     and duplicate_see_id is null
 """
+    result = db.select(pg_conn, query, test_date, 'TEST123')
+    assert result == [{'date': test_date, 'identifier': 'TEST123', 'value': 100}]
 
-    # This should work without error
-    result = db.select(pg_conn, query, test_date, test_identifier)
-    assert len(result) == 1
-    assert result[0]['identifier'] == test_identifier
-    assert result[0]['date'] == test_date
-
-    # Test 2: Using the same query in a transaction
     with db.transaction(pg_conn) as tx:
-        result = tx.select(query, test_date, test_identifier)
-        assert len(result) == 1
-        assert result[0]['identifier'] == test_identifier
+        result = tx.select(query, test_date, 'TEST123')
+        assert [r['identifier'] for r in result] == ['TEST123']
 
 
 def test_named_parameter_handling(psql_docker, pg_conn):
-    """Test handling of named parameters using a dictionary."""
-    # Setup - create a temporary table for testing
+    """Verify named parameters bind by name, inside a transaction too.
+
+    Mutation: binding named parameters in dict order, swapping pdate and bdate.
+    Oracle: the join row matches only pdate, the main row only bdate.
+    """
     db.execute(pg_conn, """
 create temporary table test_named_params (
     id serial primary key,
@@ -57,7 +55,6 @@ create temporary table test_named_params (
     value integer
 )
 """)
-
     db.execute(pg_conn, """
 create temporary table test_named_params_join (
     id serial primary key,
@@ -66,19 +63,15 @@ create temporary table test_named_params_join (
     data varchar(50)
 )
 """)
+    db.insert(
+        pg_conn,
+        'insert into test_named_params (col, time, value) values (%s, %s, %s)',
+        'TEST123', '2025-03-04 10:00:00', 200)
+    db.insert(
+        pg_conn,
+        'insert into test_named_params_join (id_bb_unique, date, data) values (%s, %s, %s)',
+        'TEST123', '2025-03-03', 'test data')
 
-    # Insert test data
-    db.insert(pg_conn, """
-insert into test_named_params (col, time, value)
-values (%s, %s, %s)
-""", 'TEST123', '2025-03-04 10:00:00', 200)
-
-    db.insert(pg_conn, """
-insert into test_named_params_join (id_bb_unique, date, data)
-values (%s, %s, %s)
-""", 'TEST123', '2025-03-03', 'test data')
-
-    # Test 1: Using select with named parameters
     query = """
 select q.col, q.value, bu.data
 from test_named_params q
@@ -86,409 +79,212 @@ left join test_named_params_join bu
     on bu.id_bb_unique = q.col and bu.date = %(pdate)s
 where q.time::date = %(bdate)s
 """
+    params = {'pdate': datetime.date(2025, 3, 3), 'bdate': datetime.date(2025, 3, 4)}
+    expected = [{'col': 'TEST123', 'value': 200, 'data': 'test data'}]
 
-    params = {
-        'pdate': datetime.date(2025, 3, 3),
-        'bdate': datetime.date(2025, 3, 4)
-    }
-
-    # This should work without error
-    result = db.select(pg_conn, query, params)
-    assert len(result) == 1
-    assert result[0]['col'] == 'TEST123'
-    assert result[0]['data'] == 'test data'
-
-    # Test 2: Using the same query in a transaction
+    assert db.select(pg_conn, query, params) == expected
     with db.transaction(pg_conn) as tx:
-        result = tx.select(query, params)
-        assert len(result) == 1
-        assert result[0]['col'] == 'TEST123'
-        assert result[0]['data'] == 'test data'
-
-
-def test_named_params_in_clause(psql_docker, pg_conn):
-    """Test handling of IN clause with named parameters, including single-item tuples.
-    """
-    # Setup - create a temporary table for testing
-    db.execute(pg_conn, """
-create temporary table test_in_clause (
-    id serial primary key,
-    category varchar(20),
-    vendor varchar(20),
-    description varchar(50)
-)
-""")
-
-    # Insert test data
-    test_data = [
-        ('Electronics', 'Apple', 'Smartphone'),
-        ('Electronics', 'Samsung', 'Tablet'),
-        ('Clothing', 'Nike', 'Running shoes')
-    ]
-
-    for category, vendor, desc in test_data:
-        db.insert(pg_conn, """
-insert into test_in_clause (category, vendor, description)
-values (%s, %s, %s)
-""", category, vendor, desc)
-
-    # Test 1: Single-item tuple in IN clause - this was failing previously
-    query = """
-select
-    distinct
-    category,
-    description
-from
-    test_in_clause
-where
-    category in %(categories)s
-and
-    vendor = %(vendor)s
-"""
-    params = {'categories': ('Electronics',), 'vendor': 'Apple'}
-
-    result = db.select(pg_conn, query, params)
-    assert len(result) == 1
-    assert result[0]['category'] == 'Electronics'
-    assert result[0]['description'] == 'Smartphone'
-
-    # Test 2: Multiple items in IN clause
-    params = {'categories': ('Electronics', 'Clothing'), 'vendor': 'Nike'}
-    result = db.select(pg_conn, query, params)
-    assert len(result) == 1
-    assert result[0]['category'] == 'Clothing'
-
-    # Test 3: IN clause with a different vendor
-    params = {'categories': ('Electronics',), 'vendor': 'Samsung'}
-    result = db.select(pg_conn, query, params)
-    assert len(result) == 1
-    assert result[0]['category'] == 'Electronics'
-    assert result[0]['description'] == 'Tablet'
-
-    # Test 4: No matching data
-    params = {'categories': ('Books',), 'vendor': 'Apple'}
-    result = db.select(pg_conn, query, params)
-    assert len(result) == 0
+        assert tx.select(query, params) == expected
 
 
 def test_none_parameter(psql_docker, pg_conn):
-    """Test handling of None parameters in queries."""
+    """Verify a None argument binds as SQL null.
+
+    Mutation: binding None as the string 'None'.
+    Oracle: a null cast to text reads back as None.
+    """
     result = db.select(pg_conn, 'select %s::text as null_value', None)
     assert result[0]['null_value'] is None
 
 
 def test_numeric_parameters(psql_docker, pg_conn):
-    """Test handling of numeric parameters."""
-    # Test integers
-    result = db.select(pg_conn, 'select %s::int as int_val', 42)
-    assert result[0]['int_val'] == 42
+    """Verify int and float arguments bind with their values intact.
 
-    # Test floats
-    result = db.select(pg_conn, 'select %s::float as float_val', 42.5)
-    assert result[0]['float_val'] == 42.5
-
-    # Test with computation
-    result = db.select(pg_conn, 'select %s + %s as sum_val', 10, 20)
-    assert result[0]['sum_val'] == 30
+    Mutation: binding numbers as text, or truncating a float.
+    Oracle: hand-computed 42, 42.5, and 10 + 20.
+    """
+    assert db.select(pg_conn, 'select %s::int as int_val', 42)[0]['int_val'] == 42
+    assert db.select(
+        pg_conn, 'select %s::float as float_val', 42.5)[0]['float_val'] == 42.5
+    assert db.select(pg_conn, 'select %s + %s as sum_val', 10, 20)[0]['sum_val'] == 30
 
 
 def test_like_clause_with_pre_escaped_percent(psql_docker, pg_conn):
-    """Test LIKE clause with already-escaped percent signs works correctly with real DB."""
-    # Create a temp table for testing LIKE patterns
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE like_pattern_test (
-        id SERIAL PRIMARY KEY,
-        status TEXT,
-        description TEXT
-    )
-    """)
+    """Verify literal percent signs survive, with and without bound arguments.
 
-    # Insert test data with different patterns
+    Mutation: escaping a literal % when nothing is bound, or leaving it
+        unescaped beside a %s.
+    Oracle: six hand-inserted statuses; a bound %% stores as two characters.
+    """
+    db.execute(pg_conn, """
+create temporary table like_pattern_test (
+    id serial primary key,
+    status text,
+    description text
+)
+""")
     test_data = [
         ('%%Saved', 'Double-percent followed by Saved'),
         ('Not%%Saved', 'Double-percent in the middle'),
         ('%Saved', 'Single-percent at start'),
         ('Saved%', 'Single-percent at end'),
         ('%%S%%aved', 'Multiple double-percents'),
-        ('Regular', 'No percent signs')
-    ]
-
+        ('Regular', 'No percent signs'),
+        ]
     for status, description in test_data:
-        db.insert(pg_conn, """
-        INSERT INTO like_pattern_test (status, description)
-        VALUES (%s, %s)
-        """, status, description)
+        db.insert(
+            pg_conn,
+            'insert into like_pattern_test (status, description) values (%s, %s)',
+            status, description)
 
-    # Test 1: Search with an exact match using =
-    # Note: When we insert '%%Saved', it's stored as '%Saved' in PostgreSQL
-    # because %% is the escape sequence for a literal % in SQL
-    query1 = "SELECT * FROM like_pattern_test WHERE status = '%Saved'"
-    result1 = db.select(pg_conn, query1)
-    assert len(result1) == 1
-    # The status might be returned as %%Saved in some database drivers
-    # because of how they handle % characters in strings
-    assert '%Saved' in result1[0]['status'].replace('%%', '%')
+    exact = db.select_column(
+        pg_conn, "select status from like_pattern_test where status = '%Saved'")
+    assert exact == ['%Saved']
 
-    # Test 2: Combine already-escaped pattern with parameter
-    # This tests the scenario from the unit test that was failing
-    author_id = 1
-    query2 = "SELECT * FROM like_pattern_test WHERE status LIKE '%S%' AND id > %s"
-    result2 = db.select(pg_conn, query2, author_id)
-    assert len(result2) >= 2
-    # Note: In the database, '%%S' is stored as '%S'
-    assert '%S' in result2[0]['status']
+    bound = db.select_column(
+        pg_conn,
+        "select status from like_pattern_test where status like '%S%' and id > %s order by id",
+        1)
+    assert bound == ['Not%%Saved', '%Saved', 'Saved%', '%%S%%aved']
 
-    # Test 3: Using an escaped pattern in a transaction
     with db.transaction(pg_conn) as tx:
-        # This query looks for rows containing '%S%'
-        # In SQL, '%%' escapes to a literal '%', so we're looking for %S% in the data
-        query3 = "SELECT * FROM like_pattern_test WHERE status LIKE '%%S%%'"
-        result3 = tx.select(query3)
-
-        # The query will match any row with a '%' followed by 'S' followed by anything
-        # Let's verify our data matches what we expect
-        matched_status_values = {row['status'] for row in result3}
-
-        # These rows are expected to match:
-        # - '%%Saved' (stored as '%Saved') - has %S
-        # - '%%S%%aved' (stored as '%S%aved') - has %S
-        # - 'Not%%Saved' (stored as 'Not%Saved') - has Not%S
-        # Verify our key values are included in the results
-        assert '%Saved' in matched_status_values or '%%Saved' in matched_status_values
-        assert '%%S%%aved' in matched_status_values
-
-        # For a more specific test that matches only rows with exactly '%S%'
-        query_exact = "SELECT * FROM like_pattern_test WHERE status = '%S%'"
-        result_exact = tx.select(query_exact)
-        assert len(result_exact) == 0  # No exact matches for '%S%'
-
-    # Test 4: Pattern with both escaped and unescaped percents
-    # This should match a literal %S followed by anything
-    query4 = "SELECT * FROM like_pattern_test WHERE status LIKE '%%S%'"
-    result4 = db.select(pg_conn, query4)
-
-    # Rather than checking exact count (which depends on database specifics),
-    # ensure the right values are included
-    matched_statuses = {row['status'] for row in result4}
-    # We expect '%Saved' and '%%S%%aved' to be in the results
-    expected_matches = {'%Saved', '%%S%%aved'}
-    assert expected_matches.issubset(matched_statuses), f'Expected {expected_matches} to be subset of {matched_statuses}'
-
-    # Find rows that should contain '%S' pattern and verify at least one exists
-    rows_with_s_pattern = [row for row in result4 if '%S' in row['status']]
-    assert len(rows_with_s_pattern) > 0, "No rows with '%S' pattern found in results"
+        result = tx.select(
+            "select status from like_pattern_test where status like '%%S%%' order by id")
+        assert [r['status'] for r in result] == [
+            '%%Saved', 'Not%%Saved', '%Saved', 'Saved%', '%%S%%aved',
+            ]
 
 
 def test_combined_in_clause_named_params_with_returnid(psql_docker, pg_conn):
-    """Test combining IN clause with named parameters and the RETURNING clause."""
-    # Create a table with an auto-incrementing ID and category-related columns
+    """Verify a named in tuple and returnid work together in one insert.
+
+    Mutation: returnid keeping only the first row, or the tuple as one value.
+    Oracle: two of the three seeded categories fall inside the in tuple.
+    """
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE combined_test (
-        id SERIAL PRIMARY KEY,
-        category TEXT NOT NULL,
-        name TEXT NOT NULL,
-        value INTEGER NOT NULL
-    )
-    """)
+create temporary table combined_test (
+    id serial primary key,
+    category text not null,
+    name text not null,
+    value integer not null
+)
+""")
+    for i, category in enumerate(['electronics', 'clothing', 'food']):
+        db.execute(
+            pg_conn,
+            'insert into combined_test (category, name, value) values (%s, %s, %s)',
+            category, f'Item_{i}', i * 10)
 
-    # Insert some initial data
-    categories = ['electronics', 'clothing', 'food']
-    for i, category in enumerate(categories):
-        db.execute(pg_conn, """
-        INSERT INTO combined_test (category, name, value)
-        VALUES (%s, %s, %s)
-        """, category, f'Item_{i}', i*10)
-
-    # Now test the combined features using a transaction
-    with db.transaction(pg_conn) as tx:
-        # Prepare named parameters with an IN clause
-        params = {
-            'categories': ('electronics', 'clothing'),  # IN clause with tuple
-            'name': 'Combined_Test_Item',
-            'value': 500
+    insert_sql = """
+insert into combined_test (category, name, value)
+select
+    category,
+    %(name)s as name,
+    %(value)s as value
+from combined_test
+where category in %(categories)s
+returning id, category
+"""
+    params = {
+        'categories': ('electronics', 'clothing'),
+        'name': 'Combined_Test_Item',
+        'value': 500,
         }
+    with db.transaction(pg_conn) as tx:
+        result_ids = tx.execute(insert_sql, params, returnid=['id', 'category'])
 
-        # No need to manually set iterdict_data_loader as it's now the default
-
-        # Execute with RETURNING and named parameters including IN clause
-        result_ids = tx.execute("""
-        INSERT INTO combined_test (category, name, value)
-        SELECT
-            category,
-            %(name)s as name,
-            %(value)s as value
-        FROM combined_test
-        WHERE category IN %(categories)s
-        RETURNING id, category
-        """, params, returnid=['id', 'category'])
-
-        # Verify we got multiple results back correctly
-        assert isinstance(result_ids, list), 'Should return a list of results'
+        assert isinstance(result_ids, list)
         ids, categories = zip(*result_ids)
+        assert all(isinstance(id_val, int) for id_val in ids)
+        assert sorted(categories) == ['clothing', 'electronics']
 
-        # Verify we got integers for id values (not numpy/pandas types)
         for id_val in ids:
-            assert isinstance(id_val, int), f'Expected int, got {type(id_val)}'
-
-        # Should have 2 rows returned (one for each category in the IN clause)
-        assert len(ids) == 2, f'Expected 2 rows, got {len(ids)}'
-
-        # Verify the returned categories match our IN clause
-        categories_set = set(categories)
-        assert 'electronics' in categories_set, "Should include 'electronics' category"
-        assert 'clothing' in categories_set, "Should include 'clothing' category"
-
-        # Verify the inserted data exists with correct values
-        for id_val in ids:
-            row = tx.select_row('SELECT * FROM combined_test WHERE id = %s', id_val)
+            row = tx.select_row('select * from combined_test where id = %s', id_val)
             assert row.name == 'Combined_Test_Item'
             assert row.value == 500
             assert row.category in {'electronics', 'clothing'}
 
 
 def test_is_null_parameter_handling(psql_docker, pg_conn):
-    """Test correct handling of NULL values with IS NULL/IS NOT NULL operators."""
-    # Create a test table
+    """Verify is %s with None becomes is null, leaving literal is null alone.
+
+    Mutation: binding None after is, or rewriting a literal is null.
+    Oracle: three hand-inserted rows, one with a null value.
+    """
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE test_null_handling (
-        id SERIAL PRIMARY KEY,
-        name TEXT,
-        value INTEGER
-    )
-    """)
-
-    # Insert test data with NULL and non-NULL values
+create temporary table test_date_null (
+    id serial primary key,
+    date date,
+    value integer,
+    strategy text
+)
+""")
     db.execute(pg_conn, """
-    INSERT INTO test_null_handling (name, value) VALUES
-    ('item1', 100),
-    ('item2', NULL),
-    ('item3', 300)
-    """)
-
-    # Test 1: Correct usage with IS NULL (no parameter needed)
-    result = db.select(pg_conn, """
-    SELECT name, value FROM test_null_handling
-    WHERE value IS NULL
-    """)
-    assert len(result) == 1
-    assert result[0]['name'] == 'item2'
-
-    # Test 2: Correct usage with IS NOT NULL (no parameter needed)
-    result = db.select(pg_conn, """
-    SELECT name, value FROM test_null_handling
-    WHERE value IS NOT NULL
-    ORDER BY name
-    """)
-    assert len(result) == 2
-    assert [r['name'] for r in result] == ['item1', 'item3']
-
-    # Test 3: Parameterized date range with IS NULL condition
-    # This demonstrates the correct pattern for combining parameterized values
-    # with NULL checks in the same query
+insert into test_date_null (date, value, strategy) values
+('2025-01-15', 100, 'A'),
+('2025-02-01', null, 'B'),
+('2025-03-01', 300, 'A')
+""")
     start_date = datetime.date(2025, 1, 1)
     end_date = datetime.date(2025, 3, 11)
 
-    # Create a table with dates for testing
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE test_date_null (
-        id SERIAL PRIMARY KEY,
-        date DATE,
-        value INTEGER,
-        strategy TEXT
-    )
-    """)
+    literal_not_null = db.select_column(pg_conn, """
+select value
+from test_date_null
+where date between %s and %s
+and value is not null
+order by value
+""", start_date, end_date)
+    assert literal_not_null == [100, 300]
 
-    # Insert test data
-    db.execute(pg_conn, """
-    INSERT INTO test_date_null (date, value, strategy) VALUES
-    ('2025-01-15', 100, 'A'),
-    ('2025-02-01', NULL, 'B'),
-    ('2025-03-01', 300, 'A')
-    """)
+    value_or_null = db.select_column(pg_conn, """
+select strategy
+from test_date_null
+where value = %s or value is null
+order by strategy
+""", 100)
+    assert value_or_null == ['A', 'B']
 
-    # This is the CORRECT way to handle NULL checks with parameters:
-    # Use IS NULL or IS NOT NULL directly in the SQL, not with parameters
-    result = db.select(pg_conn, """
-    SELECT date, value, strategy
-    FROM test_date_null
-    WHERE date BETWEEN %s AND %s
-    AND value IS NOT NULL
-    """, start_date, end_date)
+    bound_is_not = db.select_column(pg_conn, """
+select value
+from test_date_null
+where date between %s and %s
+and value is not %s
+order by value
+""", start_date, end_date, None)
+    assert bound_is_not == [100, 300]
 
-    assert len(result) == 2
-    assert {r['strategy'] for r in result} == {'A'}
-
-    # Test 4: Testing for a specific value OR NULL using parameters
-    # For cases where you want to find rows where value = X OR value IS NULL
-    result = db.select(pg_conn, """
-    SELECT name, value
-    FROM test_null_handling
-    WHERE value = %s OR value IS NULL
-    """, 100)
-
-    assert len(result) == 2
-    assert {r['name'] for r in result} == {'item1', 'item2'}
-
-    # Test 5: Test handling of None parameter with IS NOT operator
-    # This should be correctly handled by converting None to NULL
-    result = db.select(pg_conn, """
-    SELECT date, value, strategy
-    FROM test_date_null
-    WHERE date BETWEEN %s AND %s
-    AND value IS NOT %s
-    """, start_date, end_date, None)
-
-    # Verify results - should match rows where value is not NULL
-    assert len(result) == 2
-    assert {r['strategy'] for r in result} == {'A'}
-
-    # Test 6: Test handling of None parameter with IS operator
-    result = db.select(pg_conn, """
-    SELECT date, value, strategy
-    FROM test_date_null
-    WHERE date BETWEEN %s AND %s
-    AND value IS %s
-    """, start_date, end_date, None)
-
-    # Verify results - should match rows where value is NULL
-    assert len(result) == 1
-    assert result[0]['strategy'] == 'B'
+    bound_is = db.select_column(pg_conn, """
+select strategy
+from test_date_null
+where date between %s and %s
+and value is %s
+""", start_date, end_date, None)
+    assert bound_is == ['B']
 
 
 def test_any_with_list_parameter(psql_docker, pg_conn):
-    """Verify ANY(%s) binds a list as a PostgreSQL array (not unpacked to scalar).
+    """Verify any(%s) binds a list as one array, a one-item list included.
 
-    Regression guard for a bug where a single-element list arg under a single
-    placeholder was silently flattened to a scalar tuple, causing
-    `op ANY/ALL (array) requires array on right side` from psycopg.
+    Mutation: flattening a one-item list to a scalar.
+    Oracle: three hand-inserted ids; counts for [2], [1, 3], and [].
     """
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE test_any (
-        id INTEGER PRIMARY KEY,
-        name TEXT
-    )
-    """)
+    db.execute(
+        pg_conn, 'create temporary table test_any (id integer primary key, name text)')
     for i, name in enumerate(['Alpha', 'Beta', 'Gamma'], start=1):
-        db.insert(pg_conn, 'INSERT INTO test_any (id, name) VALUES (%s, %s)', i, name)
+        db.insert(pg_conn, 'insert into test_any (id, name) values (%s, %s)', i, name)
 
-    # Single-element list - the original failing case
-    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [2])
-    assert n == 1
+    count_sql = 'select count(*) from test_any where id = any(%s)'
+    assert db.select_scalar(pg_conn, count_sql, [2]) == 1
+    assert db.select_scalar(pg_conn, count_sql, [1, 3]) == 2
+    assert db.select_scalar(pg_conn, count_sql, []) == 0
 
-    # Multi-element list
-    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [1, 3])
-    assert n == 2
-
-    # Empty list - should match nothing
-    n = db.select_scalar(pg_conn, 'SELECT count(*) FROM test_any WHERE id = ANY(%s)', [])
-    assert n == 0
-
-    # Combined with another placeholder
-    rows = db.select(pg_conn,
-                     'SELECT name FROM test_any WHERE id = ANY(%s) AND name LIKE %s',
-                     [1, 2, 3], 'A%')
-    assert len(rows) == 1
-    assert rows[0]['name'] == 'Alpha'
+    names = db.select_column(
+        pg_conn,
+        'select name from test_any where id = any(%s) and name like %s',
+        [1, 2, 3],
+        'A%')
+    assert names == ['Alpha']
 
 
 if __name__ == '__main__':

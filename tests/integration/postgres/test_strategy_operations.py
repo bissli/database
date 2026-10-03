@@ -1,155 +1,160 @@
+"""PostgresStrategy maintenance, metadata, and copy against a live server.
+"""
 import io
 
 import database as db
+import pytest
 from database.strategy import PostgresStrategy
 
 
-def test_vacuum_table(psql_docker, pg_conn):
-    """Test the vacuum_table functionality"""
-    # This operation requires no special setup, just call it on an existing table
+def _relfilenode(cn, relation):
+    """Storage file id of a table or index; a rewrite assigns a new one.
+    """
+    return db.select_scalar(
+        cn, 'select relfilenode from pg_class where relname = %s', relation)
+
+
+def test_vacuum_table_rewrites_the_table(psql_docker, pg_conn):
+    """Verify vacuum_table runs vacuum full and keeps the rows.
+
+    Mutation: dropping full, so the table keeps its storage file.
+    Oracle: the storage file id before the call, and the six staged rows.
+    """
+    before = _relfilenode(pg_conn, 'test_table')
+
     db.vacuum_table(pg_conn, 'test_table')
 
-    # There's no direct way to verify vacuum ran, but check the table still exists
-    count = db.select_scalar(pg_conn, 'select count(*) from test_table')
-    assert count > 0, 'Table should still exist and contain data after vacuum'
+    assert _relfilenode(pg_conn, 'test_table') != before
+    assert db.select_scalar(pg_conn, 'select count(*) from test_table') == 6
 
 
-def test_reindex_table(psql_docker, pg_conn):
-    """Test the reindex_table functionality"""
-    # Create an index to reindex
-    db.execute(pg_conn, """
-        CREATE INDEX IF NOT EXISTS test_idx_value ON test_table(value)
-    """)
+def test_reindex_table_rebuilds_its_indexes(psql_docker, pg_conn):
+    """Verify reindex_table rebuilds an index on the table.
 
-    # Perform reindex
+    Mutation: a statement other than reindex table, keeping the index file.
+    Oracle: the index's storage file id before the call.
+    """
+    db.execute(pg_conn, 'create index test_idx_value on test_table (value)')
+    before = _relfilenode(pg_conn, 'test_idx_value')
+
     db.reindex_table(pg_conn, 'test_table')
 
-    # Verify the index still exists
-    index_exists = db.select_scalar(pg_conn, """
-        SELECT EXISTS (
-            SELECT 1 FROM pg_indexes
-            WHERE tablename = 'test_table' AND indexname = 'test_idx_value'
-        )
-    """)
-    assert index_exists, 'Index should still exist after reindex'
+    assert _relfilenode(pg_conn, 'test_idx_value') != before
 
 
-def test_cluster_table(psql_docker, pg_conn):
-    """Test the cluster_table functionality"""
-    # Create an index to cluster on
-    db.execute(pg_conn, """
-        CREATE INDEX IF NOT EXISTS test_idx_cluster ON test_table(value)
-    """)
+def test_cluster_table_orders_by_the_named_index(psql_docker, pg_conn):
+    """Verify cluster_table uses the index it is given, then reuses it.
 
-    # Perform cluster
+    Mutation: ignoring index, so cluster runs with no using clause.
+    Oracle: the server's no-index error, then pg_index.indisclustered.
+    """
+    db.execute(pg_conn, 'create index test_idx_cluster on test_table (value)')
+    with pytest.raises(Exception, match='no previously clustered index'):
+        db.cluster_table(pg_conn, 'test_table')
+
     db.cluster_table(pg_conn, 'test_table', 'test_idx_cluster')
+    before = _relfilenode(pg_conn, 'test_table')
+    db.cluster_table(pg_conn, 'test_table')
 
-    # There's no direct way to verify clustering worked, but the operation should not error
-    # Check table still has correct data
-    count = db.select_scalar(pg_conn, 'select count(*) from test_table')
-    assert count > 0, 'Table should still contain data after clustering'
+    is_clustered = db.select_scalar(pg_conn, """
+select i.indisclustered
+from pg_index i
+join pg_class c on c.oid = i.indexrelid
+where c.relname = 'test_idx_cluster'
+""")
+    assert is_clustered is True
+    assert _relfilenode(pg_conn, 'test_table') != before
+    assert db.select_scalar(pg_conn, 'select count(*) from test_table') == 6
 
 
 def test_strategy_get_primary_keys(psql_docker, pg_conn):
-    """Test that get_primary_keys correctly identifies primary keys"""
-    # Create a table with composite primary key
+    """Verify every column of a composite primary key is returned.
+
+    Mutation: i.indkey[0] in place of any(i.indkey), keeping one column.
+    Oracle: the hand-written key of each table.
+    """
     db.execute(pg_conn, """
-        CREATE TEMPORARY TABLE test_composite_pk (
-            id1 INT,
-            id2 INT,
-            data TEXT,
-            PRIMARY KEY (id1, id2)
-        )
-    """)
-
-    # Get primary keys using the strategy directly
+create temporary table test_composite_pk (
+    id1 int,
+    id2 int,
+    data text,
+    primary key (id1, id2)
+)
+""")
     strategy = PostgresStrategy()
-    pk_columns = strategy.get_primary_keys(pg_conn, 'test_composite_pk')
 
-    # Verify primary keys
-    assert set(pk_columns) == {'id1', 'id2'}
-
-    # Test with the regular table
-    pk_columns = strategy.get_primary_keys(pg_conn, 'test_table')
-    assert pk_columns == ['name'], "Should correctly identify 'name' as primary key"
+    composite_pk = strategy.get_primary_keys(pg_conn, 'test_composite_pk')
+    assert set(composite_pk) == {'id1', 'id2'}
+    assert strategy.get_primary_keys(pg_conn, 'test_table') == ['name']
 
 
 def test_strategy_get_sequence_columns(psql_docker, pg_conn):
-    """Test that get_sequence_columns correctly identifies sequence columns"""
-    # Create a table with a serial column
+    """Verify only a column defaulting to nextval counts as a sequence.
+
+    Mutation: dropping the column_default filter.
+    Oracle: the hand-written serial column of the table.
+    """
     db.execute(pg_conn, """
-        CREATE TEMPORARY TABLE test_sequence_columns (
-            id SERIAL PRIMARY KEY,
-            non_serial_id INT,
-            data TEXT
-        )
-    """)
-
-    # Get sequence columns using the strategy directly
+create temporary table test_sequence_columns (
+    id serial primary key,
+    non_serial_id int,
+    data text
+)
+""")
     strategy = PostgresStrategy()
-    seq_columns = strategy.get_sequence_columns(pg_conn, 'test_sequence_columns')
 
-    # Verify sequence columns
-    assert 'id' in seq_columns
-    assert 'non_serial_id' not in seq_columns
+    assert strategy.get_sequence_columns(pg_conn, 'test_sequence_columns') == ['id']
 
 
 def test_copy_from(psql_docker, pg_conn):
-    """Test bulk loading data using PostgreSQL COPY."""
-    db.execute(pg_conn, """
-        CREATE TEMPORARY TABLE test_copy (
-            name TEXT,
-            value INTEGER
-        )
-    """)
+    """Verify copy loads each CSV line into the named columns.
+
+    Mutation: dropping the column list from the copy statement.
+    Oracle: a table whose column order is the reverse of the CSV's.
+    """
+    db.execute(pg_conn, 'create temporary table test_copy (value integer, name text)')
 
     csv_data = io.StringIO('David,40\nEva,50\nFrank,60\n')
     rowcount = db.copy_from(pg_conn, 'test_copy', csv_data, ['name', 'value'])
 
     assert rowcount == 3
-
-    rows = db.select(pg_conn, 'SELECT name, value FROM test_copy ORDER BY value')
-    assert len(rows) == 3
-    assert rows[0]['name'] == 'David'
-    assert rows[0]['value'] == 40
-    assert rows[2]['name'] == 'Frank'
-    assert rows[2]['value'] == 60
+    rows = db.select(pg_conn, 'select name, value from test_copy order by value')
+    assert [(row['name'], row['value']) for row in rows] == [
+        ('David', 40), ('Eva', 50), ('Frank', 60)]
 
 
 def test_copy_from_without_columns(psql_docker, pg_conn):
-    """Test COPY without specifying columns uses table column order."""
-    db.execute(pg_conn, """
-        CREATE TEMPORARY TABLE test_copy_nocol (
-            col1 TEXT,
-            col2 INTEGER
-        )
-    """)
+    """Verify copy with no columns fills the table in its column order.
+
+    Mutation: an empty '()' column list when columns is None.
+    Oracle: the hand-written rows, in table column order.
+    """
+    db.execute(pg_conn,
+               'create temporary table test_copy_nocol (col1 text, col2 integer)')
 
     csv_data = io.StringIO('Alice,100\nBob,200\n')
     rowcount = db.copy_from(pg_conn, 'test_copy_nocol', csv_data)
 
     assert rowcount == 2
-
-    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_copy_nocol')
-    assert count == 2
+    rows = db.select(pg_conn, 'select col1, col2 from test_copy_nocol order by col2')
+    assert [(row['col1'], row['col2']) for row in rows] == [
+        ('Alice', 100), ('Bob', 200)]
 
 
 def test_copy_from_empty_file(psql_docker, pg_conn):
-    """Test COPY with empty file inserts no rows."""
-    db.execute(pg_conn, """
-        CREATE TEMPORARY TABLE test_copy_empty (
-            name TEXT,
-            value INTEGER
-        )
-    """)
+    """Verify an empty file loads no rows and reports 0, not None.
 
-    csv_data = io.StringIO('')
-    rowcount = db.copy_from(pg_conn, 'test_copy_empty', csv_data, ['name', 'value'])
+    Mutation: returning early on empty input, which reports None.
+    Oracle: 0, the row count of an empty load.
+    """
+    db.execute(pg_conn,
+               'create temporary table test_copy_empty (name text, value integer)')
+
+    rowcount = db.copy_from(
+        pg_conn, 'test_copy_empty', io.StringIO(''), ['name', 'value'])
 
     assert rowcount == 0
-
-    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM test_copy_empty')
-    assert count == 0
+    assert db.select_scalar(pg_conn, 'select count(*) from test_copy_empty') == 0
 
 
 if __name__ == '__main__':

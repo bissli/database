@@ -1,15 +1,4 @@
-"""Unit tests for PostgreSQL index and constraint definition parsing.
-
-Three code paths are under test: the strict CREATE UNIQUE INDEX pattern in
-extract_index_definition(), the loose paren-scanning fallback it drops to
-when that pattern fails, and the row routing plus regex extraction in
-PostgresStrategy.get_constraint_definition().
-
-Every expected clause is a hand-written literal, never a re-derivation
-using the regexes the source itself uses. Most definitions carry a nested
-expression such as lower((email)::text), which the fallback collapses to
-((email)::text). Any mutation that knocks a definition off the strict path
-therefore lands in an assertion instead of being absorbed by the fallback.
+"""PostgreSQL index and constraint definition parsing.
 """
 import pytest
 from database.exceptions import QueryError
@@ -37,10 +26,7 @@ class RecordingCursor:
 
 
 class StubConnection:
-    """Connection exposing only what DatabaseStrategy._cursor touches.
-
-    Rows are (definition, source) tuples, so the dict assembly in
-    _select_raw runs for real instead of being handed finished dicts.
+    """Connection serving (definition, source) rows to _select_raw.
     """
 
     def __init__(self, rows):
@@ -61,8 +47,7 @@ class TestExtractIndexDefinition:
     def test_simple_index(self):
         """Verify a single-column index yields the column clause alone.
 
-        Mutation: column_clause taking match.group(0) instead of group(1),
-        which returns the whole CREATE statement as the conflict target.
+        Mutation: match.group(0) for column_clause, the whole statement.
         Oracle: hand-written '(id)'.
         """
         definition = 'CREATE UNIQUE INDEX user_id_index ON public.users USING btree (id)'
@@ -71,9 +56,7 @@ class TestExtractIndexDefinition:
     def test_multicolumn_index(self):
         """Verify a nested expression and its ordering keywords survive.
 
-        Mutation: tightening the lazy column-clause group so it stops at
-        the first closing paren, which truncates lower((email)::text) and
-        drops the definition to the fallback.
+        Mutation: column group stopping at the first closing paren.
         Oracle: hand-written clause, DESC NULLS LAST included.
         """
         definition = ('CREATE UNIQUE INDEX orders_customer_email_idx'
@@ -85,8 +68,7 @@ class TestExtractIndexDefinition:
     def test_where_clause_index(self):
         """Verify a partial index keeps its predicate on the returned clause.
 
-        Mutation: returning column_clause alone from the WHERE branch, so
-        the conflict target no longer matches the partial index.
+        Mutation: the WHERE branch returning column_clause alone.
         Oracle: hand-written '(email) WHERE is_active'.
         """
         definition = ('CREATE UNIQUE INDEX uq_customer_email_active'
@@ -96,9 +78,7 @@ class TestExtractIndexDefinition:
     def test_complex_coalesce_index(self):
         """Verify a schema-qualified index of nested COALESCE casts parses.
 
-        Mutation: dropping the optional schema prefix from the table part
-        of the pattern, so 'public.financial_records' no longer matches and
-        the fallback returns only the first balanced paren group.
+        Mutation: dropping the optional schema prefix from the pattern.
         Oracle: hand-written eight-item clause.
         """
         definition = (
@@ -125,9 +105,7 @@ class TestExtractIndexDefinition:
     def test_partial_index_with_expression_and_predicate(self):
         """Verify the split lands between the last column paren and WHERE.
 
-        Mutation: dropping the end anchor from the pattern, which lets the
-        lazy column group stop inside lower((setting_type)::text) and
-        return a truncated, unbalanced clause.
+        Mutation: dropping the end anchor from the pattern.
         Oracle: hand-written clause plus the two-term predicate.
         """
         definition = ('CREATE UNIQUE INDEX account_settings_account_id_setting_type_idx'
@@ -141,9 +119,7 @@ class TestExtractIndexDefinition:
     def test_nulls_not_distinct(self):
         """Verify NULLS NOT DISTINCT is dropped, not folded into the clause.
 
-        Mutation: the NULLS NOT DISTINCT group changed to NULLS DISTINCT,
-        after which the option and the WHERE keyword are swallowed into the
-        returned column clause.
+        Mutation: the NULLS NOT DISTINCT group changed to NULLS DISTINCT.
         Oracle: hand-written clause and predicate, option absent.
         """
         definition = ('CREATE UNIQUE INDEX account_preferences_user_id_category_option_date_idx'
@@ -156,8 +132,7 @@ class TestExtractIndexDefinition:
     def test_nulls_not_distinct_without_where(self):
         """Verify the option is dropped when no predicate follows it.
 
-        Mutation: moving the NULLS NOT DISTINCT group inside the captured
-        column group, which appends the option to the conflict target.
+        Mutation: NULLS NOT DISTINCT moved inside the column group.
         Oracle: hand-written clause, option absent.
         """
         definition = ('CREATE UNIQUE INDEX users_email_tenant_idx ON public.users USING btree'
@@ -168,8 +143,7 @@ class TestExtractIndexDefinition:
     def test_coalesce_multiple_columns(self):
         """Verify an unqualified table with no USING clause still parses.
 
-        Mutation: making the USING group mandatory, which pushes this
-        definition to the fallback and returns ((name)::text).
+        Mutation: making the USING group mandatory.
         Oracle: hand-written clause with both nesting levels.
         """
         definition = ('CREATE UNIQUE INDEX complex_unique_constraint'
@@ -181,9 +155,7 @@ class TestExtractIndexDefinition:
     def test_quoted_identifiers_holding_comma_and_paren(self):
         """Verify quoted column names carrying ',' and ')' are not split.
 
-        Mutation: tightening the lazy column-clause group so it stops at
-        the first closing paren, which here is the one inside the quoted
-        name "addr(2)", truncating the clause mid-identifier.
+        Mutation: column group stopping at the ')' inside "addr(2)".
         Oracle: hand-written clause, both quoted names intact.
         """
         definition = ('CREATE UNIQUE INDEX weird_cols_idx ON public.t USING btree'
@@ -194,8 +166,7 @@ class TestExtractIndexDefinition:
     def test_malformed_definition(self):
         """Verify a paren-free definition raises and one paren group does not.
 
-        Mutation: returning the raw definition instead of raising, which
-        would splice an unusable string into ON CONFLICT.
+        Mutation: returning the raw definition instead of raising.
         Oracle: boundary pair straddling the presence of a paren group.
         """
         with pytest.raises(QueryError, match='Failed to extract column definition'):
@@ -205,18 +176,13 @@ class TestExtractIndexDefinition:
 
 
 class TestIndexDefinitionFallback:
-    """Definitions the strict pattern rejects, handled by paren scanning.
-
-    A quoted table name is the shape that reaches the fallback here: the
-    strict pattern only accepts a bare-word table name.
+    """Quoted table names, which the strict pattern rejects.
     """
 
     def test_quoted_table_name_with_nested_expression(self):
         """Verify the fallback spans one level of nested parens.
 
-        Mutation: dropping the nested-group alternation from the fallback
-        paren regex, which then returns the inner (qty, -1) instead of the
-        whole column list.
+        Mutation: dropping the nested-group alternation from the fallback.
         Oracle: hand-written clause.
         """
         definition = ('CREATE UNIQUE INDEX uq_oi ON public."Order Items"'
@@ -226,8 +192,7 @@ class TestIndexDefinitionFallback:
     def test_quoted_table_name_with_predicate(self):
         """Verify the fallback keeps the parens and appends the predicate.
 
-        Mutation: the fallback taking paren_match.group(1) instead of
-        group(0), which strips the parens off the conflict target.
+        Mutation: paren_match.group(1) in place of group(0).
         Oracle: hand-written '(email) WHERE (is_active = true)'.
         """
         definition = ('CREATE UNIQUE INDEX uq_oi_w ON public."Order Items"'
@@ -243,8 +208,7 @@ class TestGetConstraintDefinition:
     def test_index_row_is_parsed_as_index_definition(self):
         """Verify the definition is stripped before the index parser sees it.
 
-        Mutation: definition.strip() weakened to lstrip(), which leaves the
-        trailing blanks a real catalog row can carry on the returned clause.
+        Mutation: definition.strip() weakened to lstrip().
         Oracle: hand-written clause with no trailing blanks.
         """
         cn = StubConnection([
@@ -266,10 +230,9 @@ class TestGetConstraintDefinition:
     def test_constraint_row_returns_bare_column_list(self, definition, expected):
         """Verify a constraint row yields its columns without the keyword.
 
-        Mutation: source == 'constraint' flipped to 'index' (routing, caught
-                  by all params); [^)]+ widened to .+ in either regex
-                  (include-clause param); generic re.search fallback deleted
-                  (nulls-not-distinct param).
+        Mutation: source test flipped to 'index' (all params); [^)]+
+                  widened to .+ (include-clause); generic fallback
+                  deleted (nulls-not-distinct).
         Oracle: hand-written column list per definition shape.
         """
         cn = StubConnection([(definition, 'constraint')])
@@ -280,8 +243,7 @@ class TestGetConstraintDefinition:
     def test_lookup_uses_unqualified_unquoted_table_name(self):
         """Verify the placeholders get constraint, table, constraint, table.
 
-        Mutation: parts[0] instead of parts[-1] for table_name, which sends
-        the schema 'public' where the table name belongs.
+        Mutation: parts[0] instead of parts[-1] for table_name.
         Oracle: hand-written parameter tuple, quotes and schema removed.
         """
         cn = StubConnection([('UNIQUE (sku)', 'constraint')])
@@ -301,8 +263,7 @@ class TestGetConstraintDefinition:
     def test_missing_constraint_raises(self):
         """Verify an empty result set raises QueryError, not IndexError.
 
-        Mutation: the `if not result:` guard narrowed to `result is None`,
-        after which result[0] raises IndexError on an empty list.
+        Mutation: the `if not result:` guard narrowed to `result is None`.
         Oracle: the exception type plus the constraint name in the message.
         """
         cn = StubConnection([])
@@ -313,8 +274,7 @@ class TestGetConstraintDefinition:
     def test_first_row_wins_when_index_and_constraint_both_match(self):
         """Verify the leading union row is used when a name matches both arms.
 
-        Mutation: result[-1]['definition'] instead of result[0], which pairs
-        the trailing row's definition with the leading row's source.
+        Mutation: result[-1]['definition'] instead of result[0].
         Oracle: hand-written clause from the leading row only.
         """
         cn = StubConnection([
@@ -327,9 +287,7 @@ class TestGetConstraintDefinition:
     def test_unextractable_constraint_definition_raises(self):
         """Verify a constraint definition with no paren group raises.
 
-        Mutation: returning the raw definition instead of raising at the
-        end of the constraint branch, which would splice an unusable
-        expression into ON CONFLICT.
+        Mutation: returning the raw definition instead of raising.
         Oracle: the exception type plus its 'Failed to extract regex' text.
         """
         cn = StubConnection([('', 'constraint')])

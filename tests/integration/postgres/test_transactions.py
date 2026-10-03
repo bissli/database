@@ -1,811 +1,516 @@
+"""PostgreSQL transactions: returnid over a returning clause, and batches.
+"""
 import datetime
 
 import database as db
+import psycopg
 import pytest
+
+TODAY = datetime.date.today()
+YESTERDAY = TODAY - datetime.timedelta(days=1)
+NEXT_MONTH = TODAY + datetime.timedelta(days=30)
+
+INSERT_SQL = 'insert into test_table (name, value) values (%s, %s)'
+UPDATE_SQL = 'update test_table set value = %s where name = %s'
 
 
 def test_transaction(psql_docker, pg_conn):
-    """Test successful transaction with multiple operations"""
-    # Perform transaction operations
-    update_sql = 'update test_table set value = %s where name = %s'
-    insert_sql = 'insert into test_table (name, value) values (%s, %s)'
+    """Verify an update and an insert in one block both take effect.
 
+    Mutation: Transaction.execute dropping its values, or a clean rollback.
+    Oracle: hand-written rows for the updated and inserted names.
+    """
     with db.transaction(pg_conn) as tx:
-        tx.execute(update_sql, 91, 'George')
-        tx.execute(insert_sql, 'Hannah', 102)
+        tx.execute(UPDATE_SQL, 91, 'George')
+        tx.execute(INSERT_SQL, 'Hannah', 102)
 
-    # Verify transaction operations
-    query = 'select name, value from test_table where name in (%s, %s) order by name'
-    result = db.select(pg_conn, query, 'George', 'Hannah')
+    result = db.select(
+        pg_conn,
+        'select name, value from test_table where name in (%s, %s) order by name',
+        'George', 'Hannah')
 
-    assert len(result) == 2
-    assert result[0]['name'] == 'George'
-    assert result[0]['value'] == 91
-    assert result[1]['name'] == 'Hannah'
-    assert result[1]['value'] == 102
+    assert [(r['name'], r['value']) for r in result] == [
+        ('George', 91), ('Hannah', 102)]
 
 
 def test_transaction_rollback(psql_docker, pg_conn):
-    """Test transaction rollback on error"""
-    # First get current data for George
-    original_value = db.select_scalar(pg_conn, 'select value from test_table where name = %s', 'George')
+    """Verify a failing statement rolls back the block's earlier update.
 
-    # Perform transaction with an error
-    update_sql = 'update test_table set value = %s where name = %s'
-    bad_sql = 'insert into nonexistent_table values (1)'
-
-    try:
+    Mutation: __exit__ committing on an exception, or auto-commit left on.
+    Oracle: George's staged value 80, after a failing second statement.
+    """
+    with pytest.raises(psycopg.errors.UndefinedTable):
         with db.transaction(pg_conn) as tx:
-            tx.execute(update_sql, 999, 'George')
-            # This should fail and trigger rollback
-            tx.execute(bad_sql)
-    except Exception:
-        pass  # Expected exception
+            tx.execute(UPDATE_SQL, 999, 'George')
+            tx.execute('insert into nonexistent_table values (1)')
 
-    # Verify the value was NOT updated due to rollback
-    new_value = db.select_scalar(pg_conn, 'select value from test_table where name = %s', 'George')
-    assert new_value == original_value, 'Transaction should have rolled back'
-
-
-def test_transaction_select(psql_docker, pg_conn):
-    """Test select within a transaction"""
-    with db.transaction(pg_conn) as tx:
-        # Insert data
-        tx.execute('insert into test_table (name, value) values (%s, %s)', 'TransactionTest', 200)
-
-        # Select data within same transaction
-        result = tx.select('select value from test_table where name = %s', 'TransactionTest')
-
-        # Verify we can see our own changes
-        assert len(result) == 1
-        assert result[0]['value'] == 200
+    value = db.select_scalar(
+        pg_conn, 'select value from test_table where name = %s', 'George')
+    assert value == 80
 
 
 def test_transaction_execute_returning_dict_params(psql_docker, pg_conn):
-    """Test execute with RETURNING clause and dictionary parameters"""
-    # Create a table with an auto-incrementing ID and other columns
+    """Verify returnid reads the id a returning insert with named values made.
+
+    Mutation: returnid dropping a dict argument, or returning the whole row.
+    Oracle: the row read back by the returned id.
+    """
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE returning_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        value INTEGER NOT NULL
-    )
-    """)
-
-    # Test with a dictionary parameter and returnid
+create temporary table returning_test (
+    id serial primary key,
+    name text not null,
+    value integer not null
+)
+""")
+    insert_sql = """
+insert into returning_test (name, value)
+values (%(name)s, %(value)s)
+returning id
+"""
     with db.transaction(pg_conn) as tx:
-        params = {
-            'name': 'TestDict',
-            'value': 100
-        }
+        result_id = tx.execute(
+            insert_sql, {'name': 'TestDict', 'value': 100}, returnid='id')
 
-        # Execute INSERT with RETURNING clause
-        result_id = tx.execute("""
-        INSERT INTO returning_test (name, value)
-        VALUES (%(name)s, %(value)s)
-        RETURNING id
-        """, params, returnid='id')
-
-        # Verify the result is not None and is a number
-        assert result_id is not None
         assert isinstance(result_id, int)
-        assert result_id > 0
-
-        # Verify the row exists
-        row = tx.select_row('SELECT * FROM returning_test WHERE id = %s', result_id)
+        row = tx.select_row('select * from returning_test where id = %s', result_id)
         assert row['name'] == 'TestDict'
         assert row['value'] == 100
 
 
 def test_transaction_execute_returning_multiple_values(psql_docker, pg_conn):
-    """Test execute with RETURNING multiple values and dictionary parameters"""
-    # Create a table with multiple columns
+    """Verify a list returnid yields the named columns in list order.
+
+    Mutation: list returnid values in row order, or only the first name.
+    Oracle: a returning clause listing inst_id before id, and 33476.
+    """
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE multi_return_test (
-        id SERIAL PRIMARY KEY,
-        inst_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        value INTEGER NOT NULL
-    )
-    """)
-
-    # Test with a dictionary parameter and multiple returnid values
+create temporary table multi_return_test (
+    id serial primary key,
+    inst_id integer not null,
+    name text not null,
+    value integer not null
+)
+""")
+    insert_sql = """
+insert into multi_return_test (inst_id, name, value)
+values (%(inst_id)s, %(name)s, %(value)s)
+returning inst_id, id
+"""
+    params = {'inst_id': 33476, 'name': 'MultiReturn', 'value': 500}
     with db.transaction(pg_conn) as tx:
-        params = {
-            'inst_id': 33476,
-            'name': 'MultiReturn',
-            'value': 500
-        }
+        inst_id, id_val = tx.execute(insert_sql, params, returnid=['inst_id', 'id'])
 
-        # Execute INSERT with RETURNING clause for multiple columns
-        inst_id, id_val = tx.execute("""
-        INSERT INTO multi_return_test (inst_id, name, value)
-        VALUES (%(inst_id)s, %(name)s, %(value)s)
-        RETURNING inst_id, id
-        """, params, returnid=['inst_id', 'id'])
-
-        # Verify both values were returned correctly
         assert inst_id == 33476
-        assert isinstance(id_val, int)
-        assert id_val > 0
-
-        # Verify the row exists with correct values
-        row = tx.select_row('SELECT * FROM multi_return_test WHERE id = %s', id_val)
-        assert row['inst_id'] == 33476
-        assert row['name'] == 'MultiReturn'
-        assert row['value'] == 500
+        row = tx.select_row('select * from multi_return_test where id = %s', id_val)
+        assert (row['inst_id'], row['name'], row['value']) == (
+            33476, 'MultiReturn', 500)
 
 
 def test_transaction_execute_returning_multiple_rows(psql_docker, pg_conn):
-    """Test execute with RETURNING multiple rows of multiple values"""
-    # Create a table for multi-row operations
+    """Verify a list returnid over several rows yields one list per row.
+
+    Mutation: Transaction.execute unwrapping only the first of several rows.
+    Oracle: hand-computed rows, each staged value plus 100.
+    """
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE multi_row_test (
-        id SERIAL PRIMARY KEY,
-        category TEXT NOT NULL,
-        value INTEGER NOT NULL
-    )
-    """)
+create temporary table multi_row_test (
+    id serial primary key,
+    category text not null,
+    value integer not null
+)
+""")
+    for i, category in enumerate(['electronics', 'clothing', 'food']):
+        db.execute(
+            pg_conn,
+            'insert into multi_row_test (category, value) values (%s, %s)',
+            category, i * 10)
 
-    # Insert some initial data to update
-    categories = ['electronics', 'clothing', 'food']
-    for i, category in enumerate(categories):
-        db.execute(pg_conn, """
-        INSERT INTO multi_row_test (category, value)
-        VALUES (%s, %s)
-        """, category, i*10)
-
-    # Test with an UPDATE that affects multiple rows
+    update_sql = """
+update multi_row_test
+set value = value + 100
+returning id, category, value
+"""
     with db.transaction(pg_conn) as tx:
-        # Update all rows and get back multiple values from each
-        results = tx.execute("""
-        UPDATE multi_row_test
-        SET value = value + 100
-        RETURNING id, category, value
-        """, returnid=['id', 'category', 'value'])
+        results = tx.execute(update_sql, returnid=['id', 'category', 'value'])
 
-        # Verify we got a list of lists with all three expected rows
-        assert isinstance(results, list)
-        assert len(results) == 3  # Should match the number of categories
-
-        # Each result should be a list of [id, category, value]
-        for row in results:
-            assert len(row) == 3
-            assert isinstance(row[0], int)  # id
-            assert isinstance(row[1], str)  # category
-            assert isinstance(row[2], int)  # value
-            assert row[2] >= 100  # The updated value should be at least 100
-
-        # Check if all categories were included in the results
-        result_categories = [row[1] for row in results]
-        for category in categories:
-            assert category in result_categories
-
-
-def test_nested_transactions_not_supported(psql_docker, pg_conn):
-    """Test that nested transactions raise appropriate errors"""
-    with db.transaction(pg_conn) as tx1:
-        # Start a nested transaction - this should fail
-        with pytest.raises(RuntimeError):
-            # Call directly with the same connection
-            db.transaction(pg_conn)
+    assert sorted(results) == [
+        [1, 'electronics', 100], [2, 'clothing', 110], [3, 'food', 120]]
 
 
 def test_postgres_hardcoded_literals_transaction(psql_docker, pg_conn):
-    """Test transaction with different types of hardcoded literals"""
+    """Verify selects built from literals return their values in a block.
 
-    # Create a test table
+    Mutation: prepare_query rewriting a statement with no placeholder.
+    Oracle: hand-computed sums of the inserted 10.5 and 20.5.
+    """
     with db.transaction(pg_conn) as tx:
-        tx.execute('DROP TABLE IF EXISTS literal_test')
-        tx.execute('CREATE TABLE literal_test (id INT, name VARCHAR(50), value DECIMAL(10,2))')
+        tx.execute('drop table if exists literal_test')
+        tx.execute(
+            'create table literal_test (id int, name varchar(50), value decimal(10,2))')
 
-    # Test different types of literals within a transaction
-    with db.transaction(pg_conn) as tx:
-        # Insert with literals
-        tx.execute("INSERT INTO literal_test (id, name, value) VALUES (1, 'Test', 10.5)")
+    try:
+        with db.transaction(pg_conn) as tx:
+            tx.execute(
+                "insert into literal_test (id, name, value) values (1, 'Test', 10.5)")
 
-        # Test various direct queries to see what works
+            assert tx.select('select * from literal_test where id = 1')[0]['id'] == 1
+            by_param = tx.select('select * from literal_test where id = %s', 1)
+            assert by_param[0]['id'] == 1
+            sum_sql = 'select sum(value) as sum_value from literal_test'
+            assert tx.select(sum_sql)[0]['sum_value'] == 10.5
+            calc_sql = 'select 100.5 + sum(value) as calculated from literal_test'
+            assert tx.select(calc_sql)[0]['calculated'] == 111.0
+            assert tx.select('select 42 as answer')[0]['answer'] == 42
+            assert tx.select("select 'hello' as greeting")[0]['greeting'] == 'hello'
 
-        # Simple SELECT with no WHERE
-        result1 = tx.select('SELECT * FROM literal_test')
-        assert result1 is not None
-        assert len(result1) > 0
-
-        # SELECT with hardcoded WHERE clause
-        result2 = tx.select('SELECT * FROM literal_test WHERE id = 1')
-        assert result2 is not None
-        assert len(result2) > 0
-        assert result2[0]['id'] == 1
-
-        # SELECT with parameterized WHERE clause
-        result3 = tx.select('SELECT * FROM literal_test WHERE id = %s', 1)
-        assert result3 is not None
-        assert len(result3) > 0
-        assert result3[0]['id'] == 1
-
-        # Aggregate without GROUP BY
-        result4 = tx.select('SELECT SUM(value) AS sum_value FROM literal_test')
-        assert result4 is not None
-        assert len(result4) > 0
-        assert result4[0]['sum_value'] == 10.5  # First row has value 10.5
-
-        # Aggregate with direct value
-        result5 = tx.select('SELECT 100.5 + SUM(value) AS calculated FROM literal_test')
-        assert result5 is not None
-        assert len(result5) > 0
-        assert result5[0]['calculated'] == 111.0  # 100.5 + 10.5
-
-        # Simple direct value
-        result6 = tx.select('SELECT 42 AS answer')
-        assert result6 is not None
-        assert len(result6) > 0
-        assert result6[0]['answer'] == 42
-
-        # Direct string literal
-        result7 = tx.select("SELECT 'hello' AS greeting")
-        assert result7 is not None
-        assert len(result7) > 0
-        assert result7[0]['greeting'] == 'hello'
-
-        # Try a more complex query
-        tx.execute("INSERT INTO literal_test (id, name, value) VALUES (2, 'Another', 20.5)")
-        result8 = tx.select('SELECT id, name, value FROM literal_test ORDER BY id')
-        assert result8 is not None
-        assert len(result8) == 2
-        assert result8[0]['id'] == 1
-        assert result8[1]['id'] == 2
-        assert result8[1]['name'] == 'Another'
-        assert result8[1]['value'] == 20.5
-
-        # Try COUNT with literal comparison
-        result9 = tx.select('SELECT COUNT(*) AS row_count FROM literal_test WHERE value > 5')
-        assert result9 is not None
-        assert len(result9) > 0
-        assert result9[0]['row_count'] == 2  # Both rows have value > 5
-
-        # Try different method with aggregate - using a subquery
-        result10 = tx.select('SELECT * FROM (SELECT SUM(value) AS total FROM literal_test) t')
-        assert result10 is not None
-        assert len(result10) > 0
-        assert result10[0]['total'] == 31.0  # 10.5 + 20.5
-
-        # Try without alias
-        result11 = tx.select('SELECT SUM(value) FROM literal_test')
-        assert result11 is not None
-        assert len(result11) > 0
-        assert result11[0]['sum'] == 31.0  # 10.5 + 20.5
-
-    # Clean up
-    with db.transaction(pg_conn) as tx:
-        tx.execute('DROP TABLE literal_test')
+            tx.execute(
+                "insert into literal_test (id, name, value) "
+                "values (2, 'Another', 20.5)")
+            rows = tx.select('select id, name, value from literal_test order by id')
+            assert [(r['id'], r['name'], r['value']) for r in rows] == [
+                (1, 'Test', 10.5), (2, 'Another', 20.5)]
+            count_sql = 'select count(*) as row_count from literal_test where value > 5'
+            assert tx.select(count_sql)[0]['row_count'] == 2
+            subquery_sql = (
+                'select * from (select sum(value) as total from literal_test) t')
+            assert tx.select(subquery_sql)[0]['total'] == 31.0
+            assert tx.select('select sum(value) from literal_test')[0]['sum'] == 31.0
+    finally:
+        with db.transaction(pg_conn) as tx:
+            tx.execute('drop table literal_test')
 
 
 def test_transaction_with_multiple_statements(psql_docker, pg_conn):
-    """Test executing multiple statements with semicolons inside a transaction"""
-    # Create a temporary table for the test
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE employee_data (
-        id SERIAL PRIMARY KEY,
-        dept TEXT NOT NULL,
-        salary INTEGER NOT NULL,
-        updated_at TIMESTAMP
-    )
-    """)
+    """Verify every statement of an unparameterized batch runs in a block.
 
-    # Insert initial test data
+    Mutation: the batch split so one statement never reaches the driver.
+    Oracle: hand-computed salaries, each staged salary plus its raise.
+    """
     db.execute(pg_conn, """
-    INSERT INTO employee_data (dept, salary, updated_at) VALUES
-    ('sales', 1000, NOW()),
-    ('marketing', 2000, NOW()),
-    ('engineering', 3000, NOW())
-    """)
-
-    # Execute multiple statements within a transaction (no parameters)
+create temporary table employee_data (
+    id serial primary key,
+    dept text not null,
+    salary integer not null,
+    updated_at timestamp
+)
+""")
+    db.execute(pg_conn, """
+insert into employee_data (dept, salary, updated_at) values
+('sales', 1000, now()),
+('marketing', 2000, now()),
+('engineering', 3000, now())
+""")
+    batch_sql = """
+insert into employee_data (dept, salary, updated_at) values ('finance', 4000, now());
+insert into employee_data (dept, salary, updated_at) values ('hr', 2500, now());
+update employee_data set salary = salary + 100 where dept = 'sales';
+update employee_data set salary = salary + 200 where dept = 'marketing';
+update employee_data set salary = salary + 300, updated_at = now() where dept = 'engineering'
+"""
     with db.transaction(pg_conn) as tx:
-        # This SQL contains multiple statements with both INSERTs and UPDATEs separated by semicolons
-        tx.execute("""
-        INSERT INTO employee_data (dept, salary, updated_at) VALUES ('finance', 4000, NOW());
-        INSERT INTO employee_data (dept, salary, updated_at) VALUES ('hr', 2500, NOW());
-        UPDATE employee_data SET salary = salary + 100 WHERE dept = 'sales';
-        UPDATE employee_data SET salary = salary + 200 WHERE dept = 'marketing';
-        UPDATE employee_data SET salary = salary + 300, updated_at = NOW() WHERE dept = 'engineering'
-        """)
+        tx.execute(batch_sql)
 
-    # Verify all statements were executed in the transaction
-    result = db.select(pg_conn, """
-    SELECT dept, salary FROM employee_data ORDER BY dept
-    """)
+    result = db.select(pg_conn, 'select dept, salary from employee_data order by dept')
 
-    assert len(result) == 5
-    assert result[0]['dept'] == 'engineering'
-    assert result[0]['salary'] == 3300  # 3000 + 300
-    assert result[1]['dept'] == 'finance'
-    assert result[1]['salary'] == 4000  # New insert
-    assert result[2]['dept'] == 'hr'
-    assert result[2]['salary'] == 2500  # New insert
-    assert result[3]['dept'] == 'marketing'
-    assert result[3]['salary'] == 2200  # 2000 + 200
-    assert result[4]['dept'] == 'sales'
-    assert result[4]['salary'] == 1100  # 1000 + 100
+    assert [(r['dept'], r['salary']) for r in result] == [
+        ('engineering', 3300),
+        ('finance', 4000),
+        ('hr', 2500),
+        ('marketing', 2200),
+        ('sales', 1100),
+        ]
 
 
 def test_transaction_with_complex_multiple_statements(psql_docker, pg_conn):
-    """Test executing complex multiple statements with semicolons inside a transaction"""
-    # Create test tables
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE item (
-        id SERIAL PRIMARY KEY,
-        category TEXT NOT NULL,
-        group_name TEXT,
-        duplicate_id INTEGER,
-        parent_id INTEGER,
-        item_code TEXT
-    )
-    """)
+    """Verify a batch of inserts and correlated updates runs in a block.
 
-    # Insert test data
-    db.execute(pg_conn, """
-    INSERT INTO item (category, group_name, duplicate_id, parent_id, item_code) VALUES
-    ('Book', 'Primary', NULL, NULL, '1001'),
-    ('Book', 'Secondary', NULL, NULL, '1001'),
-    ('Book', 'Primary', NULL, NULL, '1002'),
-    ('Magazine', 'Primary', NULL, NULL, '1002'),
-    ('Video', 'Tertiary', NULL, NULL, '2001')
-    """)
-
-    # Execute complex multi-statement updates inside a transaction
-    with db.transaction(pg_conn) as tx:
-        tx.execute("""
-        INSERT INTO item (category, group_name, duplicate_id, parent_id, item_code)
-        VALUES ('eBook', 'Primary', NULL, NULL, '3001');
-
-        INSERT INTO item (category, group_name, duplicate_id, parent_id, item_code)
-        VALUES ('Software', 'Secondary', NULL, NULL, '4001');
-
-        UPDATE item i
-        SET parent_id = x.ref_id
-        FROM (
-            SELECT
-                i.id AS ref_id,
-                i.item_code
-            FROM item i
-            WHERE
-                i.group_name = 'Primary'
-                AND i.duplicate_id IS NULL
-                AND i.parent_id IS NULL
-                AND i.item_code IS NOT NULL
-                AND i.category IN ('Book', 'Magazine')
-        ) x
-        WHERE i.item_code = x.item_code;
-
-        UPDATE item i
-        SET parent_id = x.ref_id
-        FROM (
-            SELECT
-                i.id AS ref_id,
-                i.category
-            FROM item i
-            WHERE
-                i.group_name = 'Primary'
-                AND i.duplicate_id IS NULL
-                AND i.parent_id IS NULL
-                AND i.category IS NOT NULL
-                AND i.category IN ('Book', 'Magazine')
-        ) x
-        WHERE i.category = x.category AND i.parent_id IS NULL;
-        """)
-
-    # Verify the updates were successful
-    result = db.select(pg_conn, """
-    SELECT id, category, group_name, parent_id, item_code
-    FROM item
-    ORDER BY id
-    """)
-
-    # Group the results by item_code for verification
-    items_by_code = {}
-    primary_items_by_code = {}
-
-    # First, identify all primary items by their codes
-    for row in result:
-        code = row['item_code']
-        if code not in items_by_code:
-            items_by_code[code] = []
-        items_by_code[code].append(row)
-
-        # Track all Primary records by their ID for each item_code
-        if row['group_name'] == 'Primary':
-            if code not in primary_items_by_code:
-                primary_items_by_code[code] = {}
-            primary_items_by_code[code][row['id']] = row
-
-    # For each code, verify all non-Primary items reference one of the Primary items with same code
-    for code, items in items_by_code.items():
-        if code in primary_items_by_code:
-            primary_ids = list(primary_items_by_code[code].keys())
-
-            for item in items:
-                # Skip Primary items during verification, they don't need to reference themselves
-                if item['group_name'] == 'Primary':
-                    continue
-
-                # Verify this item has a valid parent_id that points to one of the Primary items
-                assert item['parent_id'] in primary_ids, \
-                    f'Item with item_code {code} should reference a Primary item with ID in {primary_ids}'
-
-    # Verify the newly inserted items
-    ebook = db.select_row_or_none(pg_conn, """
-        SELECT * FROM item WHERE category = 'eBook'
-    """)
-    assert ebook is not None
-    assert ebook.group_name == 'Primary'
-    assert ebook.item_code == '3001'
-
-    software = db.select_row_or_none(pg_conn, """
-        SELECT * FROM item WHERE category = 'Software'
-    """)
-    assert software is not None
-    assert software.group_name == 'Secondary'
-    assert software.item_code == '4001'
-
-    # Check that we have 7 items now (original 5 + 2 new inserts)
-    count = db.select_scalar(pg_conn, 'SELECT COUNT(*) FROM item')
-    assert count == 7
-
-
-def test_transaction_with_multiple_statement_combinations(psql_docker, pg_conn):
-    """Comprehensive test for executing varied statement combinations with parameters in transactions"""
-    # SECTION 1: BASIC MULTIPLE STATEMENTS WITH PARAMETERS
-    # Create a temporary table for the test
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE param_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_date DATE,
-        modified_date DATE
-    )
-    """)
-
-    # Get today's date for use as a parameter
-    today = datetime.date.today()
-    yesterday = today - datetime.timedelta(days=1)
-    tomorrow = today + datetime.timedelta(days=1)
-
-    # Execute multiple statements with parameters in a transaction
-    with db.transaction(pg_conn) as tx:
-        # Attempting to execute multiple statements with parameters
-        result = tx.execute("""
-        INSERT INTO param_test (name, status, created_date)
-        VALUES ('item1', 'active', %s);
-
-        INSERT INTO param_test (name, status, created_date, modified_date)
-        VALUES ('item2', 'pending', %s, %s);
-
-        UPDATE param_test
-        SET status = 'approved', modified_date = %s
-        WHERE name = 'item1';
-        """, yesterday, yesterday, today, today)
-
-    # Test with named parameters in a transaction
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE named_param_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_date DATE,
-        modified_date DATE
-    )
-    """)
-
-    # Execute multiple statements with named parameters in a transaction
-    with db.transaction(pg_conn) as tx:
-        # Using all named parameters
-        result = tx.execute("""
-        INSERT INTO named_param_test (name, status, created_date)
-        VALUES ('item1', 'active', %(yesterday)s);
-
-        INSERT INTO named_param_test (name, status, created_date, modified_date)
-        VALUES ('item2', 'pending', %(yesterday)s, %(today)s);
-
-        UPDATE named_param_test
-        SET status = 'approved', modified_date = %(today)s
-        WHERE name = 'item1';
-        """, {'yesterday': yesterday, 'today': today})
-
-    # Verify named parameter results
-    named_result = db.select(pg_conn, """
-    SELECT name, status, created_date, modified_date
-    FROM named_param_test
-    ORDER BY name
-    """)
-
-    assert len(named_result) == 2, 'Should have 2 rows with named parameters'
-
-    named_item1 = next((r for r in named_result if r['name'] == 'item1'), None)
-    named_item2 = next((r for r in named_result if r['name'] == 'item2'), None)
-
-    assert named_item1['status'] == 'approved', "item1 should have status 'approved'"
-    assert named_item1['created_date'] == yesterday
-    assert named_item1['modified_date'] == today
-
-    assert named_item2['status'] == 'pending', "item2 should have status 'pending'"
-    assert named_item2['created_date'] == yesterday
-    assert named_item2['modified_date'] == today
-
-    # Verify the results
-    result = db.select(pg_conn, """
-    SELECT name, status, created_date, modified_date
-    FROM param_test
-    ORDER BY name
-    """)
-
-    # Check that the operations were performed
-    assert len(result) >= 2, 'Should have at least 2 rows'
-
-    # Find item1 and item2 in results
-    item1 = next((r for r in result if r['name'] == 'item1'), None)
-    item2 = next((r for r in result if r['name'] == 'item2'), None)
-
-    assert item1 is not None, 'item1 should exist'
-    assert item2 is not None, 'item2 should exist'
-    assert item1['status'] == 'approved', "item1 should have status 'approved'"
-    assert item2['status'] == 'pending', "item2 should have status 'pending'"
-
-    # SECTION 2: MIXED PARAMETER STATEMENTS (NO PARAM + PARAM)
-    # Create a temporary table for the test
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE mix_param_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        last_updated TIMESTAMP,
-        expire_date DATE
-    )
-    """)
-
-    # Insert initial test data
-    db.execute(pg_conn, """
-    INSERT INTO mix_param_test (name, status, last_updated, expire_date) VALUES
-    ('item1', 'active', NOW(), NULL),
-    ('item2', 'pending', NOW(), NULL),
-    ('item3', 'inactive', NOW(), NULL)
-    """)
-
-    # Get dates for parameter testing
-    today = datetime.date.today()
-    future_date = today + datetime.timedelta(days=30)
-
-    # Define a multi-statement SQL with a mix of parameterized and non-parameterized statements
-    mixed_param_sql = """
-    UPDATE mix_param_test
-    SET status = 'updated'
-    WHERE status = 'active';
-
-    UPDATE mix_param_test
-    SET expire_date = %s
-    WHERE status = 'pending';
-
-    UPDATE mix_param_test
-    SET expire_date = %s
-    WHERE status = 'inactive';
+    Mutation: splitting on a blank line or inside a subquery.
+    Oracle: hand-worked parent ids; rows 3 and 4 tie on code 1002.
     """
+    db.execute(pg_conn, """
+create temporary table item (
+    id serial primary key,
+    category text not null,
+    group_name text,
+    duplicate_id integer,
+    parent_id integer,
+    item_code text
+)
+""")
+    db.execute(pg_conn, """
+insert into item (category, group_name, duplicate_id, parent_id, item_code) values
+('Book', 'Primary', null, null, '1001'),
+('Book', 'Secondary', null, null, '1001'),
+('Book', 'Primary', null, null, '1002'),
+('Magazine', 'Primary', null, null, '1002'),
+('Video', 'Tertiary', null, null, '2001')
+""")
+    batch_sql = """
+insert into item (category, group_name, duplicate_id, parent_id, item_code)
+values ('eBook', 'Primary', null, null, '3001');
 
-    # Execute the mixed parameter SQL in a transaction
+insert into item (category, group_name, duplicate_id, parent_id, item_code)
+values ('Software', 'Secondary', null, null, '4001');
+
+update item i
+set parent_id = x.ref_id
+from (
+    select
+        i.id as ref_id,
+        i.item_code
+    from item i
+    where
+        i.group_name = 'Primary'
+        and i.duplicate_id is null
+        and i.parent_id is null
+        and i.item_code is not null
+        and i.category in ('Book', 'Magazine')
+) x
+where i.item_code = x.item_code;
+
+update item i
+set parent_id = x.ref_id
+from (
+    select
+        i.id as ref_id,
+        i.category
+    from item i
+    where
+        i.group_name = 'Primary'
+        and i.duplicate_id is null
+        and i.parent_id is null
+        and i.category is not null
+        and i.category in ('Book', 'Magazine')
+) x
+where i.category = x.category and i.parent_id is null;
+"""
     with db.transaction(pg_conn) as tx:
-        tx.execute(mixed_param_sql, today, future_date)
+        tx.execute(batch_sql)
 
-    # Test with named parameters in a transaction
-    db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE mix_named_param_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        last_updated TIMESTAMP,
-        expire_date DATE
-    )
-    """)
+    result = db.select(
+        pg_conn,
+        'select id, category, group_name, parent_id, item_code from item order by id')
+    parent_by_id = {r['id']: r['parent_id'] for r in result}
+    assert {k: parent_by_id[k] for k in (1, 2, 5, 6, 7)} == {
+        1: 1, 2: 1, 5: None, 6: None, 7: None}
+    assert parent_by_id[3] in {3, 4}
+    assert parent_by_id[4] in {3, 4}
+    assert [(r['category'], r['group_name'], r['item_code']) for r in result[5:]] == [
+        ('eBook', 'Primary', '3001'), ('Software', 'Secondary', '4001')]
 
-    # Insert initial test data
-    db.execute(pg_conn, """
-    INSERT INTO mix_named_param_test (name, status, last_updated, expire_date) VALUES
-    ('item1', 'active', NOW(), NULL),
-    ('item2', 'pending', NOW(), NULL),
-    ('item3', 'inactive', NOW(), NULL)
-    """)
 
-    # Define a multi-statement SQL with named parameters
-    named_param_sql = """
-    UPDATE mix_named_param_test
-    SET status = 'updated'
-    WHERE status = 'active';
+PARAM_TEST_POSITIONAL_SQL = """
+insert into param_test (name, status, created_date)
+values ('item1', 'active', %s);
 
-    UPDATE mix_named_param_test
-    SET expire_date = %(today)s
-    WHERE status = 'pending';
+insert into param_test (name, status, created_date, modified_date)
+values ('item2', 'pending', %s, %s);
 
-    UPDATE mix_named_param_test
-    SET expire_date = %(future)s
-    WHERE status = 'inactive';
+update param_test
+set status = 'approved', modified_date = %s
+where name = 'item1';
+"""
+
+PARAM_TEST_NAMED_SQL = """
+insert into param_test (name, status, created_date)
+values ('item1', 'active', %(yesterday)s);
+
+insert into param_test (name, status, created_date, modified_date)
+values ('item2', 'pending', %(yesterday)s, %(today)s);
+
+update param_test
+set status = 'approved', modified_date = %(today)s
+where name = 'item1';
+"""
+
+
+@pytest.mark.parametrize(('batch_sql', 'params'), [
+    (PARAM_TEST_POSITIONAL_SQL, (YESTERDAY, YESTERDAY, TODAY, TODAY)),
+    (PARAM_TEST_NAMED_SQL, ({'yesterday': YESTERDAY, 'today': TODAY},)),
+    ], ids=['positional', 'named'])
+def test_multi_statement_values_bind_per_statement(
+        psql_docker, pg_conn, batch_sql, params):
+    """Verify values across a parameterized batch bind to their own statements.
+
+    Mutation: every statement given all values, or a wrong positional offset.
+    Oracle: hand-written dates; a one-off shift puts TODAY in created_date.
     """
-
-    # Execute with named parameters in a transaction
-    with db.transaction(pg_conn) as tx:
-        tx.execute(named_param_sql, {'today': today, 'future': future_date})
-
-    # Verify the named parameter results
-    named_result = db.select(pg_conn, """
-    SELECT name, status, expire_date
-    FROM mix_named_param_test
-    ORDER BY name
-    """)
-
-    assert len(named_result) == 3, 'Should have 3 rows with named parameters'
-
-    named_item1 = next((r for r in named_result if r['name'] == 'item1'), None)
-    named_item2 = next((r for r in named_result if r['name'] == 'item2'), None)
-    named_item3 = next((r for r in named_result if r['name'] == 'item3'), None)
-
-    assert named_item1['status'] == 'updated', "item1 should have status 'updated'"
-    assert named_item2['expire_date'] == today, "item2 should have today's date"
-    assert named_item3['expire_date'] == future_date, 'item3 should have future date'
-
-    # Verify the results
-    result = db.select(pg_conn, """
-    SELECT name, status, expire_date FROM mix_param_test ORDER BY name
-    """)
-
-    # Check that the operations were performed
-    assert len(result) == 3, 'Should have 3 rows'
-
-    # Find each item in results
-    item1 = next((r for r in result if r['name'] == 'item1'), None)
-    item2 = next((r for r in result if r['name'] == 'item2'), None)
-    item3 = next((r for r in result if r['name'] == 'item3'), None)
-
-    assert item1 is not None, 'item1 should exist'
-    assert item2 is not None, 'item2 should exist'
-    assert item3 is not None, 'item3 should exist'
-
-    # Check status update (non-parameterized statement)
-    assert item1['status'] == 'updated', "item1 should have status 'updated'"
-
-    # Check date updates (parameterized statements)
-    assert item2['expire_date'] == today, "item2 should have today's date"
-    assert item3['expire_date'] == future_date, 'item3 should have future date'
-
-    # SECTION 3: COMPREHENSIVE STATEMENT MATRIX TESTING IN TRANSACTIONS
-    # Create test table
     db.execute(pg_conn, """
-    CREATE TEMPORARY TABLE tx_matrix_test (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        category TEXT,
-        value INTEGER,
-        created_at TIMESTAMP DEFAULT NOW()
-    )
-    """)
+create temporary table param_test (
+    id serial primary key,
+    name text not null,
+    status text not null,
+    created_date date,
+    modified_date date
+)
+""")
+    with db.transaction(pg_conn) as tx:
+        tx.execute(batch_sql, *params)
 
-    # Test values
-    test_value = 100
-    test_category = 'param-category'
+    result = db.select(pg_conn, """
+select name, status, created_date, modified_date
+from param_test
+order by name
+""")
+    assert [
+        (r['name'], r['status'], r['created_date'], r['modified_date'])
+        for r in result
+        ] == [
+        ('item1', 'approved', YESTERDAY, TODAY),
+        ('item2', 'pending', YESTERDAY, TODAY),
+        ]
 
-    # CASE 1: INSERTs with no parameters
+
+MIX_PARAM_POSITIONAL_SQL = """
+update mix_param_test
+set status = 'updated'
+where status = 'active';
+
+update mix_param_test
+set expire_date = %s
+where status = 'pending';
+
+update mix_param_test
+set expire_date = %s
+where status = 'inactive';
+"""
+
+MIX_PARAM_NAMED_SQL = """
+update mix_param_test
+set status = 'updated'
+where status = 'active';
+
+update mix_param_test
+set expire_date = %(today)s
+where status = 'pending';
+
+update mix_param_test
+set expire_date = %(future)s
+where status = 'inactive';
+"""
+
+
+@pytest.mark.parametrize(('batch_sql', 'params'), [
+    (MIX_PARAM_POSITIONAL_SQL, (TODAY, NEXT_MONTH)),
+    (MIX_PARAM_NAMED_SQL, ({'today': TODAY, 'future': NEXT_MONTH},)),
+    ], ids=['positional', 'named'])
+def test_multi_statement_mixes_bound_and_bare_statements(
+        psql_docker, pg_conn, batch_sql, params):
+    """Verify a batch runs a statement with no placeholder among bound ones.
+
+    Mutation: skipping, or binding values to, the bare leading statement.
+    Oracle: hand-written status and dates per row.
+    """
+    db.execute(pg_conn, """
+create temporary table mix_param_test (
+    id serial primary key,
+    name text not null,
+    status text not null,
+    last_updated timestamp,
+    expire_date date
+)
+""")
+    db.execute(pg_conn, """
+insert into mix_param_test (name, status, last_updated, expire_date) values
+('item1', 'active', now(), null),
+('item2', 'pending', now(), null),
+('item3', 'inactive', now(), null)
+""")
+    with db.transaction(pg_conn) as tx:
+        tx.execute(batch_sql, *params)
+
+    result = db.select(
+        pg_conn, 'select name, status, expire_date from mix_param_test order by name')
+    assert [(r['name'], r['status'], r['expire_date']) for r in result] == [
+        ('item1', 'updated', None),
+        ('item2', 'pending', TODAY),
+        ('item3', 'inactive', NEXT_MONTH),
+        ]
+
+
+def test_multi_statement_matrix(psql_docker, pg_conn):
+    """Verify batches with every mix of bound and bare statements.
+
+    Mutation: values misaligned after a bare statement, or a dropped statement.
+    Oracle: hand-computed rows after each batch.
+    """
+    db.execute(pg_conn, """
+create temporary table tx_matrix_test (
+    id serial primary key,
+    name text not null,
+    category text,
+    value integer,
+    created_at timestamp default now()
+)
+""")
+
+    def values_where(condition, *args):
+        sql = f'select name, value from tx_matrix_test where {condition} order by id'
+        rows = db.select(pg_conn, sql, *args)
+        return {r['name']: r['value'] for r in rows}
+
     with db.transaction(pg_conn) as tx:
         tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-no-param-1', 'fixed', 101);
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-no-param-2', 'fixed', 102);
-        """)
+insert into tx_matrix_test (name, category, value) values ('tx-no-param-1', 'fixed', 101);
+insert into tx_matrix_test (name, category, value) values ('tx-no-param-2', 'fixed', 102);
+""")
+    assert values_where("category = 'fixed'") == {
+        'tx-no-param-1': 101, 'tx-no-param-2': 102}
 
-    # Verify case 1
-    no_param_results = db.select(pg_conn, "SELECT * FROM tx_matrix_test WHERE category = 'fixed'")
-    assert len(no_param_results) == 2
-
-    # CASE 2: INSERTs with all parameters
     with db.transaction(pg_conn) as tx:
         tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-all-param-1', %s, %s);
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-all-param-2', %s, %s);
-        """, test_category, test_value, test_category, test_value * 2)
+insert into tx_matrix_test (name, category, value) values ('tx-all-param-1', %s, %s);
+insert into tx_matrix_test (name, category, value) values ('tx-all-param-2', %s, %s);
+""", 'param-category', 100, 'param-category', 200)
+    assert values_where('category = %s', 'param-category') == {
+        'tx-all-param-1': 100, 'tx-all-param-2': 200}
 
-    # Verify case 2
-    all_param_results = db.select(pg_conn, 'SELECT * FROM tx_matrix_test WHERE category = %s', test_category)
-    assert len(all_param_results) == 2
-    assert all_param_results[0]['value'] == test_value
-    assert all_param_results[1]['value'] == test_value * 2
-
-    # CASE 3: Mixed INSERTs (some with parameters, some without)
     with db.transaction(pg_conn) as tx:
         tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-mixed-1', 'mixed-fixed', 201);
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-mixed-2', %s, %s);
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-mixed-3', 'mixed-fixed', 203);
-        """, 'mixed-params', 202)
+insert into tx_matrix_test (name, category, value) values ('tx-mixed-1', 'mixed-fixed', 201);
+insert into tx_matrix_test (name, category, value) values ('tx-mixed-2', %s, %s);
+insert into tx_matrix_test (name, category, value) values ('tx-mixed-3', 'mixed-fixed', 203);
+""", 'mixed-params', 202)
+    assert values_where("name like 'tx-mixed-%'") == {
+        'tx-mixed-1': 201, 'tx-mixed-2': 202, 'tx-mixed-3': 203}
 
-    # Verify case 3
-    mixed_results = db.select(pg_conn, "SELECT * FROM tx_matrix_test WHERE name LIKE 'tx-mixed-%' ORDER BY name")
-    assert len(mixed_results) == 3
-    values = {r['name']: r['value'] for r in mixed_results}
-    assert values['tx-mixed-1'] == 201
-    assert values['tx-mixed-2'] == 202
-    assert values['tx-mixed-3'] == 203
-
-    # CASE 4: Complex UPDATE-DELETE-INSERT chain with parameter variations
     with db.transaction(pg_conn) as tx:
-        # This includes:
-        # 1. A parameter-less INSERT
-        # 2. A parameterized INSERT
-        # 3. A parameter-less UPDATE
-        # 4. A parameterized UPDATE
-        # 5. A parameter-less DELETE
-        # 6. A parameterized DELETE
-        result = tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-chain-1', 'chain', 301);
-        INSERT INTO tx_matrix_test (name, category, value) VALUES ('tx-chain-2', 'chain', %s);
-        UPDATE tx_matrix_test SET value = 311 WHERE name = 'tx-chain-1';
-        UPDATE tx_matrix_test SET value = %s WHERE name = 'tx-chain-2';
-        DELETE FROM tx_matrix_test WHERE name = 'tx-no-param-1';
-        DELETE FROM tx_matrix_test WHERE value = %s;
-        """, 302, 320, test_value)
+        tx.execute("""
+insert into tx_matrix_test (name, category, value) values ('tx-chain-1', 'chain', 301);
+insert into tx_matrix_test (name, category, value) values ('tx-chain-2', 'chain', %s);
+update tx_matrix_test set value = 311 where name = 'tx-chain-1';
+update tx_matrix_test set value = %s where name = 'tx-chain-2';
+delete from tx_matrix_test where name = 'tx-no-param-1';
+delete from tx_matrix_test where value = %s;
+""", 302, 320, 100)
+    assert values_where("category = 'chain'") == {'tx-chain-1': 311, 'tx-chain-2': 320}
+    assert values_where("name = 'tx-no-param-1' or value = 100") == {}
 
-    # Verify case 4 results
-    chain_results = db.select(pg_conn, "SELECT * FROM tx_matrix_test WHERE category = 'chain'")
-    assert len(chain_results) == 2
-
-    # Check updates were applied
-    values = {r['name']: r['value'] for r in chain_results}
-    assert values['tx-chain-1'] == 311  # Updated with static value
-    assert values['tx-chain-2'] == 320  # Updated with parameter
-
-    # Check deletes were applied
-    assert db.select_row_or_none(pg_conn, "SELECT * FROM tx_matrix_test WHERE name = 'tx-no-param-1'") is None
-    assert db.select_row_or_none(pg_conn, 'SELECT * FROM tx_matrix_test WHERE value = %s', test_value) is None
-
-    # CASE 5: Transaction with complex multi-statement INSERT/UPDATE/DELETE mix with RETURNING
-    param_value = 500
     with db.transaction(pg_conn) as tx:
-        # Execute first INSERT with RETURNING clause to get id1
         id1 = tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value)
-        VALUES ('return-test-1', 'return-cat', %s)
-        RETURNING id
-        """, param_value, returnid='id')
-
-        # Execute second INSERT with RETURNING clause to get id2
+insert into tx_matrix_test (name, category, value)
+values ('return-test-1', 'return-cat', %s)
+returning id
+""", 500, returnid='id')
         id2 = tx.execute("""
-        INSERT INTO tx_matrix_test (name, category, value)
-        VALUES ('return-test-2', 'return-cat', 502)
-        RETURNING id
-        """, returnid='id')
-
-        # Execute remaining statements that don't need to return values
+insert into tx_matrix_test (name, category, value)
+values ('return-test-2', 'return-cat', 502)
+returning id
+""", returnid='id')
         tx.execute("""
-        UPDATE tx_matrix_test SET value = value + 10 WHERE category = 'return-cat';
-        DELETE FROM tx_matrix_test WHERE name = 'tx-mixed-1';
-        UPDATE tx_matrix_test SET value = %s WHERE id IN (
-            SELECT id FROM tx_matrix_test WHERE category = 'return-cat' LIMIT 1
-        );
-        """, 600)
+update tx_matrix_test set value = value + 10 where category = 'return-cat';
+delete from tx_matrix_test where name = 'tx-mixed-1';
+update tx_matrix_test set value = %s where id in (
+    select id from tx_matrix_test where category = 'return-cat' limit 1
+);
+""", 600)
 
-    # Verify case 5
-    assert id1 is not None
-    assert isinstance(id1, int)
-    assert id2 is not None
-    assert isinstance(id2, int)
-
-    # Verify all statements were executed
-    return_results = db.select(pg_conn, """
-        SELECT * FROM tx_matrix_test WHERE category = 'return-cat' ORDER BY id
-    """)
-
-    # There should be two rows
-    assert len(return_results) == 2
-
-    # At least one should have value 600 (from the UPDATE with parameter)
-    assert any(r['value'] == 600 for r in return_results)
-
-    # The tx-mixed-1 record should be deleted
-    assert db.select_row_or_none(pg_conn, "SELECT * FROM tx_matrix_test WHERE name = 'tx-mixed-1'") is None
+    assert id2 == id1 + 1
+    assert values_where("category = 'return-cat'") in (
+        {'return-test-1': 600, 'return-test-2': 512},
+        {'return-test-1': 510, 'return-test-2': 600},
+        )
+    assert values_where("name = 'tx-mixed-1'") == {}
 
 
 if __name__ == '__main__':

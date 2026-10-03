@@ -1,22 +1,19 @@
-"""
-Database-agnostic tests for auto-commit functionality.
-
-These tests run against both PostgreSQL and SQLite to verify
-consistent auto-commit behavior across database backends.
+"""Auto-commit state of a new connection, on PostgreSQL and SQLite.
 """
 import pytest
 from database.transaction import diagnose_connection
 
 
-class TestAutoCommitBasics:
-    """Tests for basic auto-commit functionality."""
+def test_new_connection_auto_commits_outside_a_transaction(db_conn):
+    """Verify a new connection is in auto-commit mode and in no transaction.
 
-    def test_auto_commit_enabled_by_default(self, db_conn):
-        """Test that auto-commit is enabled by default for new connections."""
-        info = diagnose_connection(db_conn)
+    Mutation: auto-commit left off at connect, or in_transaction starting True.
+    Oracle: the driver's own flag, read through diagnose_connection.
+    """
+    info = diagnose_connection(db_conn)
 
-        assert info['auto_commit'] is True, 'Auto-commit should be enabled by default'
-        assert info['in_transaction'] is False, 'Connection should not be in a transaction'
+    assert info['auto_commit'] is True
+    assert info['in_transaction'] is False
 
 
 if __name__ == '__main__':

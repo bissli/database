@@ -1,3 +1,5 @@
+"""RowAdapter and the select helpers over sqlite3.Row rows.
+"""
 import database as db
 import pytest
 from database.exceptions import ValidationError
@@ -5,72 +7,69 @@ from database.types import RowAdapter
 
 
 def test_sqlite_row_adapter(sl_conn):
-    """Test SQLite row adapter functionality"""
-    # Fetch a row directly using the SQLite cursor
+    """Verify RowAdapter reads a sqlite3.Row by key, by position and as attrs.
+
+    Mutation: get_value() returning the last column, or to_dict losing names.
+    Oracle: the staged row for Alice, id 1 in the first column.
+    """
     cursor = sl_conn.cursor()
-    cursor.execute("SELECT * FROM test_table WHERE name = 'Alice'")
-    sqlite_row = cursor.fetchone()
+    cursor.execute("select * from test_table where name = 'Alice'")
+    adapter = RowAdapter.create(sl_conn, cursor.fetchone())
 
-    # Use the adapter
-    adapter = RowAdapter.create(sl_conn, sqlite_row)
-
-    # Test to_dict
     row_dict = adapter.to_dict()
     assert row_dict['name'] == 'Alice'
     assert row_dict['value'] == 10
-
-    # Test get_value with specific key
     assert adapter.get_value('name') == 'Alice'
-
-    # Test get_value without key (should return first value)
-    assert adapter.get_value() == 1  # id column
-
-    # Test to_attrdict
+    assert adapter.get_value() == 1
     attr_dict = adapter.to_attrdict()
     assert attr_dict.name == 'Alice'
     assert attr_dict.value == 10
 
 
 def test_sqlite_adapter_in_select_column(sl_conn):
-    """Test adapter is used properly in select_column"""
-    # Get a column using select_column
-    names = db.select_column(sl_conn, 'SELECT name FROM test_table ORDER BY id')
+    """Verify select_column returns the first column of every row.
+
+    Mutation: select_column returning whole rows, or only the first row.
+    Oracle: the staged names and values, in id order.
+    """
+    names = db.select_column(sl_conn, 'select name from test_table order by id')
     assert names == ['Alice', 'Bob', 'Charlie']
 
-    # Get a column with just one value
-    name = db.select_column(sl_conn, 'SELECT name FROM test_table WHERE id = 1')
+    name = db.select_column(sl_conn, 'select name from test_table where id = 1')
     assert name == ['Alice']
 
-    # Get a numeric column
-    values = db.select_column(sl_conn, 'SELECT value FROM test_table ORDER BY id')
+    values = db.select_column(sl_conn, 'select value from test_table order by id')
     assert values == [10, 20, 30]
 
 
 def test_sqlite_adapter_in_select_scalar(sl_conn):
-    """Test adapter is used properly in select_scalar"""
-    # Get a scalar value
-    name = db.select_scalar(sl_conn, 'SELECT name FROM test_table WHERE id = 1')
+    """Verify select_scalar returns one value and raises on no row.
+
+    Mutation: select_scalar returning None on no row in place of raising.
+    Oracle: the staged row with id 1, and an id no row carries.
+    """
+    name = db.select_scalar(sl_conn, 'select name from test_table where id = 1')
     assert name == 'Alice'
 
-    # Get a numeric scalar
-    value = db.select_scalar(sl_conn, 'SELECT value FROM test_table WHERE id = 1')
+    value = db.select_scalar(sl_conn, 'select value from test_table where id = 1')
     assert value == 10
 
-    # Test with no results should fail with validation error
     with pytest.raises(ValidationError):
-        db.select_scalar(sl_conn, 'SELECT name FROM test_table WHERE id = 999')
+        db.select_scalar(sl_conn, 'select name from test_table where id = 999')
 
 
 def test_sqlite_adapter_in_select_row(sl_conn):
-    """Test adapter is used properly in select_row"""
-    # Get a row
-    row = db.select_row(sl_conn, 'SELECT * FROM test_table WHERE id = 1')
+    """Verify select_row returns one row by attribute and raises on no row.
+
+    Mutation: select_row returning None on no row in place of raising.
+    Oracle: the staged row with id 1, and an id no row carries.
+    """
+    row = db.select_row(sl_conn, 'select * from test_table where id = 1')
     assert row.name == 'Alice'
     assert row.value == 10
 
-    # Test with no results should fail with validation error
     with pytest.raises(ValidationError):
-        db.select_row(sl_conn, 'SELECT * FROM test_table WHERE id = 999')
+        db.select_row(sl_conn, 'select * from test_table where id = 999')
 
 
 if __name__ == '__main__':

@@ -1,199 +1,131 @@
-"""
-Integration tests for PostgreSQL date string handling in CASE expressions.
+"""A to_char result named 'date' keeps its str type on PostgreSQL.
 """
 import datetime
-import logging
 
 import database as db
-import pandas as pd
+import pytest
 from database.options import iterdict_data_loader
 from database.types import Column
 
-logger = logging.getLogger(__name__)
 
-
-def debug_data_loader(data, columns, **kwargs) -> pd.DataFrame:
+def date_is_str_data_loader(data, columns, **kwargs):
+    """iterdict_data_loader that first asserts 'date' type and value are str.
     """
-    Custom data loader that inspects column types and logs info about the 'date' column.
-
-    This verifies that the date column is properly handled as a string by the database driver
-    and type resolution system, rather than being converted to a datetime type.
-    """
-    # Extract column info for debugging
     column_names = Column.get_names(columns)
     column_types = Column.get_types(columns)
+    date_idx = next(
+        (i for i, name in enumerate(column_names) if name.lower() == 'date'), None)
 
-    # Find the 'date' column
-    date_column_index = None
-    for i, name in enumerate(column_names):
-        if name.lower() == 'date':
-            date_column_index = i
-            break
+    if date_idx is not None:
+        python_type = column_types[date_idx]
+        assert python_type is str, (
+            f"Expected 'date' column to be str, but got {python_type.__name__}")
+        name = columns[date_idx].name
+        if data and isinstance(data[0], dict) and name in data[0]:
+            value_type = type(data[0][name])
+            assert value_type is str, (
+                f'Expected date value to be str, but got {value_type.__name__}')
 
-    # Log information about the 'date' column
-    if date_column_index is not None:
-        python_type = column_types[date_column_index]
-        col_info = columns[date_column_index]
-
-        logger.info(f'Date column info: name={col_info.name}, type_code={col_info.type_code}, python_type={python_type}')
-
-        # Check that the date column's Python type is a string
-        assert python_type == str, f"Expected 'date' column to be str, but got {python_type.__name__}"
-
-        # Also verify the first row's value is a string (if data exists)
-        if data and len(data) > 0:
-            first_row = data[0]
-            if isinstance(first_row, dict) and col_info.name in first_row:
-                date_value = first_row[col_info.name]
-                logger.info(f'First row date value: {date_value} (type: {type(date_value).__name__})')
-                assert isinstance(date_value, str), f'Expected date value to be str, but got {type(date_value).__name__}'
-
-    # Pass through to regular pandas loader
     return iterdict_data_loader(data, columns, **kwargs)
 
 
-def test_postgres_date_string_positional(psql_docker, pg_conn):
-    """Test PostgreSQL properly handles date columns that are named 'date'
-    and date values cast to strings using positional parameters
+@pytest.fixture
+def event_dates(pg_conn):
+    """Dates stored in date_test, read through date_is_str_data_loader.
     """
-    # Set custom data loader
+    today = datetime.date.today()
+    one_day = datetime.timedelta(days=1)
+    dates = (today - one_day, today, today + one_day)
+
+    db.execute(pg_conn, 'drop table if exists date_test')
+    db.execute(pg_conn,
+               'create table date_test (id serial primary key, event_date date)')
+    db.execute(pg_conn, 'insert into date_test (event_date) values (%s), (%s), (%s)',
+               *dates)
+
     original_data_loader = pg_conn.options.data_loader
-    pg_conn.options.data_loader = debug_data_loader
-
+    pg_conn.options.data_loader = date_is_str_data_loader
     try:
-        # Create a test table for date operations
-        with db.transaction(pg_conn) as tx:
-            # Drop table if it exists
-            tx.execute('DROP TABLE IF EXISTS date_test')
-
-            # Create a simple table with a date column
-            tx.execute("""
-            CREATE TABLE date_test (
-                id SERIAL PRIMARY KEY,
-                event_date DATE
-            )
-            """)
-
-            # Insert some test dates
-            today = datetime.date.today()
-            yesterday = today - datetime.timedelta(days=1)
-            tomorrow = today + datetime.timedelta(days=1)
-
-            tx.execute("""
-            INSERT INTO date_test (event_date) VALUES
-            (%s), (%s), (%s)
-            """, today, yesterday, tomorrow)
-
-            # Query with a CASE statement that converts dates to strings using positional parameters
-            positional_query = """
-            SELECT
-                (CASE
-                    WHEN event_date >= date_trunc('day', %s) AND event_date < date_trunc('day', %s)
-                        THEN to_char(%s, 'YYYY-MM-DD')
-                    WHEN event_date >= date_trunc('day', %s) AND event_date < date_trunc('day', %s)
-                        THEN to_char(%s, 'YYYY-MM-DD')
-                    WHEN event_date BETWEEN date_trunc('day', %s) AND %s
-                        THEN to_char(%s, 'YYYY-MM-DD')
-                    ELSE 'unknown'
-                END) AS date,
-                COUNT(*) as count,
-                MAX(event_date) as actual_date
-            FROM date_test
-            GROUP BY 1
-            ORDER BY date
-            """
-
-            rows = tx.select(positional_query,
-                             yesterday, today, yesterday,
-                             today, tomorrow, today,
-                             tomorrow, tomorrow, tomorrow)
-
-            # Verify we got the expected results
-            assert len(rows) == 3
-
-            # All results should be strings (not date objects)
-            for row in rows:
-                assert isinstance(row['date'], str)
-                assert isinstance(row['count'], int)
-                assert isinstance(row['actual_date'], datetime.date)  # This column should be a date object
-                assert len(row['date']) == 10  # YYYY-MM-DD format is 10 chars
+        yield dates
     finally:
-        # Restore original data loader
         pg_conn.options.data_loader = original_data_loader
 
 
-def test_postgres_date_string_named(psql_docker, pg_conn):
-    """Test PostgreSQL properly handles date columns that are named 'date'
-    and date values cast to strings using named parameters
+def test_postgres_date_string_positional(psql_docker, pg_conn, event_dates):
+    """Verify a to_char column named 'date' reads as str, positional binding.
+
+    Mutation: resolving a column's Python type from its name.
+    Oracle: each stored date, formatted by hand with isoformat().
     """
-    # Set custom data loader
-    original_data_loader = pg_conn.options.data_loader
-    pg_conn.options.data_loader = debug_data_loader
+    yesterday, today, tomorrow = event_dates
+    positional_query = """
+select
+    (case
+        when event_date >= date_trunc('day', %s) and event_date < date_trunc('day', %s)
+            then to_char(%s, 'YYYY-MM-DD')
+        when event_date >= date_trunc('day', %s) and event_date < date_trunc('day', %s)
+            then to_char(%s, 'YYYY-MM-DD')
+        when event_date between date_trunc('day', %s) and %s
+            then to_char(%s, 'YYYY-MM-DD')
+        else 'unknown'
+    end) as date,
+    count(*) as count,
+    max(event_date) as actual_date
+from date_test
+group by 1
+order by date
+"""
+    with db.transaction(pg_conn) as tx:
+        rows = tx.select(positional_query,
+                         yesterday, today, yesterday,
+                         today, tomorrow, today,
+                         tomorrow, tomorrow, tomorrow)
 
-    try:
-        # Create a test table for date operations
-        with db.transaction(pg_conn) as tx:
-            # Drop table if it exists
-            tx.execute('DROP TABLE IF EXISTS date_test')
+    assert [(row['date'], row['count'], row['actual_date']) for row in rows] == [
+        (day.isoformat(), 1, day) for day in event_dates]
+    assert all(type(row['count']) is int for row in rows)
 
-            # Create a simple table with a date column
-            tx.execute("""
-            CREATE TABLE date_test (
-                id SERIAL PRIMARY KEY,
-                event_date DATE
-            )
-            """)
 
-            # Insert some test dates
-            today = datetime.date.today()
-            yesterday = today - datetime.timedelta(days=1)
-            tomorrow = today + datetime.timedelta(days=1)
+def test_postgres_date_string_named(psql_docker, pg_conn, event_dates):
+    """Verify a to_char column named 'date' reads as str, named binding.
 
-            tx.execute("""
-            INSERT INTO date_test (event_date) VALUES
-            (%s), (%s), (%s)
-            """, today, yesterday, tomorrow)
-
-            # Query with a CASE statement that converts dates to strings using named parameters
-            named_query = """
-            SELECT
-                (CASE
-                    WHEN event_date >= date_trunc('day', %(yesterday)s) AND event_date < date_trunc('day', %(today)s)
-                        THEN to_char(%(yesterday)s, 'YYYY-MM-DD')
-                    WHEN event_date >= date_trunc('day', %(today)s) AND event_date < date_trunc('day', %(tomorrow)s)
-                        THEN to_char(%(today)s, 'YYYY-MM-DD')
-                    WHEN event_date BETWEEN date_trunc('day', %(tomorrow)s) AND %(tomorrow)s
-                        THEN to_char(%(tomorrow)s, 'YYYY-MM-DD')
-                    ELSE 'unknown'
-                END) AS date,
-                'TestType' as type,
-                SUM(CASE WHEN event_date = %(ref_date)s THEN 2 ELSE 1 END) as count,
-                event_date as actual_date
-            FROM date_test
-            GROUP BY 1, 2, 4
-            ORDER BY date, type
-            """
-
-            # Using named parameters only
-            named_rows = tx.select(named_query, {
-                'yesterday': yesterday,
-                'today': today,
-                'tomorrow': tomorrow,
-                'ref_date': today
+    Mutation: resolving a column's Python type from its name.
+    Oracle: isoformat() dates, and a count of 2 only on ref_date's row.
+    """
+    yesterday, today, tomorrow = event_dates
+    named_query = """
+select
+    (case
+        when event_date >= date_trunc('day', %(yesterday)s) and event_date < date_trunc('day', %(today)s)
+            then to_char(%(yesterday)s, 'YYYY-MM-DD')
+        when event_date >= date_trunc('day', %(today)s) and event_date < date_trunc('day', %(tomorrow)s)
+            then to_char(%(today)s, 'YYYY-MM-DD')
+        when event_date between date_trunc('day', %(tomorrow)s) and %(tomorrow)s
+            then to_char(%(tomorrow)s, 'YYYY-MM-DD')
+        else 'unknown'
+    end) as date,
+    'TestType' as type,
+    sum(case when event_date = %(ref_date)s then 2 else 1 end) as count,
+    event_date as actual_date
+from date_test
+group by 1, 2, 4
+order by date, type
+"""
+    with db.transaction(pg_conn) as tx:
+        rows = tx.select(named_query, {
+            'yesterday': yesterday,
+            'today': today,
+            'tomorrow': tomorrow,
+            'ref_date': today,
             })
 
-            # Verify results
-            assert len(named_rows) == 3
-
-            # All date values should be strings, not date objects
-            for row in named_rows:
-                assert isinstance(row['date'], str)
-                assert isinstance(row['type'], str)
-                assert isinstance(row['count'], int)
-                assert isinstance(row['actual_date'], datetime.date)  # This column should be a date object
-    finally:
-        # Restore original data loader
-        pg_conn.options.data_loader = original_data_loader
+    assert [(row['date'], row['type'], row['count'], row['actual_date'])
+            for row in rows] == [
+        (yesterday.isoformat(), 'TestType', 1, yesterday),
+        (today.isoformat(), 'TestType', 2, today),
+        (tomorrow.isoformat(), 'TestType', 1, tomorrow),
+        ]
+    assert all(type(row['count']) is int for row in rows)
 
 
 if __name__ == '__main__':

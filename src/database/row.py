@@ -1,4 +1,4 @@
-"""Row factory implementations for dictionary-like cursor results."""
+"""psycopg row factory returning dict rows."""
 from numbers import Number
 from typing import Any
 
@@ -6,34 +6,37 @@ from database.types import postgres_types
 
 
 class DictRowFactory:
-    """Row factory for psycopg that returns dictionary-like rows.
+    """psycopg row factory that returns each row as a dict.
 
-    This factory is used with PostgreSQL connections to convert cursor results
-    into dictionaries, with automatic type casting for numeric values based
-    on PostgreSQL type codes.
+    Parameters
+    ----------
+    cursor : Any
+        A psycopg cursor. A None description yields empty rows.
     """
 
     def __init__(self, cursor: Any) -> None:
-        """Initialize with cursor to extract column metadata.
-
-        Args:
-            cursor: Database cursor with description attribute
-        """
         self.fields = [
             (c.name, postgres_types.get(c.type_code))
             for c in (cursor.description or [])
         ]
 
     def __call__(self, values: tuple) -> dict:
-        """Convert a row tuple to a dictionary.
+        """Row dict keyed by column name, in cursor order.
 
-        Args:
-            values: Tuple of column values from cursor
+        Parameters
+        ----------
+        values : tuple
+            Column values in cursor order.
 
         Returns
-            Dictionary mapping column names to values
+        -------
+        dict
+            A Number cast to its column's postgres_types entry, so a
+            numeric Decimal arrives as float. Other values, None included,
+            and columns with no entry pass through uncast.
         """
         return {
-            name: cast(value) if isinstance(value, Number) and cast is not None else value
+            name: cast(value)
+            if isinstance(value, Number) and cast is not None else value
             for (name, cast), value in zip(self.fields, values)
         }

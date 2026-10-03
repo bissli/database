@@ -1,187 +1,66 @@
-"""
-Database-agnostic tests for transaction operations.
-
-These tests run against both PostgreSQL and SQLite to verify
-consistent transaction behavior across database backends.
+"""Transactions on both backends; db_conn stages Alice 10, Bob 20, Charlie 30.
 """
 import database as db
 import pytest
 from tests.integration.common.conftest import row
 
-
-class TestTransactionBasics:
-    """Tests for basic transaction functionality."""
-
-    def test_transaction_commits_on_normal_exit(self, db_conn, dialect):
-        """Test that transaction commits when exiting normally."""
-        # Create a test table for this test
-        table_name = 'tx_test_commit'
-        if dialect == 'postgresql':
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id SERIAL PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-        else:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id INTEGER PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-
-        try:
-            # Use transaction to insert data
-            with db.transaction(db_conn) as tx:
-                tx.execute(f"INSERT INTO {table_name} (data) VALUES ('committed')")
-                assert db_conn.in_transaction is True
-
-            # Verify connection is no longer in transaction
-            assert db_conn.in_transaction is False
-
-            # Verify data was committed
-            count = db.select_scalar(db_conn, f'SELECT COUNT(*) FROM {table_name}')
-            assert count == 1
-        finally:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-
-    def test_transaction_rollback_on_exception(self, db_conn, dialect):
-        """Test that transaction rolls back on exception."""
-        table_name = 'tx_test_rollback'
-        if dialect == 'postgresql':
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id SERIAL PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-        else:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id INTEGER PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-
-        try:
-            # Transaction that raises an exception
-            with pytest.raises(ValueError):
-                with db.transaction(db_conn) as tx:
-                    tx.execute(f"INSERT INTO {table_name} (data) VALUES ('should_rollback')")
-                    raise ValueError('Test rollback')
-
-            # Verify no data was committed
-            count = db.select_scalar(db_conn, f'SELECT COUNT(*) FROM {table_name}')
-            assert count == 0
-        finally:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
+INSERT_SQL = 'insert into test_table (name, value) values (%s, %s)'
 
 
-class TestTransactionSelect:
-    """Tests for SELECT operations within transactions."""
+def test_clean_exit_commits_every_statement(db_conn):
+    """Verify a clean block commits its writes and flags only its inside.
 
-    def test_transaction_select(self, db_conn):
-        """Test SELECT within a transaction."""
+    Mutation: __exit__ skipping the commit, or leaving in_transaction set.
+    Oracle: a raw rollback after the block; hand-computed final rows.
+    """
+    with db.transaction(db_conn) as tx:
+        tx.execute(INSERT_SQL, 'Dana', 40)
+        tx.execute('update test_table set value = %s where name = %s', 99, 'Alice')
+        tx.execute('delete from test_table where name = %s', 'Charlie')
+        assert db_conn.in_transaction is True
+
+    assert db_conn.in_transaction is False
+    db_conn.dbapi_connection.rollback()
+
+    names = db.select_column(db_conn, 'select name from test_table order by name')
+    values = db.select_column(db_conn, 'select value from test_table order by name')
+    assert names == ['Alice', 'Bob', 'Dana']
+    assert values == [99, 20, 40]
+
+
+def test_exception_rolls_back_and_propagates(db_conn):
+    """Verify an exception in the block discards its writes and escapes.
+
+    Mutation: __exit__ committing on an exception, or auto-commit left on.
+    Oracle: the three staged rows, unchanged after the failed block.
+    """
+    with pytest.raises(ValueError, match='boom'):
         with db.transaction(db_conn) as tx:
-            result = tx.select('SELECT * FROM test_table ORDER BY id')
-            assert len(result) == 3
+            tx.execute(INSERT_SQL, 'Dana', 40)
+            raise ValueError('boom')
 
-    def test_transaction_select_with_params(self, db_conn):
-        """Test SELECT with parameters within a transaction."""
-        with db.transaction(db_conn) as tx:
-            result = tx.select('SELECT * FROM test_table WHERE name = %s', 'Alice')
-            assert len(result) == 1
-            assert row(result, 0)['name'] == 'Alice'
-
-    def test_transaction_select_row(self, db_conn):
-        """Test select_row within a transaction."""
-        with db.transaction(db_conn) as tx:
-            row = tx.select_row("SELECT * FROM test_table WHERE name = 'Bob'")
-            assert row.name == 'Bob'
-            assert row.value == 20
-
-    def test_transaction_select_scalar(self, db_conn):
-        """Test select_scalar within a transaction."""
-        with db.transaction(db_conn) as tx:
-            count = tx.select_scalar('SELECT COUNT(*) FROM test_table')
-            assert count == 3
+    assert db_conn.in_transaction is False
+    assert db.select_scalar(db_conn, 'select count(*) from test_table') == 3
 
 
-class TestTransactionModifications:
-    """Tests for data modification within transactions."""
+def test_select_helpers_see_the_blocks_own_writes(db_conn):
+    """Verify each select helper reads the block's uncommitted writes.
 
-    def test_transaction_insert(self, db_conn):
-        """Test INSERT within a transaction."""
-        initial_count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')
+    Mutation: a select helper running outside the block's transaction.
+    Oracle: a row inserted earlier in the same block.
+    """
+    with db.transaction(db_conn) as tx:
+        tx.execute(INSERT_SQL, 'Dana', 40)
 
-        with db.transaction(db_conn) as tx:
-            tx.execute("INSERT INTO test_table (name, value) VALUES ('TxTest', 100)")
-
-        final_count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')
-        assert final_count == initial_count + 1
-
-        # Verify the inserted row
-        row = db.select_row(db_conn, "SELECT * FROM test_table WHERE name = 'TxTest'")
-        assert row.value == 100
-
-    def test_transaction_update(self, db_conn):
-        """Test UPDATE within a transaction."""
-        with db.transaction(db_conn) as tx:
-            tx.execute("UPDATE test_table SET value = 999 WHERE name = 'Alice'")
-
-        # Verify update
-        value = db.select_scalar(db_conn, "SELECT value FROM test_table WHERE name = 'Alice'")
-        assert value == 999
-
-    def test_transaction_delete(self, db_conn):
-        """Test DELETE within a transaction."""
-        initial_count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')
-
-        with db.transaction(db_conn) as tx:
-            tx.execute("DELETE FROM test_table WHERE name = 'Charlie'")
-
-        final_count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')
-        assert final_count == initial_count - 1
-
-    def test_transaction_multiple_operations(self, db_conn, dialect):
-        """Test multiple operations in a single transaction."""
-        table_name = 'tx_multi_ops'
-        if dialect == 'postgresql':
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id SERIAL PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-        else:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
-            db.execute(db_conn, f"""
-                CREATE TABLE {table_name} (
-                    id INTEGER PRIMARY KEY,
-                    data TEXT
-                )
-            """)
-
-        try:
-            with db.transaction(db_conn) as tx:
-                tx.execute(f"INSERT INTO {table_name} (data) VALUES ('first')")
-                tx.execute(f"INSERT INTO {table_name} (data) VALUES ('second')")
-                tx.execute(f"UPDATE {table_name} SET data = 'updated' WHERE data = 'first'")
-
-            # Verify all operations committed
-            count = db.select_scalar(db_conn, f'SELECT COUNT(*) FROM {table_name}')
-            assert count == 2
-
-            updated = db.select_scalar(db_conn, f"SELECT COUNT(*) FROM {table_name} WHERE data = 'updated'")
-            assert updated == 1
-        finally:
-            db.execute(db_conn, f'DROP TABLE IF EXISTS {table_name}')
+        result = tx.select('select name, value from test_table where name = %s', 'Dana')
+        assert len(result) == 1
+        assert row(result, 0)['value'] == 40
+        assert tx.select_column(
+            'select name from test_table where value > %s', 30) == ['Dana']
+        assert tx.select_row("select * from test_table where name = 'Dana'").value == 40
+        assert tx.select_row_or_none(
+            'select * from test_table where name = %s', 'Dana').value == 40
+        assert tx.select_scalar('select count(*) from test_table') == 4
 
 
 if __name__ == '__main__':

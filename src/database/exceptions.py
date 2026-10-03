@@ -1,5 +1,4 @@
-"""
-Database-specific exception classes.
+"""Library exception classes, driver exception groups, and retry rules.
 """
 import re
 import sqlite3
@@ -8,10 +7,8 @@ import psycopg
 import sqlalchemy.exc
 
 RETRYABLE_PATTERNS = [
-    # SSL/TLS errors
     r'ssl',
     r'tls',
-    # Connection drops
     r'connection.*(closed|reset|refused|lost|terminated|broken)',
     r'server closed',
     r'eof detected',
@@ -20,15 +17,12 @@ RETRYABLE_PATTERNS = [
     r'terminating connection',
     r'administrator command',
     r'system is shutting down',
-    # Timeouts
     r'timeout',
     r'timed out',
-    # Network issues
     r'could not connect',
     r'no route to host',
     r'network.*(unreachable|error)',
     r'host.*(unreachable|down)',
-    # Database unavailable
     r'database.*unavailable',
     r'too many connections',
     r'connection pool',
@@ -38,24 +32,18 @@ _RETRYABLE_REGEX = re.compile('|'.join(RETRYABLE_PATTERNS), re.IGNORECASE)
 
 
 def is_retryable_error(exc: BaseException) -> bool:
-    """Check if an exception represents a transient error worth retrying.
+    """True when exc looks transient, so a retry may succeed.
 
-    Returns True for errors that are likely transient and may succeed on retry:
-    - SSL/TLS errors
-    - Connection drops/resets
-    - Timeouts
-    - Network issues
-    - Database temporarily unavailable
+    Parameters
+    ----------
+    exc : BaseException
+        Any exception. A SQLAlchemy wrapper is judged by its orig.
 
-    Returns False for errors that will definitely fail again:
-    - Syntax errors
-    - Type mismatches
-    - Constraint violations
-    - Permission errors
-    - Programming errors
-
-    :param exc: The exception to check.
-    :returns: True if the error is likely transient and worth retrying.
+    Returns
+    -------
+    bool
+        True when exc has connection_invalidated set, or its message
+        matches a RETRYABLE_PATTERNS entry, ignoring case.
     """
     if getattr(exc, 'connection_invalidated', False):
         return True

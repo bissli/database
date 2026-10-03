@@ -31,10 +31,8 @@ def schema_conn():
 def test_list_tables_excludes_internal_tables_and_views(schema_conn):
     """Verify list_tables returns user tables only, ordered by name.
 
-    Mutation: LIKE 'sqlite_%' in place of GLOB 'sqlite_*', which also
-        drops 'sqliteXdata'; or dropping the type filter, which lists the
-        view; or dropping the order by.
-    Oracle: hand-listed tables; AUTOINCREMENT creates 'sqlite_sequence'.
+    Mutation: like 'sqlite_%' for glob 'sqlite_*', or a dropped filter.
+    Oracle: hand-listed tables; autoincrement creates 'sqlite_sequence'.
     """
     assert schema_conn.list_tables() == ['counter', 'price', 'sqliteXdata']
 
@@ -42,8 +40,7 @@ def test_list_tables_excludes_internal_tables_and_views(schema_conn):
 def test_table_exists_matches_tables_by_name_ignoring_case(schema_conn):
     """Verify table_exists finds a table in any case and refuses a view.
 
-    Mutation: dropping 'collate nocase', which misses 'PRICE'; or dropping
-        the type filter, which counts the view.
+    Mutation: dropping 'collate nocase', or dropping the type filter.
     Oracle: SQLite's own rule that identifiers ignore ASCII case.
     """
     assert schema_conn.table_exists('price') is True
@@ -55,8 +52,7 @@ def test_table_exists_matches_tables_by_name_ignoring_case(schema_conn):
 def test_describe_columns_reports_each_declared_column_in_order(schema_conn):
     """Verify describe_columns returns declared columns in declaration order.
 
-    Mutation: ordering by name in place of cid, which puts 'zeta' last;
-        swapping two ColumnInfo fields; or reading pk as the notnull flag.
+    Mutation: ordering by name in place of cid, or swapped ColumnInfo fields.
     Oracle: hand-written records from PRICE_DDL.
     """
     assert schema_conn.describe_columns('price') == [
@@ -70,8 +66,7 @@ def test_describe_columns_reports_each_declared_column_in_order(schema_conn):
 def test_describe_columns_raises_on_a_missing_table(schema_conn):
     """Verify describe_columns refuses a table that does not exist.
 
-    Mutation: dropping the empty-result check, which returns [] for a
-        misspelled table name.
+    Mutation: dropping the empty-result check.
     Oracle: a name no table or view carries.
     """
     with pytest.raises(ValidationError, match='missing'):
@@ -81,12 +76,8 @@ def test_describe_columns_raises_on_a_missing_table(schema_conn):
 def test_get_unique_indexes_lists_each_unique_index_in_column_order(schema_conn):
     """Verify every unique index appears with its columns in index order.
 
-    Mutation: dropping the unique filter, which adds the 'price_note'
-        index; ordering columns by name in place of seqno, which swaps
-        both pairs; or
-        dropping the primary-key index as get_unique_columns does.
-    Oracle: PRICE_DDL, whose primary key and UNIQUE constraint each list
-        their columns out of name order.
+    Mutation: no unique filter, order by name for seqno, or no primary key.
+    Oracle: PRICE_DDL, whose two keys list their columns out of name order.
     """
     assert schema_conn.get_unique_indexes('price') == [
         ['zeta', 'code'],
@@ -95,10 +86,9 @@ def test_get_unique_indexes_lists_each_unique_index_in_column_order(schema_conn)
 
 
 def test_table_ddl_returns_the_create_statement(schema_conn):
-    """Verify table_ddl returns the CREATE TABLE text SQLite stored.
+    """Verify table_ddl returns the create statement SQLite stored.
 
-    Mutation: reading sqlite_master by type 'index', or returning the
-        name column in place of sql.
+    Mutation: reading type 'index', or the name column in place of sql.
     Oracle: PRICE_DDL, the statement that created the table.
     """
     assert schema_conn.table_ddl('price') == PRICE_DDL
@@ -107,8 +97,7 @@ def test_table_ddl_returns_the_create_statement(schema_conn):
 def test_table_ddl_raises_on_a_missing_table(schema_conn):
     """Verify table_ddl refuses a table that does not exist.
 
-    Mutation: returning ddl[0] without the empty check, which raises
-        IndexError instead.
+    Mutation: returning ddl[0] without the empty check.
     Oracle: a name no table carries.
     """
     with pytest.raises(ValidationError, match='missing'):
@@ -119,11 +108,8 @@ def test_table_ddl_raises_on_a_missing_table(schema_conn):
 def test_introspection_reads_a_table_named_like_a_pragma_column(schema_conn, table):
     """Verify a table named after a pragma column is described as itself.
 
-    Mutation: passing quote_identifier(table) into pragma_table_info or
-        pragma_index_list in place of a bound name. SQLite then reads
-        '"type"' as the pragma's own column, so describe_columns raises
-        and get_unique_indexes returns [] or raises.
-    Oracle: a one-column table with a UNIQUE constraint, by hand.
+    Mutation: quote_identifier(table) into a pragma in place of a bound name.
+    Oracle: a one-column table with a unique constraint, by hand.
     """
     schema_conn.execute(f'create table "{table}" (z TEXT unique)')
 
@@ -136,12 +122,10 @@ def test_introspection_reads_a_table_named_like_a_pragma_column(schema_conn, tab
 def test_introspection_ignores_a_temp_table(schema_conn):
     """Verify every method reads the main database only, as list_tables does.
 
-    Mutation: dropping the 'main' argument from pragma_table_info, or
-        from both index pragmas, which finds the temp table that
-        table_exists and table_ddl cannot see.
+    Mutation: dropping the 'main' argument from a pragma.
     Oracle: a temp table, which lives outside the main database.
     """
-    schema_conn.execute('create temp table scratch (z TEXT unique)')
+    schema_conn.execute('create temp table scratch (z text unique)')
 
     assert schema_conn.table_exists('scratch') is False
     assert schema_conn.get_unique_indexes('scratch') == []

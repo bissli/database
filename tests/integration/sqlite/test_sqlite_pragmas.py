@@ -1,56 +1,51 @@
-"""
-SQLite connection pragmas: WAL journal mode + explicit busy_timeout.
-File-based connections enable WAL; in-memory connections do not.
+"""Session pragmas a default SQLite connection carries.
 """
 import database as db
 import pytest
 
+pytestmark = [pytest.mark.sqlite, pytest.mark.integration]
 
-@pytest.mark.sqlite
-@pytest.mark.integration
+
 def test_file_db_uses_wal_journal_mode(tmp_path):
-    """File-based SQLite connections must enable WAL journal mode."""
-    db_file = tmp_path / 'pragma_test.db'
-    conn = db.connect({'drivername': 'sqlite', 'database': str(db_file)})
+    """Verify a file database defaults to WAL.
+
+    Mutation: a default journal_mode other than 'wal', or no writer hook.
+    Oracle: SQLite's own report of journal_mode.
+    """
+    conn = db.connect({
+        'drivername': 'sqlite',
+        'database': str(tmp_path / 'pragma_test.db'),
+        })
     try:
-        mode = db.select_scalar(conn, 'PRAGMA journal_mode')
-        assert str(mode).lower() == 'wal'
+        assert db.select_scalar(conn, 'pragma journal_mode') == 'wal'
     finally:
         conn.close()
 
 
-@pytest.mark.sqlite
-@pytest.mark.integration
-def test_file_db_sets_busy_timeout(tmp_path):
-    """File-based SQLite connections must set busy_timeout explicitly to 5000ms."""
-    db_file = tmp_path / 'pragma_test.db'
-    conn = db.connect({'drivername': 'sqlite', 'database': str(db_file)})
-    try:
-        timeout = db.select_scalar(conn, 'PRAGMA busy_timeout')
-        assert int(timeout) == 5000
-    finally:
-        conn.close()
+def test_memory_db_skips_the_writer_pragmas():
+    """Verify ':memory:' keeps SQLite's default synchronous level.
 
-
-@pytest.mark.sqlite
-@pytest.mark.integration
-def test_memory_db_does_not_use_wal():
-    """In-memory SQLite has no on-disk log, so WAL is pointless and must be skipped."""
+    Mutation: dropping the _is_memory_db check in configure_writer_connection.
+    Oracle: SQLite's default level, full = 2.
+    """
     conn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
     try:
-        mode = db.select_scalar(conn, 'PRAGMA journal_mode')
-        assert str(mode).lower() != 'wal'
+        assert db.select_scalar(conn, 'pragma synchronous') == 2
     finally:
         conn.close()
 
 
-@pytest.mark.sqlite
-@pytest.mark.integration
-def test_memory_db_still_sets_busy_timeout():
-    """busy_timeout should be set on every SQLite connection regardless of backing store."""
-    conn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
+@pytest.mark.parametrize('database', ['pragma_test.db', ':memory:'])
+def test_busy_timeout_is_set(tmp_path, database):
+    """Verify every SQLite connection waits 5000 ms on a lock.
+
+    Mutation: busy_timeout moved into the writer hook, or a different value.
+    Oracle: SQLite's own report, against the 5000 ms the strategy sets.
+    """
+    if database != ':memory:':
+        database = str(tmp_path / database)
+    conn = db.connect({'drivername': 'sqlite', 'database': database})
     try:
-        timeout = db.select_scalar(conn, 'PRAGMA busy_timeout')
-        assert int(timeout) == 5000
+        assert db.select_scalar(conn, 'pragma busy_timeout') == 5000
     finally:
         conn.close()

@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
@@ -20,11 +20,22 @@ __all__ = [
 ]
 
 
-def use_iterdict_data_loader(func):
-    """Temporarily use default dict loader over user-specified loader"""
+def use_iterdict_data_loader(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap func to run with iterdict_data_loader as the connection's loader.
+
+    Parameters
+    ----------
+    func : Callable[..., Any]
+        Callable whose first argument is a connection, or a Transaction.
+
+    Returns
+    -------
+    Callable[..., Any]
+        Wrapper that swaps the loader for the call only.
+    """
 
     @wraps(func)
-    def inner(*args, **kwargs):
+    def inner(*args: Any, **kwargs: Any) -> Any:
         cn = args[0]
 
         if hasattr(cn, 'connection') and not hasattr(cn, 'options'):
@@ -41,44 +52,56 @@ def use_iterdict_data_loader(func):
     return inner
 
 
-def iterdict_data_loader(data, column_info, **kwargs) -> list[dict]:
-    """Minimal data loader.
+def iterdict_data_loader(data: Iterable[dict] | None, column_info: list[Column],
+                         **kwargs: Any) -> list[dict]:
+    """Rows as a new list of dicts, every key kept.
 
-    Accepts additional keyword arguments (like table_name) for compatibility
-    with other data loaders, but doesn't use them.
+    Parameters
+    ----------
+    data : Iterable[dict] | None
+        Result rows.
+    column_info : list[Column]
+        Unused.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    list[dict]
+        A new list, [] for None or empty input.
     """
     if not data:
         return []
     return list(data)
 
 
-def _empty_dataframe(columns, dtype=None) -> pd.DataFrame:
-    """Build a column-preserving empty frame carrying the type metadata.
-
-    Parameters
-    ----------
-    columns : list[Column]
-        Column metadata; supplies both the frame's column names and the
-        'column_types' entry of DataFrame.attrs.
-    dtype : Any, default None
-        dtype for every column. Pass the loader's own backing dtype so an
-        empty result is backed the same way a populated one would be.
-
-    Returns
-    -------
-    pd.DataFrame
-        A zero-row frame with the metadata columns.
+def _empty_dataframe(columns: list[Column], dtype: Any = None) -> pd.DataFrame:
+    """Zero-row frame with the metadata's columns and attrs['column_types'].
     """
     df = pd.DataFrame(columns=Column.get_names(columns), dtype=dtype)
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
     return df
 
 
-def pandas_numpy_data_loader(data, columns, **kwargs) -> pd.DataFrame:
-    """Standard pandas DataFrame loader using NumPy.
+def pandas_numpy_data_loader(data: Iterable[dict] | None, columns: list[Column],
+                             **kwargs: Any) -> pd.DataFrame:
+    """NumPy-backed DataFrame of the rows, in the metadata's column order.
 
-    Always returns a DataFrame, never None, with columns preserved for empty results.
-    Includes type information in the DataFrame.attrs attribute.
+    Parameters
+    ----------
+    data : Iterable[dict] | None
+        Result rows. A key outside the metadata is dropped, and a missing
+        key reads as null.
+    columns : list[Column]
+        Sets the frame's columns and their order.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    pd.DataFrame
+        Zero rows for empty input. attrs['column_types'] holds
+        Column.get_column_types_dict(columns).
     """
     if not data:
         return _empty_dataframe(columns)
@@ -88,56 +111,93 @@ def pandas_numpy_data_loader(data, columns, **kwargs) -> pd.DataFrame:
     return df
 
 
-def pandas_pyarrow_data_loader(data, columns, **kwargs) -> pd.DataFrame:
-    """PyArrow-based pandas DataFrame loader.
+def pandas_pyarrow_data_loader(data: Iterable[dict] | None, columns: list[Column],
+                               **kwargs: Any) -> pd.DataFrame:
+    """Arrow-backed DataFrame of the rows, in the metadata's column order.
 
-    Always returns a DataFrame, never None, with columns preserved for empty results.
+    Parameters
+    ----------
+    data : Iterable[dict] | None
+        Result rows. A key outside the metadata is dropped, and a missing
+        key reads as null.
+    columns : list[Column]
+        Sets the frame's columns and their order.
+    **kwargs : Any
+        Unused.
+
+    Returns
+    -------
+    pd.DataFrame
+        Every column a pd.ArrowDtype, pa.null() for empty input.
+        attrs['column_types'] holds Column.get_column_types_dict(columns).
     """
-    # Lazy: only this loader needs pyarrow.
+    # Deferred import: pyarrow is optional.
     import pyarrow as pa
 
     if not data:
         return _empty_dataframe(columns, dtype=pd.ArrowDtype(pa.null()))
 
     column_names = Column.get_names(columns)
-    # row.get keeps this loader interchangeable with the numpy one, which
-    # nulls an absent key rather than raising.
     columns_data = [[row.get(col) for row in data] for col in column_names]
-    df = pa.table(columns_data, names=column_names).to_pandas(types_mapper=pd.ArrowDtype)
+    arrow_table = pa.table(columns_data, names=column_names)
+    df = arrow_table.to_pandas(types_mapper=pd.ArrowDtype)
     df.attrs['column_types'] = Column.get_column_types_dict(columns)
     return df
 
 
 @dataclass
 class DatabaseOptions(ConfigOptions):
-    """Options
+    """Connection settings for one PostgreSQL or SQLite database.
 
-    supported driver names: `postgresql`, `sqlite`
+    Parameters
+    ----------
+    drivername : str, default 'postgresql'
+        'postgresql' or 'sqlite'.
+    hostname : str, default None
+        Required for PostgreSQL.
+    username : str, default None
+        Required for PostgreSQL.
+    password : str, default None
+        Required for PostgreSQL. repr shows '***'.
+    database : str, default None
+        Database name, or a SQLite file path or ':memory:'. Required.
+    port : int, default 0
+        Required for PostgreSQL, so 0 raises.
+    timeout : int, default 0
+        PostgreSQL connect timeout in seconds. Required, so 0 raises.
+    appname : str, default None
+        PostgreSQL application_name. None takes the script name, else
+        'python_console'.
+    data_loader : Callable[..., Any] | None, default None
+        Called as data_loader(rows, columns, **kwargs) to shape a select
+        result. None takes pandas_numpy_data_loader.
+    reader_hostname : str, default None
+        Host for `connect(..., role='reader')`. None falls back to
+        hostname. SQLite ignores it.
+    reader_port : int, default 0
+        0 falls back to port, independent of reader_hostname. SQLite
+        ignores it.
+    use_pool : bool, default False
+        False opens a fresh connection each time, except for SQLite
+        ':memory:'.
+    pool_max_connections : int, default 5
+        SQLAlchemy pool_size. A hard ceiling on PostgreSQL.
+    pool_max_idle_time : int, default 300
+        Seconds before a pooled connection is replaced.
+    pool_wait_timeout : int, default 30
+        Seconds a caller waits for a pooled connection.
+    journal_mode : str, default 'wal'
+        SQLite only: 'wal', 'delete', 'truncate' or 'persist'.
+    open_mode : str | None, default None
+        SQLite only: None, 'ro' or 'immutable'. Requires
+        `connect(..., role='reader')`. 'immutable' needs a file that
+        never changes while a connection holds it.
 
-    Connection pooling options:
-    - use_pool: Whether to use connection pooling (default: False)
-    - pool_max_connections: Maximum connections in pool (default: 5)
-    - pool_max_idle_time: Maximum seconds a connection can be idle (default: 300)
-    - pool_wait_timeout: Maximum seconds to wait for a connection (default: 30)
-
-    Notes
-    -----
-    - reader_hostname and reader_port name the endpoint serving the
-      cluster's replicas, which `connect(..., role='reader')` opens.
-    - A database declaring neither still answers role='reader': each
-      field falls back to hostname or port on its own, so the reader
-      lands on the writer endpoint and keeps the read-only guard.
-    - SQLite has no reader endpoint, so both fields are ignored there.
-    - journal_mode is SQLite only, one of 'wal', 'delete', 'truncate',
-      'persist', and PostgreSQL ignores it. A writer sets it on every
-      connect. A reader leaves the file as it is.
-    - open_mode is SQLite only, one of None, 'ro', 'immutable', and
-      requires `connect(..., role='reader')`. Either mode raises on a
-      missing file and creates nothing. 'immutable' takes no lock and
-      reads no journal, so the file must not change while a connection
-      holds it. For a synced file that usually means: replaced by
-      rename, from a writer in a rollback-journal mode, with a fresh
-      connection per read.
+    Raises
+    ------
+    ValidationError
+        At construction, for an unregistered drivername, a missing
+        required field, or a journal_mode or open_mode outside its set.
     """
     drivername: str = 'postgresql'
     hostname: str = None
@@ -148,19 +208,18 @@ class DatabaseOptions(ConfigOptions):
     timeout: int = 0
     appname: str = None
     data_loader: Callable[..., Any] | None = None
-    # Reader endpoint parameters
     reader_hostname: str = None
     reader_port: int = 0
-    # Connection pooling parameters
     use_pool: bool = False
     pool_max_connections: int = 5
     pool_max_idle_time: int = 300
     pool_wait_timeout: int = 30
-    # SQLite parameters
     journal_mode: str = 'wal'
     open_mode: str | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Validate the fields and fill appname and data_loader when unset.
+        """
         if not is_supported_dialect(self.drivername):
             available = get_available_dialects()
             raise ValidationError(f'drivername must be one of: {available}')

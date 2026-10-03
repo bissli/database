@@ -1,8 +1,4 @@
-"""
-Database-agnostic tests for SELECT operations.
-
-These tests run against both PostgreSQL and SQLite to verify
-consistent behavior across database backends.
+"""Select API tests run against both PostgreSQL and SQLite.
 """
 import database as db
 import pytest
@@ -10,125 +6,154 @@ from tests.integration.common.conftest import col, row
 
 
 class TestSelectOperations:
-    """Tests for basic SELECT operations across databases."""
+    """Each select variant over the staged Alice, Bob, Charlie rows.
+    """
 
     def test_select_all(self, db_conn):
-        """Test selecting all rows from test table."""
-        result = db.select(db_conn, 'SELECT * FROM test_table ORDER BY id')
-        assert len(result) == 3
+        """Verify select returns every row of the table.
+
+        Mutation: select returning only the first fetched row.
+        Oracle: the three names the db_conn fixture stages.
+        """
+        result = db.select(db_conn, 'select * from test_table order by name')
+        assert col(result, 'name') == ['Alice', 'Bob', 'Charlie']
 
     def test_select_with_where(self, db_conn):
-        """Test SELECT with WHERE clause."""
-        result = db.select(db_conn, "SELECT * FROM test_table WHERE name = 'Alice'")
+        """Verify select returns the one row a literal predicate matches.
+
+        Mutation: a loader that drops or misnames columns of the row.
+        Oracle: Alice is staged with value 10.
+        """
+        result = db.select(db_conn, "select * from test_table where name = 'Alice'")
         assert len(result) == 1
         assert row(result, 0)['name'] == 'Alice'
         assert row(result, 0)['value'] == 10
 
-    def test_select_with_param(self, db_conn, dialect):
-        """Test SELECT with parameter binding."""
-        result = db.select(db_conn, 'SELECT * FROM test_table WHERE name = %s', 'Bob')
+    def test_select_with_param(self, db_conn):
+        """Verify a %s placeholder binds its argument on both dialects.
+
+        Mutation: skipping the %s to ? conversion on the SQLite path.
+        Oracle: Bob is staged once.
+        """
+        result = db.select(db_conn, 'select * from test_table where name = %s', 'Bob')
         assert len(result) == 1
         assert row(result, 0)['name'] == 'Bob'
 
     def test_select_column(self, db_conn):
-        """Test select_column returns single column as list."""
-        names = db.select_column(db_conn, 'SELECT name FROM test_table ORDER BY id')
+        """Verify select_column returns the first column as a list, in order.
+
+        Mutation: returning whole rows, or the values in another order.
+        Oracle: the staged names, sorted by hand.
+        """
+        names = db.select_column(db_conn, 'select name from test_table order by name')
         assert names == ['Alice', 'Bob', 'Charlie']
 
     def test_select_row(self, db_conn):
-        """Test select_row returns single row."""
-        row = db.select_row(db_conn, "SELECT * FROM test_table WHERE name = 'Alice'")
-        assert row.name == 'Alice'
-        assert row.value == 10
+        """Verify select_row returns one row with attribute access.
+
+        Mutation: returning a plain dict, which has no .name attribute.
+        Oracle: Alice is staged with value 10.
+        """
+        result = db.select_row(db_conn, "select * from test_table where name = 'Alice'")
+        assert result.name == 'Alice'
+        assert result.value == 10
 
     def test_select_row_or_none_with_result(self, db_conn):
-        """Test select_row_or_none with matching row."""
-        row = db.select_row_or_none(db_conn, "SELECT * FROM test_table WHERE name = 'Alice'")
-        assert row is not None
-        assert row.name == 'Alice'
+        """Verify select_row_or_none returns the row when exactly one matches.
+
+        Mutation: returning None on any result.
+        Oracle: Alice is staged once.
+        """
+        result = db.select_row_or_none(
+            db_conn, "select * from test_table where name = 'Alice'")
+        assert result.name == 'Alice'
 
     def test_select_row_or_none_without_result(self, db_conn):
-        """Test select_row_or_none with no matching row."""
-        row = db.select_row_or_none(db_conn, "SELECT * FROM test_table WHERE name = 'Nonexistent'")
-        assert row is None
+        """Verify select_row_or_none returns None when no row matches.
+
+        Mutation: raising ValidationError on zero rows, as select_row does.
+        Oracle: no staged row is named Nonexistent.
+        """
+        result = db.select_row_or_none(
+            db_conn, "select * from test_table where name = 'Nonexistent'")
+        assert result is None
 
     def test_select_row_or_none_raises_on_two_rows(self, db_conn):
         """Verify select_row_or_none raises when the query returns two rows.
 
-        Mutation: returning None for any count other than one, which reads
-            a non-unique key as not found.
-        Oracle: test_table holds Alice and Bob, so the IN list matches two
-            rows.
+        Mutation: returning None for any row count other than one.
+        Oracle: Alice and Bob are staged, so the in list matches two.
         """
         with pytest.raises(db.ValidationError, match='got 2'):
             db.select_row_or_none(
-                db_conn, "SELECT * FROM test_table WHERE name IN ('Alice', 'Bob')")
+                db_conn, "select * from test_table where name in ('Alice', 'Bob')")
 
     def test_select_scalar_or_none_raises_on_two_rows(self, db_conn):
         """Verify select_scalar_or_none raises when the query returns two rows.
 
-        Mutation: returning None on any ValidationError from select_scalar,
-            which reads a non-unique key as not found.
-        Oracle: test_table holds Alice and Bob, so the IN list matches two
-            rows.
+        Mutation: returning None on any ValidationError from select_scalar.
+        Oracle: Alice and Bob are staged, so the in list matches two.
         """
         with pytest.raises(db.ValidationError, match='got 2'):
             db.select_scalar_or_none(
-                db_conn, "SELECT value FROM test_table WHERE name IN ('Alice', 'Bob')")
+                db_conn, "select value from test_table where name in ('Alice', 'Bob')")
 
     def test_select_scalar(self, db_conn):
-        """Test select_scalar returns single value."""
-        count = db.select_scalar(db_conn, 'SELECT COUNT(*) FROM test_table')
-        assert count == 3
+        """Verify select_scalar returns the single value, unwrapped.
+
+        Mutation: returning the row or a one-element list.
+        Oracle: the fixture stages three rows.
+        """
+        assert db.select_scalar(db_conn, 'select count(*) from test_table') == 3
 
     def test_select_scalar_or_none_with_result(self, db_conn):
-        """Test select_scalar_or_none with result."""
-        value = db.select_scalar_or_none(db_conn, "SELECT value FROM test_table WHERE name = 'Alice'")
+        """Verify select_scalar_or_none returns the value when one row matches.
+
+        Mutation: returning None on any result.
+        Oracle: Alice is staged with value 10.
+        """
+        value = db.select_scalar_or_none(
+            db_conn, "select value from test_table where name = 'Alice'")
         assert value == 10
 
     def test_select_scalar_or_none_without_result(self, db_conn):
-        """Test select_scalar_or_none without result."""
-        value = db.select_scalar_or_none(db_conn, "SELECT value FROM test_table WHERE name = 'Nonexistent'")
+        """Verify select_scalar_or_none returns None when no row matches.
+
+        Mutation: raising ValidationError on zero rows, as select_scalar does.
+        Oracle: no staged row is named Nonexistent.
+        """
+        value = db.select_scalar_or_none(
+            db_conn, "select value from test_table where name = 'Nonexistent'")
         assert value is None
 
 
 class TestSelectWithMultipleParams:
-    """Tests for SELECT with multiple parameters."""
+    """Select with more than one bound argument.
+    """
 
     def test_select_with_multiple_params(self, db_conn):
-        """Test SELECT with multiple positional parameters."""
+        """Verify two %s placeholders bind their arguments in order.
+
+        Mutation: binding only the first argument, or repeating it.
+        Oracle: Alice and Bob are staged; Charlie is not named.
+        """
         result = db.select(
             db_conn,
-            'SELECT * FROM test_table WHERE name = %s OR name = %s ORDER BY id',
-            'Alice', 'Bob'
-        )
-        assert len(result) == 2
+            'select * from test_table where name = %s or name = %s order by name',
+            'Alice', 'Bob')
         assert col(result, 'name') == ['Alice', 'Bob']
 
     def test_select_with_in_clause(self, db_conn):
-        """Test SELECT with IN clause parameter expansion."""
-        names = ('Alice', 'Charlie')
+        """Verify a tuple bound to in %s expands to one placeholder per item.
+
+        Mutation: binding the tuple as one value.
+        Oracle: Alice and Charlie are staged; Bob is left out of the tuple.
+        """
         result = db.select(
             db_conn,
-            'SELECT * FROM test_table WHERE name IN %s ORDER BY id',
-            names
-        )
-        assert len(result) == 2
+            'select * from test_table where name in %s order by name',
+            ('Alice', 'Charlie'))
         assert col(result, 'name') == ['Alice', 'Charlie']
-
-
-class TestEmptyResults:
-    """Tests for handling empty result sets."""
-
-    def test_select_empty_result(self, db_conn):
-        """Test SELECT that returns no rows."""
-        result = db.select(db_conn, "SELECT * FROM test_table WHERE name = 'Nonexistent'")
-        assert len(result) == 0
-
-    def test_select_column_empty(self, db_conn):
-        """Test select_column with no rows returns empty list."""
-        result = db.select_column(db_conn, "SELECT name FROM test_table WHERE name = 'Nonexistent'")
-        assert result == []
 
 
 if __name__ == '__main__':

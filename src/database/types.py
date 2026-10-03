@@ -1,12 +1,4 @@
-"""
-Consolidated type handling for database operations.
-
-This module provides:
-- TypeConverter: Convert Python values to database-compatible formats
-- Column: Column metadata from cursor descriptions
-- ColumnInfo: A table column as the schema declares it
-- resolve_type: Resolve database type codes to Python types
-- Row adapters: Convert database rows to dictionaries
+"""Value conversion, type resolution, column metadata and row adapters.
 """
 import datetime
 import logging
@@ -19,15 +11,14 @@ from typing import Any, Self, TypeVar
 import dateutil.parser
 import numpy as np
 import pandas as pd
+from psycopg.postgres import types as pg_types
 
 from libb import attrdict
 
 logger = logging.getLogger(__name__)
 
-# Type definitions
 SQLiteConnection = TypeVar('SQLiteConnection')
 
-# Constants for type conversion
 SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
 NUMPY_FLOAT_TYPES = (np.floating,)
 NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
@@ -39,7 +30,7 @@ PANDAS_NULLABLE_TYPES = (
 )
 
 
-# Type Converter - Handles Python -> Database value conversion
+# --- Python to database value conversion ---
 
 def _empty_string_to_none(py_value: Any) -> Any:
     """None for an empty string, otherwise py_value unchanged.
@@ -62,12 +53,6 @@ def null_special_string(value: Any) -> Any:
     -------
     Any
         None, a PyArrow string scalar's str, or value unchanged.
-
-    Notes
-    -----
-    - The row-batch writers apply this to catch stringified pandas nulls
-      ('nan', 'None', 'NaT'). Cursor.execute and executemany map only ''
-      and bind every other str unchanged.
     """
     pa = sys.modules.get('pyarrow')
     if pa and isinstance(value, pa.StringScalar | pa.LargeStringScalar):
@@ -78,56 +63,54 @@ def null_special_string(value: Any) -> Any:
 
 
 def _convert_pyarrow_value(value: Any) -> Any:
-    """Convert PyArrow value to Python type.
+    """Builtin Python value for a PyArrow scalar, array or table.
 
-    Attempts conversion in order of preference:
-    1. Check for null values
-    2. Use as_py() method (preferred for scalars)
-    3. Use .value property (fallback for scalars)
-    4. Use to_pylist() for arrays
-    5. Use to_pandas() for tables
-    6. Fall back to str()
+    Parameters
+    ----------
+    value : Any
+        A PyArrow Scalar, Array, ChunkedArray or Table. Returned
+        unchanged when pyarrow is not imported.
+
+    Returns
+    -------
+    Any
+        None for a null or '' scalar, the scalar's Python value, a list
+        for an array, a DataFrame for a table, else str(value).
     """
     pa = sys.modules.get('pyarrow')
     if pa is None or value is None:
         return value
 
-    # Check for null
     try:
         if pa.compute.is_null(value).as_py():
             return None
     except (AttributeError, TypeError, ValueError):
         pass
 
-    # Preferred: as_py() method
     if hasattr(value, 'as_py'):
         try:
             return _empty_string_to_none(value.as_py())
         except (ValueError, TypeError, AttributeError):
             pass
 
-    # Scalar fallback: .value property
-    if pa and isinstance(value, pa.Scalar):
+    if isinstance(value, pa.Scalar):
         try:
             return _empty_string_to_none(value.value)
         except (ValueError, TypeError, AttributeError):
             pass
 
-    # Array types
-    if pa and isinstance(value, pa.Array | pa.ChunkedArray):
+    if isinstance(value, pa.Array | pa.ChunkedArray):
         try:
             return value.to_pylist()
         except (ValueError, TypeError, AttributeError):
             pass
 
-    # Table type
-    if pa and isinstance(value, pa.Table):
+    if isinstance(value, pa.Table):
         try:
             return value.to_pandas()
         except (ValueError, TypeError, AttributeError):
             pass
 
-    # Final fallback
     try:
         return str(value)
     except (ValueError, TypeError):
@@ -135,30 +118,19 @@ def _convert_pyarrow_value(value: Any) -> Any:
 
 
 def _convert_numpy_value(val: Any) -> float | int | bool | datetime.datetime | None:
-    """Convert a NumPy scalar to its builtin Python counterpart.
+    """Builtin Python counterpart of a NumPy scalar.
 
     Parameters
     ----------
     val : Any
-        A NumPy scalar, or any value the caller could not classify.
+        A NumPy scalar. Any other value is returned unchanged.
 
     Returns
     -------
     float | int | bool | datetime.datetime | None
-        The unboxed builtin, or None for a NumPy null. Anything that is
-        not a NumPy scalar is returned unchanged.
-
-    Notes
-    -----
-    - Both NaN and infinity map to None, matching what convert_value
-      already does for builtin floats: no SQL numeric column can hold
-      either, and np.float32 does not subclass float so it reaches this
-      function rather than that branch.
-    - datetime64 is read as naive UTC.
+        The unboxed builtin. None for NaN, infinity and NaT. A datetime64
+        comes back as a naive UTC datetime, truncated to the second.
     """
-    if val is None:
-        return None
-
     if isinstance(val, np.floating) and (np.isnan(val) or np.isinf(val)):
         return None
 
@@ -176,22 +148,13 @@ def _convert_numpy_value(val: Any) -> float | int | bool | datetime.datetime | N
     return val
 
 
-def _convert_pandas_nullable(val: Any) -> Any:
-    """Convert Pandas nullable value to Python type."""
-    if pd.isna(val):
-        return None
-    return _empty_string_to_none(val)
-
-
 class TypeConverter:
-    """Universal type conversion for database parameters.
-
-    Handles NumPy, Pandas, and PyArrow types.
+    """Converts NumPy, pandas and PyArrow parameters to driver-ready values.
     """
 
     @staticmethod
     def convert_value(value: Any) -> Any:
-        """Convert a single value to a database-compatible format.
+        """Driver-ready form of one bound parameter.
 
         Parameters
         ----------
@@ -208,12 +171,6 @@ class TypeConverter:
         if value is None:
             return None
 
-        # Notes:
-        # - Exact type() checks short-circuit plain builtins before the
-        #   numpy/pandas/pyarrow isinstance chain, which costs more on
-        #   every call.
-        # - A NumPy or pandas subclass of a builtin fails the exact check
-        #   and falls through, so its own handling still runs.
         value_type = type(value)
         if value_type is int or value_type is bool:
             return value
@@ -223,13 +180,15 @@ class TypeConverter:
             return value
         if value_type is str:
             return value or None
-        if value_type is bytes or value_type is datetime.date or value_type is datetime.datetime:
+        if (value_type is bytes
+            or value_type is datetime.date
+            or value_type is datetime.datetime):
             return value
 
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
 
-        if pd and hasattr(pd, 'NaT') and isinstance(value, type(pd.NaT)):
+        if isinstance(value, type(pd.NaT)):
             return None
 
         if isinstance(value, str) and not value:
@@ -242,23 +201,39 @@ class TypeConverter:
         if pd.api.types.is_scalar(value) and pd.isna(value):
             return None
 
-        if hasattr(value, 'dtype') and pd.api.types.is_dtype_equal(value.dtype, 'object') and pd.isna(value):
+        if (hasattr(value, 'dtype')
+            and pd.api.types.is_dtype_equal(value.dtype, 'object')
+            and pd.isna(value)):
             return None
 
         if isinstance(value, PANDAS_NULLABLE_TYPES):
-            return _convert_pandas_nullable(value)
+            if pd.isna(value):
+                return None
+            return _empty_string_to_none(value)
 
         pa = sys.modules.get('pyarrow')
-        if pa:
-            if isinstance(value, pa.Scalar) or hasattr(value, '_is_arrow_scalar') or \
-               isinstance(value, pa.Array | pa.ChunkedArray | pa.Table):
-                return _convert_pyarrow_value(value)
+        if pa and (isinstance(value, pa.Scalar)
+                   or hasattr(value, '_is_arrow_scalar')
+                   or isinstance(value, pa.Array | pa.ChunkedArray | pa.Table)):
+            return _convert_pyarrow_value(value)
 
         return value
 
     @staticmethod
     def convert_params(params: Any) -> Any:
-        """Convert a collection of parameters for database operations."""
+        """Bound parameters with each value passed through convert_value.
+
+        Parameters
+        ----------
+        params : Any
+            A dict, one row as a list or tuple, a batch of rows (a list or
+            tuple whose every item is a list or tuple), or a lone value.
+
+        Returns
+        -------
+        Any
+            The same shape and container classes, with values converted.
+        """
         if params is None:
             return None
 
@@ -273,41 +248,17 @@ class TypeConverter:
         return TypeConverter.convert_value(params)
 
 
-# Type Resolution - Database type codes -> Python types
-
-from psycopg.postgres import types as pg_types
-
-
-def _safe_oid(type_name: str) -> int | None:
-    """Get OID for a PostgreSQL type name, returning None if not found."""
-    type_info = pg_types.get(type_name)
-    return type_info.oid if type_info else None
-
-
-def _safe_array_oid(type_name: str) -> int | None:
-    """Get array OID for a PostgreSQL type name, returning None if not found."""
-    type_info = pg_types.get(type_name)
-    return type_info.array_oid if type_info else None
-
+# --- Type resolution ---
 
 def _build_postgres_types() -> dict[int, type]:
-    """Build PostgreSQL type code to Python type mapping.
+    """Python type this library reports for each PostgreSQL type OID.
 
     Returns
     -------
     dict[int, type]
-        The Python type this library reports for each type OID.
-
-    Notes
-    -----
-    - A temporal entry states what psycopg hands back, not what SQL
-      calls the type: `time` and `timetz` load as `datetime.time`, and
-      only the `timestamp` family loads as `datetime.datetime`.
-    - Two entries deliberately differ from what psycopg loads: `numeric`
-      (OID 1700) is reported as `float` where psycopg returns
-      `decimal.Decimal`, and `uuid` (OID 2950) as `str` where psycopg
-      returns `uuid.UUID`. The map is the reported type, not a promise
-      about the row values.
+        Type per OID. The array OID of every mapped type, and of
+        int2vector, maps to tuple. A name psycopg does not register is
+        skipped.
     """
     types: dict[int, type] = {}
 
@@ -328,16 +279,15 @@ def _build_postgres_types() -> dict[int, type]:
 
     for py_type, pg_names in type_mappings:
         for name in pg_names:
-            oid = _safe_oid(name)
-            if oid is not None:
-                types[oid] = py_type
+            type_info = pg_types.get(name)
+            if type_info:
+                types[type_info.oid] = py_type
 
-    # Array types
-    array_oid = _safe_array_oid('int2vector')
-    if array_oid is not None:
-        types[array_oid] = tuple
+    int2vector_info = pg_types.get('int2vector')
+    if int2vector_info:
+        types[int2vector_info.array_oid] = tuple
 
-    for oid in list(types.keys()):
+    for oid in list(types):
         type_info = pg_types.get(oid)
         if type_info and type_info.array_oid:
             types[type_info.array_oid] = tuple
@@ -369,48 +319,53 @@ def resolve_type(
     type_map: dict | None = None,
     **_,
 ) -> type:
-    """Resolve database type code to Python type.
+    """Python type for a column: by type code, else by column name, else str.
 
-    Priority:
-    1. Direct type code lookup (fastest)
-    2. Column name patterns
-    3. Default to str
-
-    Args:
-        db_type: Database type ('postgresql', 'sqlite')
-        type_code: Database-specific type code
-        column_name: Optional column name for pattern matching
-        table_name: Unused, kept for API compatibility
-        type_map: Optional type map from strategy.get_type_map()
-        **_: Additional args (column_size, precision, scale) accepted but unused
+    Parameters
+    ----------
+    db_type : str
+        Dialect, 'postgresql' or 'sqlite'. Any other dialect skips the
+        built-in type-code maps.
+    type_code : Any
+        A PostgreSQL OID or a SQLite declared type. A SQLite type
+        matches in any case and with any '(...)' size suffix. A Python
+        type is returned as is, ahead of every other rule.
+    column_name : str or None
+        Matched in any case against name patterns ('_id' and 'id' are
+        int, '_at' is datetime.datetime, 'is_' is bool, ...) when the
+        type code does not resolve.
+    table_name : str or None
+        Unused.
+    type_map : dict or None
+        Replaces the dialect's built-in map, even when empty.
+    **_
+        Cursor metadata (column_size, precision, scale), ignored.
 
     Returns
-        Python type
+    -------
+    type
+        The resolved type, str when no rule matches.
     """
     if isinstance(type_code, type):
         return type_code
 
-    # Use provided type_map if available, otherwise fall back to dialect lookup
     if type_map is not None:
         if type_code in type_map:
             return type_map[type_code]
-        # For SQLite, also check base type (e.g., "INTEGER(10)" -> "INTEGER")
         if db_type == 'sqlite' and isinstance(type_code, str):
             base_type = type_code.split('(')[0].upper()
             if base_type in type_map:
                 return type_map[base_type]
-    else:
-        # Legacy path: direct dict access
-        if db_type == 'postgresql':
-            if type_code in postgres_types:
-                return postgres_types[type_code]
-        elif db_type == 'sqlite':
-            if isinstance(type_code, str):
-                base_type = type_code.split('(')[0].upper()
-                if base_type in sqlite_types:
-                    return sqlite_types[base_type]
-            if type_code in sqlite_types:
-                return sqlite_types[type_code]
+    elif db_type == 'postgresql':
+        if type_code in postgres_types:
+            return postgres_types[type_code]
+    elif db_type == 'sqlite':
+        if isinstance(type_code, str):
+            base_type = type_code.split('(')[0].upper()
+            if base_type in sqlite_types:
+                return sqlite_types[base_type]
+        if type_code in sqlite_types:
+            return sqlite_types[type_code]
 
     if column_name:
         name_lower = column_name.lower()
@@ -418,7 +373,8 @@ def resolve_type(
         if name_lower.endswith('_id') or name_lower == 'id':
             return int
 
-        if name_lower.endswith(('_datetime', '_at', '_timestamp')) or name_lower == 'timestamp':
+        if (name_lower.endswith(('_datetime', '_at', '_timestamp'))
+            or name_lower == 'timestamp'):
             return datetime.datetime
 
         if name_lower.endswith('_date') or name_lower == 'date':
@@ -427,12 +383,13 @@ def resolve_type(
         if name_lower.endswith('_time') or name_lower == 'time':
             return datetime.time
 
-        if (name_lower.startswith('is_') or name_lower.endswith('_flag') or
-                name_lower in {'active', 'enabled', 'disabled', 'is_deleted'}):
+        if (name_lower.startswith('is_')
+            or name_lower.endswith('_flag')
+            or name_lower in {'active', 'enabled', 'disabled', 'is_deleted'}):
             return bool
 
-        if (name_lower.endswith(('_price', '_cost', '_amount')) or
-                name_lower.startswith(('price_', 'cost_', 'amount_'))):
+        if (name_lower.endswith(('_price', '_cost', '_amount'))
+            or name_lower.startswith(('price_', 'cost_', 'amount_'))):
             return float
 
     return str
@@ -450,7 +407,7 @@ class ColumnInfo:
         Declared type text as the database reports it, which may differ in
         case from the DDL. Empty when the column declares no type.
     notnull : bool
-        True when the database reports the column NOT NULL.
+        True when the database reports the column not null.
     default : str or None
         Default as SQL expression text ("'x'" for a string), or None.
     primary_key : bool
@@ -463,20 +420,37 @@ class ColumnInfo:
     primary_key: bool
 
 
-# Column - Metadata from cursor descriptions
+# --- Column metadata ---
 
 class Column:
-    """Database column metadata."""
+    """One result column as a cursor description reports it.
 
-    def __init__(self,
-                 name: str,
-                 type_code: Any,
-                 python_type: type | None = None,
-                 display_size: int | None = None,
-                 internal_size: int | None = None,
-                 precision: int | None = None,
-                 scale: int | None = None,
-                 nullable: bool | None = None):
+    Parameters
+    ----------
+    name : str
+        Column name.
+    type_code : Any
+        A PostgreSQL OID or a SQLite declared type, None when the driver
+        reports none.
+    python_type : type or None
+        Resolved Python type.
+    display_size, internal_size, precision, scale : int or None
+        DB-API description fields, None when the driver omits them.
+    nullable : bool or None
+        DB-API null_ok. None means unknown.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        type_code: Any,
+        python_type: type | None = None,
+        display_size: int | None = None,
+        internal_size: int | None = None,
+        precision: int | None = None,
+        scale: int | None = None,
+        nullable: bool | None = None,
+    ) -> None:
         self.name = name
         self.type_code = type_code
         self.python_type = python_type
@@ -487,9 +461,34 @@ class Column:
         self.nullable = nullable
 
     @classmethod
-    def from_cursor_description(cls, description_item: Any, connection_type: str,
-                                table_name=None, connection=None) -> Self:
-        """Create a Column from cursor description item."""
+    def from_cursor_description(
+        cls,
+        description_item: Any,
+        connection_type: str,
+        table_name: str | None = None,
+        connection: Any = None,
+    ) -> Self:
+        """Column for one cursor description entry, its type resolved.
+
+        Parameters
+        ----------
+        description_item : Any
+            A psycopg Column for 'postgresql', a DB-API sequence for
+            'sqlite'. A SQLite entry shorter than seven fields keeps only
+            its name and type code.
+        connection_type : str
+            Dialect. Any other dialect keeps only str(item[0]) as the
+            name.
+        table_name : str or None
+            Passed to resolve_type, which ignores it.
+        connection : Any
+            Unused.
+
+        Returns
+        -------
+        Self
+            The column, with python_type from resolve_type.
+        """
         if connection_type == 'postgresql':
             column_info = cls._extract_postgres_column_info(description_item)
         elif connection_type == 'sqlite':
@@ -516,6 +515,8 @@ class Column:
 
     @classmethod
     def _extract_postgres_column_info(cls, description_item: Any) -> dict:
+        """Column fields read by attribute from a psycopg Column.
+        """
         return {
             'name': getattr(description_item, 'name', None),
             'type_code': getattr(description_item, 'type_code', None),
@@ -528,6 +529,8 @@ class Column:
 
     @classmethod
     def _extract_sqlite_column_info(cls, description_item: Any) -> dict:
+        """Column fields read by index from a DB-API description sequence.
+        """
         if len(description_item) >= 7:
             return {
                 'name': description_item[0],
@@ -536,9 +539,6 @@ class Column:
                 'internal_size': description_item[3],
                 'precision': description_item[4],
                 'scale': description_item[5],
-                # DBAPI null_ok is None for "unknown", which sqlite3
-                # reports for every column. bool() would turn that into
-                # a definite NOT NULL.
                 'nullable': (None if description_item[6] is None
                              else bool(description_item[6]))
             }
@@ -550,10 +550,15 @@ class Column:
         }
 
     def __repr__(self) -> str:
+        """Name, type code and python_type's name.
+        """
+        type_name = self.python_type.__name__ if self.python_type else None
         return (f'Column(name={self.name!r}, type_code={self.type_code!r}, '
-                f'python_type={self.python_type.__name__ if self.python_type else None})')
+                f'python_type={type_name})')
 
     def to_dict(self) -> dict:
+        """Every field by name, with python_type as its __name__ or None.
+        """
         return {
             'name': self.name,
             'type_code': self.type_code,
@@ -567,10 +572,14 @@ class Column:
 
     @staticmethod
     def get_names(columns: list[Self]) -> list[str]:
+        """Column names in list order.
+        """
         return [col.name for col in columns]
 
     @staticmethod
     def get_column_by_name(columns: list[Self], name: str) -> Self | None:
+        """First column named name, or None.
+        """
         for col in columns:
             if col.name == name:
                 return col
@@ -578,109 +587,169 @@ class Column:
 
     @staticmethod
     def get_column_types_dict(columns: list[Self]) -> dict[str, dict]:
+        """to_dict() of each column, keyed by column name.
+        """
         return {col.name: col.to_dict() for col in columns}
 
     @staticmethod
     def get_types(columns: list[Self]) -> list[type | None]:
+        """python_type of each column, in list order.
+        """
         return [col.python_type for col in columns]
 
     @staticmethod
     def create_empty_columns(names: list[str]) -> list[Self]:
+        """One Column per name, every other field None.
+        """
         return [Column(name=name, type_code=None) for name in names]
 
 
-def columns_from_cursor_description(cursor: Any, connection_type: str,
-                                    table_name=None, connection=None) -> list[Column]:
-    """Create Column objects from cursor description."""
+def columns_from_cursor_description(
+    cursor: Any,
+    connection_type: str,
+    table_name: str | None = None,
+    connection: Any = None,
+) -> list[Column]:
+    """One Column per cursor description entry, in cursor order.
+
+    Parameters
+    ----------
+    cursor : Any
+        A DB-API cursor. A None description, as after DDL, yields [].
+    connection_type : str
+        Dialect, passed to Column.from_cursor_description.
+    table_name : str or None
+        Passed to Column.from_cursor_description, which ignores it.
+    connection : Any
+        Unused.
+
+    Returns
+    -------
+    list[Column]
+        The columns, with python_type resolved.
+    """
     if cursor.description is None:
         return []
-    return [Column.from_cursor_description(desc, connection_type, table_name, connection)
-            for desc in cursor.description]
+    return [
+        Column.from_cursor_description(
+            desc, connection_type, table_name, connection)
+        for desc in cursor.description
+        ]
 
 
-# Row Adapters - Convert database rows to dictionaries
+# --- Row adapters ---
 
 class RowAdapter:
-    """Simple row adapter for converting database rows to dictionaries."""
+    """Reshapes one driver row without converting any value.
 
-    def __init__(self, row: Any):
+    Parameters
+    ----------
+    row : Any
+        A sqlite3.Row or other mapping, a namedtuple, or a sequence.
+    """
+
+    def __init__(self, row: Any) -> None:
         self.row = row
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert row to dictionary."""
-        # sqlite3.Row
+        """The row as a dict keyed by column name.
+
+        Returns
+        -------
+        dict[str, Any]
+            A new dict for a mapping, `_asdict()` for a namedtuple. Any
+            other row comes back as is.
+        """
         if hasattr(self.row, 'keys') and callable(self.row.keys):
             return {key: self.row[key] for key in self.row.keys()}  # noqa: SIM118
-        # Already a dict
-        if isinstance(self.row, dict):
-            return self.row
-        # Namedtuple
         if hasattr(self.row, '_asdict'):
             return self.row._asdict()
-        # Fallback
         return self.row
 
     def get_value(self, key: str | None = None) -> Any:
-        """Get a value from the row."""
+        """The value of column key, or of the first column.
+
+        Parameters
+        ----------
+        key : str or None
+            Column name. None reads the first column.
+
+        Returns
+        -------
+        Any
+            The value. A row with no __getitem__ comes back whole when key
+            is None.
+
+        Raises
+        ------
+        KeyError
+            key is absent from a dict row. Other row types raise what
+            their own lookup raises.
+        """
         if key is not None:
-            if isinstance(self.row, dict):
-                return self.row[key]
-            if hasattr(self.row, 'keys'):
-                return self.row[key]
-            if hasattr(self.row, key):
+            if not hasattr(self.row, 'keys') and hasattr(self.row, key):
                 return getattr(self.row, key)
             return self.row[key]
 
-        # Get first value
         if hasattr(self.row, 'keys') and callable(self.row.keys):
             keys = list(self.row.keys())
             if keys:
                 return self.row[keys[0]]
-        if isinstance(self.row, dict) and self.row:
-            return next(iter(self.row.values()))
         if hasattr(self.row, '__getitem__'):
             return self.row[0]
         return self.row
 
     def to_attrdict(self) -> attrdict:
+        """to_dict() as an attrdict, read by row.column or row['column'].
+        """
         return attrdict(self.to_dict())
 
     @staticmethod
-    def create(connection, row) -> 'RowAdapter':
-        """Factory method - returns simple RowAdapter for all connection types."""
+    def create(connection: Any, row: Any) -> 'RowAdapter':
+        """RowAdapter for row. connection is ignored.
+        """
         return RowAdapter(row)
 
     @staticmethod
     def create_empty_dict(cols: list[str]) -> dict[str, None]:
+        """Dict mapping each name in cols to None.
+        """
         return dict.fromkeys(cols)
 
     @staticmethod
     def create_attrdict_from_cols(cols: list[str]) -> attrdict:
+        """attrdict mapping each name in cols to None.
+        """
         return attrdict(RowAdapter.create_empty_dict(cols))
 
 
-# SQLite Adapters - Database value converters
+# --- SQLite converters ---
 
 def convert_date(val: bytes) -> datetime.date:
-    """Convert ISO 8601 date string to date object."""
+    """Date from a stored ISO 8601 value, any time part dropped.
+    """
     return dateutil.parser.isoparse(val.decode()).date()
 
 
 def convert_datetime(val: bytes) -> datetime.datetime:
-    """Convert ISO 8601 datetime string to datetime object."""
+    """Datetime from a stored ISO 8601 value, aware only if it holds an offset.
+    """
     return dateutil.parser.isoparse(val.decode())
 
 
 class AdapterRegistry:
-    """Registry for database-specific type adapters."""
+    """Registers this library's SQLite converters.
+    """
 
     def sqlite(self, connection: SQLiteConnection) -> None:
-        """Register SQLite converters for a connection."""
-        connection.execute('SELECT 1')
+        """Register the date and datetime converters, process-wide in sqlite3.
+        """
+        connection.execute('select 1')
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
 
 
 def get_adapter_registry() -> AdapterRegistry:
-    """Get the adapter registry."""
+    """A new AdapterRegistry.
+    """
     return AdapterRegistry()

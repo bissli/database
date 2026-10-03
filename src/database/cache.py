@@ -1,12 +1,10 @@
-"""
-Unified caching for database operations.
-
-Provides a single, simple caching system for schema metadata and strategy results.
-Uses cachetools TTLCache for automatic expiration.
+"""Process-wide TTL caches for schema metadata and strategy lookups.
 """
 import functools
 import logging
 import threading
+from collections.abc import Callable
+from typing import Any
 
 import cachetools
 
@@ -14,9 +12,10 @@ logger = logging.getLogger(__name__)
 
 
 class Cache:
-    """Unified cache manager for the database module.
+    """Process-wide registry of named TTL caches.
 
-    Thread-safe singleton that manages all TTL caches.
+    Creating and clearing caches take a lock. Reading and writing an
+    entry does not.
     """
 
     _instance = None
@@ -25,23 +24,32 @@ class Cache:
 
     @classmethod
     def get_instance(cls) -> 'Cache':
-        """Get singleton instance."""
+        """The one shared Cache, created on first call.
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = cls()
         return cls._instance
 
-    def get_cache(self, name: str, maxsize: int = 100, ttl: int = 300) -> cachetools.TTLCache:
-        """Get or create a TTL cache with the given name.
+    def get_cache(self, name: str, maxsize: int = 100,
+                  ttl: int = 300) -> cachetools.TTLCache:
+        """The TTL cache registered under name, created on first request.
 
-        Args:
-            name: Name of the cache
-            maxsize: Maximum cache size
-            ttl: Time-to-live in seconds
+        Parameters
+        ----------
+        name : str
+            Cache name.
+        maxsize : int, default 100
+            Entry limit; applies only when this call creates the cache.
+        ttl : int, default 300
+            Entry lifetime in seconds; applies only when this call creates
+            the cache.
 
         Returns
-            TTLCache instance
+        -------
+        cachetools.TTLCache
+            The same object on every call for a name.
         """
         if name not in self._caches:
             with self._lock:
@@ -50,22 +58,28 @@ class Cache:
         return self._caches[name]
 
     def clear_all(self) -> None:
-        """Clear all managed caches."""
+        """Empty every cache, keeping each object a caller may hold.
+        """
         with self._lock:
             for cache in self._caches.values():
                 cache.clear()
 
     def clear_cache(self, name: str) -> None:
-        """Clear a specific cache by name."""
+        """Empty the named cache; an unknown name does nothing.
+        """
         with self._lock:
             if name in self._caches:
                 self._caches[name].clear()
 
     def clear_for_table(self, table_name: str) -> None:
-        """Clear all cache entries related to a specific table.
+        """Drop every entry, in every cache, whose key mentions a table.
 
-        Args:
-            table_name: Name of the table to clear cache entries for
+        Parameters
+        ----------
+        table_name : str
+            Matched case-insensitively as a substring of str(key), so
+            'orders' also drops the entries of 'orders_archive'. An empty
+            name logs a warning and drops nothing.
         """
         if not table_name:
             logger.warning('clear_for_table called with an empty table name; '
@@ -82,16 +96,18 @@ class Cache:
                 for key in keys_to_clear:
                     if key in cache:
                         del cache[key]
-                        logger.debug(f'Cleared cache entry {key} for table {table_name}')
+                        logger.debug(
+                            f'Cleared cache entry {key} for table {table_name}')
 
-    # Alias for backwards compatibility
     clear_caches_for_table = clear_for_table
 
     def get_strategy_caches(self) -> dict[str, cachetools.TTLCache]:
-        """Get all strategy-related caches.
+        """Caches named for the cache_name prefixes the shipped strategies use.
 
         Returns
-            Dict mapping cache names to TTLCache instances
+        -------
+        dict[str, cachetools.TTLCache]
+            Live caches keyed by name.
         """
         strategy_prefixes = ('primary_keys_', 'table_columns_',
                              'sequence_columns_', 'sequence_column_finder_')
@@ -101,19 +117,26 @@ class Cache:
         }
 
     def clear_strategy_caches(self) -> None:
-        """Clear all strategy-related caches."""
+        """Empty the caches get_strategy_caches selects; schema caches stay.
+        """
         with self._lock:
             for cache in self.get_strategy_caches().values():
                 cache.clear()
 
     def get_schema_cache(self, connection_id: int | None = None) -> cachetools.TTLCache:
-        """Get schema cache for a connection.
+        """Schema metadata cache for one connection.
 
-        Args:
-            connection_id: Connection identifier, or None for global cache
+        Parameters
+        ----------
+        connection_id : int or None, default None
+            None selects the shared 'schema_global' cache. Any other
+            value, 0 included, gets its own cache named
+            'schema_{connection_id}'.
 
         Returns
-            TTLCache for schema metadata
+        -------
+        cachetools.TTLCache
+            50 entries, 600 seconds each.
         """
         cache_name = ('schema_global' if connection_id is None
                       else f'schema_{connection_id}')
@@ -124,9 +147,24 @@ _MISS = object()
 
 
 def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) -> str:
-    """Create a deterministic cache key from arguments.
+    """Cache key for one call of a cacheable_strategy method.
 
-    Excludes connection objects (detected by cursor/driver_connection attributes).
+    Parameters
+    ----------
+    table_name : str
+        Table the call is for; clear_for_table matches on it.
+    method_args : tuple
+        Positional arguments after cn and table. An argument with a cursor
+        or driver_connection attribute counts as a connection and is left
+        out.
+    method_kwargs : dict
+        Keyword arguments; bypass_cache is left out.
+
+    Returns
+    -------
+    str
+        'table:arg:...:name=value:...' built from repr() of each value,
+        with kwargs sorted by name, the whole key lower-cased.
     """
     args_str = ':'.join(
         repr(arg) for arg in method_args
@@ -143,33 +181,43 @@ def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) 
     return f'{table_name}:{args_str}:{kwargs_str}'.lower()
 
 
-def cacheable_strategy(cache_name: str, ttl: int = 300, maxsize: int = 50):
-    """Decorator for caching strategy method results.
+def cacheable_strategy(cache_name: str, ttl: int = 300,
+                       maxsize: int = 50) -> Callable[[Callable], Callable]:
+    """Decorator that caches a strategy method's result per table.
 
-    Caches results keyed by table name and method arguments.
-    Respects bypass_cache parameter to skip cache lookup.
+    The method must take (self, cn, table, ...).
 
-    Args:
-        cache_name: Base name for the cache
-        ttl: Time-to-live in seconds
-        maxsize: Maximum cache size
+    Parameters
+    ----------
+    cache_name : str
+        Prefix of the cache name. Each class and method gets its own
+        cache, '{cache_name}_{ClassName}_{method name}'.
+    ttl : int, default 300
+        Entry lifetime in seconds.
+    maxsize : int, default 50
+        Entry limit per cache.
+
+    Returns
+    -------
+    Callable
+        Decorator that wraps the method. bypass_cache=True, passed by
+        keyword, runs the method and neither reads nor writes the cache. A
+        hit returns the stored object itself, so mutating it changes the
+        cached value.
     """
-    def decorator(method):
+    def decorator(method: Callable) -> Callable:
         @functools.wraps(method)
-        def wrapper(self, cn, table, *args, bypass_cache=False, **kwargs):
+        def wrapper(self: Any, cn: Any, table: str, *args: Any,
+                    bypass_cache: bool = False, **kwargs: Any) -> Any:
             if bypass_cache:
                 logger.debug(f'Bypassing cache for {method.__name__}({table})')
                 return method(self, cn, table, *args, bypass_cache=True, **kwargs)
 
-            # Notes:
-            # - Only key construction and the cache lookup sit inside the
-            #   try. Wrapping the wrapped call too would re-run it on its
-            #   own KeyError/TypeError/ValueError, firing side effects
-            #   twice before the error reached the caller.
             try:
                 strategy_class = self.__class__.__name__
                 specific_cache_name = f'{cache_name}_{strategy_class}_{method.__name__}'
-                cache = Cache.get_instance().get_cache(specific_cache_name, ttl=ttl, maxsize=maxsize)
+                cache = Cache.get_instance().get_cache(
+                    specific_cache_name, ttl=ttl, maxsize=maxsize)
                 cache_key = _create_cache_key(table, args, kwargs)
                 cached = cache.get(cache_key, _MISS)
             except (KeyError, TypeError, ValueError) as e:
@@ -194,14 +242,6 @@ def cacheable_strategy(cache_name: str, ttl: int = 300, maxsize: int = 50):
 
 
 def get_schema_cache(connection_id: int | None = None) -> cachetools.TTLCache:
-    """Get schema cache for a connection.
-
-    Args:
-        connection_id: Connection identifier, or None for global cache
-
-    Returns
-        TTLCache for schema metadata
+    """Cache.get_schema_cache on the shared Cache instance.
     """
-    cache_name = ('schema_global' if connection_id is None
-                  else f'schema_{connection_id}')
-    return Cache.get_instance().get_cache(cache_name, maxsize=50, ttl=600)
+    return Cache.get_instance().get_schema_cache(connection_id)

@@ -1,16 +1,8 @@
-"""
-PostgreSQL-specific strategy implementation.
-
-This module implements the DatabaseStrategy interface with PostgreSQL-specific operations.
-It handles PostgreSQL's unique features such as:
-- VACUUM and ANALYZE for table optimization
-- REINDEX for index rebuilding
-- CLUSTER for physical reordering of table data
-- Sequence management for auto-increment columns
-- Metadata retrieval using PostgreSQL system catalogs
+"""PostgreSQL strategy: maintenance, sequences, catalog metadata, upsert SQL.
 """
 import logging
 import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
 from urllib.parse import quote, quote_plus
@@ -22,15 +14,21 @@ from database.sql import _split_qualified_identifier, make_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
 from database.types import postgres_types
 
+if TYPE_CHECKING:
+    from database.connection import ConnectionWrapper
+    from database.options import DatabaseOptions
+
 logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def temporary_autocommit(connection):
-    """Context manager to temporarily enable autocommit on a connection.
+def temporary_autocommit(connection: Any) -> Iterator[None]:
+    """Turn autocommit on for the block, then restore the prior setting.
 
-    Saves current autocommit state, enables autocommit, executes the block,
-    then restores the original state.
+    Parameters
+    ----------
+    connection : Any
+        Object with a settable autocommit attribute.
     """
     original = connection.autocommit
     try:
@@ -41,25 +39,24 @@ def temporary_autocommit(connection):
 
 
 def _escape_string_literal(s: str) -> str:
-    """Escape a string for use as a PostgreSQL string literal."""
+    """s with each single quote doubled, for use inside '...'.
+    """
     return s.replace("'", "''")
 
 
 def _split_schema_table(table: str) -> tuple[str | None, str]:
-    """Return (schema, table_name) for a possibly-qualified identifier.
+    """(schema, name) of a table, with schema None when unqualified.
 
-    Returns (None, name) for an unqualified table, or (schema, name) for
-    a 'schema.table' or '"schema"."table"' form.
+    Parameters
+    ----------
+    table : str
+        'name', 'schema.name', or the double-quoted form of either.
+        Quotes are removed from both parts.
     """
     parts = _split_qualified_identifier(table)
     if len(parts) >= 2:
         return parts[-2], parts[-1]
     return None, parts[-1]
-
-
-if TYPE_CHECKING:
-    from database.connection import ConnectionWrapper
-    from database.options import DatabaseOptions
 
 
 @register_strategy('postgresql')
@@ -69,15 +66,23 @@ class PostgresStrategy(DatabaseStrategy):
 
     @property
     def dialect_name(self) -> str:
-        """Return the dialect identifier for PostgreSQL."""
+        """'postgresql'.
+        """
         return 'postgresql'
 
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
-        """Build the SQLAlchemy connection URL for PostgreSQL.
+        """psycopg URL for options, with TCP keepalives always on.
 
-        Username, password, database, and appname are URL-encoded so
-        that special characters can't corrupt URL parsing or inject
-        libpq parameters via the query string.
+        Parameters
+        ----------
+        options : DatabaseOptions
+            timeout becomes connect_timeout in seconds, and appname becomes
+            application_name.
+
+        Returns
+        -------
+        str
+            postgresql+psycopg URL with libpq settings in its query string.
         """
         user = quote(options.username or '', safe='')
         pwd = quote(options.password or '', safe='')
@@ -88,27 +93,18 @@ class PostgresStrategy(DatabaseStrategy):
             'keepalives_idle=30',
             'keepalives_interval=10',
             'keepalives_count=5',
-        ]
+            ]
         if options.timeout:
             query_parts.append(f'connect_timeout={options.timeout}')
         if options.appname:
             query_parts.append(f'application_name={quote_plus(options.appname)}')
 
-        url = (f'postgresql+psycopg://{user}:{pwd}'
-               f'@{options.hostname}:{options.port}/{db}')
-
-        url += '?' + '&'.join(query_parts)
-
-        return url
+        return (f'postgresql+psycopg://{user}:{pwd}'
+                f'@{options.hostname}:{options.port}/{db}'
+                f"?{'&'.join(query_parts)}")
 
     def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
-        """Return SQLAlchemy create_engine kwargs for PostgreSQL.
-
-        When pooling is enabled, set max_overflow=0 so the configured
-        pool_size is a hard ceiling, pool_pre_ping=True so stale
-        connections are detected before the caller sees the error, and
-        pool_reset_on_return='rollback' so an aborted transaction does
-        not leak across checkouts.
+        """create_engine kwargs: pool settings when options.use_pool, else {}.
         """
         kwargs: dict[str, Any] = {}
         if options.use_pool:
@@ -118,36 +114,34 @@ class PostgresStrategy(DatabaseStrategy):
         return kwargs
 
     def register_type_adapters(self, connection: Any) -> None:
-        """Register dialect-specific type adapters for PostgreSQL.
-
-        PostgreSQL with psycopg doesn't need special adapters.
+        """No-op: psycopg needs no adapters registered.
         """
 
     def create_dict_cursor(self, raw_conn: Any) -> Any:
-        """Create a cursor that returns rows as dictionaries.
-
-        Uses DictRowFactory for PostgreSQL connections.
+        """Cursor on raw_conn whose rows come from DictRowFactory.
         """
         return raw_conn.cursor(row_factory=DictRowFactory)
 
     def get_type_map(self) -> dict[int, type]:
-        """Return mapping of PostgreSQL type codes to Python types."""
+        """PostgreSQL type OID to Python type.
+        """
         return postgres_types
 
     @classmethod
     def get_required_options(cls) -> list[str]:
-        """Return required options for PostgreSQL connections."""
+        """Option fields a PostgreSQL connection must set.
+        """
         return ['hostname', 'username', 'password', 'database', 'port', 'timeout']
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Optimize a table with VACUUM.
+        """Run vacuum (full, analyze) on table, outside any transaction.
         """
         with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
             self._execute_raw(cn, f'vacuum (full, analyze) {quoted_table}')
 
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Rebuild indexes for a table.
+        """Run reindex table on table, outside any transaction.
         """
         with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
@@ -155,7 +149,17 @@ class PostgresStrategy(DatabaseStrategy):
 
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
-        """Order table data according to an index.
+        """Run cluster on table, outside any transaction.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to run on.
+        table : str
+            Table name, optionally schema-qualified.
+        index : str or None, default None
+            Index to order by. None reuses the last one, and PostgreSQL
+            raises when the table was never clustered.
         """
         with temporary_autocommit(cn.connection):
             quoted_table = self.quote_identifier(table)
@@ -167,7 +171,16 @@ class PostgresStrategy(DatabaseStrategy):
 
     def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
                        identity: str | None = None) -> None:
-        """Reset the sequence for a table.
+        """Point table's serial sequence at max(identity) + 1, or 1 if empty.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper or Transaction
+            A Transaction runs on the connection it holds.
+        table : str
+            Table name, optionally schema-qualified.
+        identity : str or None, default None
+            Serial column. None picks one with find_sequence_column.
         """
         if identity is None:
             identity = self.find_sequence_column(cn, table)
@@ -179,11 +192,11 @@ class PostgresStrategy(DatabaseStrategy):
 
         sql = f"""
 select
-    setval(pg_get_serial_sequence('{escaped_table}', '{escaped_identity}'), coalesce(max({quoted_identity}),0)+1, false)
+    setval(pg_get_serial_sequence('{escaped_table}', '{escaped_identity}'),
+           coalesce(max({quoted_identity}), 0) + 1, false)
 from
 {quoted_table}
 """
-        # Handle both ConnectionWrapper and Transaction (which wraps a connection)
         conn = getattr(cn, 'cn', cn)
         self._select_raw(conn, sql)
 
@@ -191,36 +204,31 @@ from
 
     def copy_from(self, cn: 'ConnectionWrapper', table: str,
                   file: TextIO, columns: list[str] | None = None) -> int:
-        """Bulk load CSV text into table with PostgreSQL COPY.
+        """Bulk load CSV text into table with PostgreSQL copy.
 
         Parameters
         ----------
         cn : ConnectionWrapper
-            Connection whose raw DBAPI connection runs the COPY.
+            Connection whose raw DBAPI connection runs the copy.
         table : str
             Table name, optionally schema-qualified.
         file : TextIO
-            CSV text with no header row; an empty field loads as NULL.
+            CSV text with no header row. An empty field loads as null.
         columns : list[str] or None, default None
-            Target columns in file order; None means every column of table.
+            Target columns in file order. None means every column of table.
 
         Returns
         -------
         int
             Rows loaded.
-
-        Notes
-        -----
-        - A failed COPY logs at ERROR with the statement and traceback, then
-          re-raises.
         """
         quoted_table = self.quote_identifier(table)
 
         if columns:
             quoted_cols = ','.join(self.quote_identifier(c) for c in columns)
-            sql = f"COPY {quoted_table} ({quoted_cols}) FROM STDIN WITH (FORMAT csv, NULL '')"
+            sql = f"copy {quoted_table} ({quoted_cols}) from stdin with (format csv, null '')"
         else:
-            sql = f"COPY {quoted_table} FROM STDIN WITH (FORMAT csv, NULL '')"
+            sql = f"copy {quoted_table} from stdin with (format csv, null '')"
 
         cursor = cn.dbapi_connection.cursor()
         try:
@@ -237,7 +245,7 @@ from
     @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
-        """Get primary key columns for a table.
+        """Primary key column names of table, in no set order.
         """
         sql = """
 select a.attname as column
@@ -250,51 +258,45 @@ where i.indrelid = %s::regclass and i.indisprimary
     @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
-        """Get all columns for a table.
+        """Column names of table. Raises unless the hstore extension exists.
         """
         quoted_table = self.quote_identifier(table)
         sql = f"""
 select skeys(hstore(null::{quoted_table})) as column
-    """
+"""
         return self._select_column_raw(cn, sql)
 
     @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
-        """Get columns with sequences.
+        """Columns of table whose default draws from a sequence.
+
+        An unqualified table matches that name in every schema.
         """
         schema, name = _split_schema_table(table)
-        if schema is not None:
-            sql = """
-            SELECT column_name as column
-            FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
-            AND column_default LIKE 'nextval%%'
-            """
-            return self._select_column_raw(cn, sql, (schema, name))
-        sql = """
-        SELECT column_name as column
-        FROM information_schema.columns
-        WHERE table_name = %s
-        AND column_default LIKE 'nextval%%'
-        """
-        return self._select_column_raw(cn, sql, (name,))
+        schema_clause = 'table_schema = %s and ' if schema is not None else ''
+        sql = f"""
+select column_name as column
+from information_schema.columns
+where {schema_clause}table_name = %s
+and column_default like 'nextval%%'
+"""
+        params = (schema, name) if schema is not None else (name,)
+        return self._select_column_raw(cn, sql, params)
 
     def configure_connection(self, conn: Any) -> None:
-        """Configure connection settings for PostgreSQL.
+        """Turn autocommit on.
         """
-        raw_conn = conn
-        if hasattr(conn, 'driver_connection'):
-            raw_conn = conn.driver_connection
+        raw_conn = getattr(conn, 'driver_connection', conn)
         self.enable_autocommit(raw_conn)
 
     def enable_autocommit(self, raw_conn: Any) -> None:
-        """Enable auto-commit mode for PostgreSQL.
+        """Set raw_conn.autocommit to True.
         """
         raw_conn.autocommit = True
 
     def disable_autocommit(self, raw_conn: Any) -> None:
-        """Disable auto-commit mode for PostgreSQL.
+        """Set raw_conn.autocommit to False.
         """
         raw_conn.autocommit = False
 
@@ -305,79 +307,90 @@ select skeys(hstore(null::{quoted_table})) as column
         ----------
         conn : Any
             Pooled or raw psycopg connection.
-
-        Notes
-        -----
-        - Every transaction on the session then starts read only, so
-          the server rejects INSERT, UPDATE, DELETE, DDL, and a
-          row-locking SELECT.
-        - VACUUM and ANALYZE run outside a transaction block and stay
-          permitted; the local guard is what stops those.
         """
-        raw_conn = conn
-        if hasattr(conn, 'driver_connection'):
-            raw_conn = conn.driver_connection
-        raw_conn.execute('SET default_transaction_read_only = on')
+        raw_conn = getattr(conn, 'driver_connection', conn)
+        raw_conn.execute('set default_transaction_read_only = on')
 
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
-        """Get the definition of a constraint or unique index by name.
+        """Conflict target of a named unique index or constraint.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table name. Any schema prefix is ignored.
+        constraint_name : str
+            Index or constraint name.
+
+        Returns
+        -------
+        str
+            For a unique index, the parenthesized column list plus any
+            where predicate. For a unique or primary key constraint, its
+            column list without parentheses.
+
+        Raises
+        ------
+        QueryError
+            No unique index or check, primary key, or unique constraint of
+            that name exists on table, or its definition has no column list.
         """
-        parts = table.split('.')
-        table_name = parts[-1].strip('"')
+        table_name = table.split('.')[-1].strip('"')
 
         union_query = """
-        SELECT
-            indexdef AS definition,
-            'index' AS source
-        FROM
-            pg_indexes
-        WHERE
-            indexname = %s
-            AND tablename = %s
-            AND indexdef ~ 'CREATE UNIQUE INDEX'
+select
+    indexdef as definition,
+    'index' as source
+from
+    pg_indexes
+where
+    indexname = %s
+    and tablename = %s
+    and indexdef ~ 'CREATE UNIQUE INDEX'
 
-        UNION ALL
+union all
 
-        SELECT
-            pg_get_constraintdef(c.oid) AS definition,
-            'constraint' AS source
-        FROM
-            pg_constraint c
-            JOIN pg_class tbl ON c.conrelid = tbl.oid
-            JOIN pg_namespace n ON tbl.relnamespace = n.oid
-        WHERE
-            c.conname = %s
-            AND tbl.relname = %s
-            AND c.contype IN ('c', 'p', 'u')
-
-        """
-
-        result = self._select_raw(cn, union_query, (constraint_name, table_name, constraint_name, table_name))
+select
+    pg_get_constraintdef(c.oid) as definition,
+    'constraint' as source
+from
+    pg_constraint c
+    join pg_class tbl on c.conrelid = tbl.oid
+    join pg_namespace n on tbl.relnamespace = n.oid
+where
+    c.conname = %s
+    and tbl.relname = %s
+    and c.contype in ('c', 'p', 'u')
+"""
+        result = self._select_raw(
+            cn, union_query,
+            (constraint_name, table_name, constraint_name, table_name))
 
         if not result:
             raise QueryError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
 
-        definition = result[0]['definition']
-        source = result[0]['source']
+        definition = result[0]['definition'].strip()
 
-        definition = definition.strip()
-
-        if source == 'constraint':
-            match = re.search(r'(?:UNIQUE|PRIMARY KEY)\s*\(([^)]+)\)', definition, re.IGNORECASE)
-            if match:
-                return match.group(1)
-            match = re.search(r'\(([^)]+)\)', definition)
-            if match:
-                return match.group(1)
-        else:
+        if result[0]['source'] != 'constraint':
             return extract_index_definition(definition)
+
+        match = re.search(
+            r'(?:UNIQUE|PRIMARY KEY)\s*\(([^)]+)\)', definition, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        match = re.search(r'\(([^)]+)\)', definition)
+        if match:
+            return match.group(1)
 
         raise QueryError(f'Failed to extract regex from definition: {definition}')
 
     def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get columns suitable for general data display.
+        """Text, boolean, numeric, date, and time columns of table, in order.
+
+        Uncached. An unqualified table matches that name in every schema.
         """
         schema, name = _split_schema_table(table)
         schema_clause = 't.table_schema = %s and ' if schema is not None else ''
@@ -398,7 +411,9 @@ t.ordinal_position
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get all column names for a table ordered by their position.
+        """Column names of table in declaration order.
+
+        Uncached. An unqualified table matches that name in every schema.
         """
         schema, name = _split_schema_table(table)
         schema_clause = 't.table_schema = %s and ' if schema is not None else ''
@@ -416,7 +431,7 @@ t.ordinal_position
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
-        """Find the best column to reset sequence for.
+        """Column of table that reset_sequence should target.
         """
         return self._find_sequence_column_impl(cn, table, bypass_cache=bypass_cache)
 
@@ -429,57 +444,86 @@ t.ordinal_position
         update_cols_always: list[str] | None = None,
         update_cols_ifnull: list[str] | None = None,
     ) -> str:
-        """Generate PostgreSQL upsert SQL using INSERT ... ON CONFLICT.
+        """insert ... on conflict statement with one %s per column.
 
-        Args:
-            table: Target table name
-            columns: All columns to insert
-            key_columns: Columns for conflict detection (used if constraint_expr is None)
-            constraint_expr: Pre-resolved constraint expression from get_constraint_definition()
-            update_cols_always: Columns to always update on conflict
-            update_cols_ifnull: Columns to update only if target is NULL
+        Parameters
+        ----------
+        table : str
+            Target table, optionally schema-qualified.
+        columns : list[str]
+            Columns to insert, in placeholder order.
+        key_columns : list[str]
+            Conflict target, used only when constraint_expr is empty.
+        constraint_expr : str or None, default None
+            Conflict target from get_constraint_definition, inserted
+            after on conflict as is.
+        update_cols_always : list[str] or None, default None
+            Columns overwritten on conflict.
+        update_cols_ifnull : list[str] or None, default None
+            Columns written on conflict only where the stored value is null.
+
+        Returns
+        -------
+        str
+            The statement, ending do nothing when both update lists are
+            empty.
         """
         quoted_table = self.quote_identifier(table)
         quoted_columns = [self.quote_identifier(col) for col in columns]
         placeholders = make_placeholders(len(columns), 'postgresql')
 
-        insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
+        insert_sql = f"insert into {quoted_table} ({', '.join(quoted_columns)}) values ({placeholders})"
 
         if constraint_expr:
-            conflict_sql = f'ON CONFLICT {constraint_expr}'
+            conflict_sql = f'on conflict {constraint_expr}'
         else:
             quoted_keys = [self.quote_identifier(k) for k in key_columns]
-            conflict_sql = f"ON CONFLICT ({', '.join(quoted_keys)})"
+            conflict_sql = f"on conflict ({', '.join(quoted_keys)})"
 
         if not (update_cols_always or update_cols_ifnull):
-            return f'{insert_sql} {conflict_sql} DO NOTHING'
+            return f'{insert_sql} {conflict_sql} do nothing'
 
         update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
-        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)}"
+        return f"{insert_sql} {conflict_sql} do update set {', '.join(update_exprs)}"
 
 
 def extract_index_definition(definition: str) -> str:
-    """Extract column list and WHERE clause from a PostgreSQL unique index definition.
+    """on conflict target read from a CREATE UNIQUE INDEX statement.
 
-    This function parses PostgreSQL CREATE UNIQUE INDEX statements to extract:
-    1. The column specification, which may include functions like COALESCE
-    2. Any WHERE clause that makes the uniqueness conditional
+    Parameters
+    ----------
+    definition : str
+        pg_indexes.indexdef text of a unique index.
+
+    Returns
+    -------
+    str
+        The parenthesized column list, plus ' WHERE <predicate>' for a
+        partial index. NULLS NOT DISTINCT is dropped.
+
+    Raises
+    ------
+    QueryError
+        definition holds no parenthesized group.
     """
-    pattern = r'CREATE\s+UNIQUE\s+INDEX\s+\w+\s+ON\s+(?:[a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+(?:\s+USING\s+\w+)?\s+(\(.*?\))(?:\s+NULLS\s+NOT\s+DISTINCT)?(?:\s+WHERE\s+(.*?))?$'
+    pattern = (
+        r'CREATE\s+UNIQUE\s+INDEX\s+\w+'
+        r'\s+ON\s+(?:[a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+'
+        r'(?:\s+USING\s+\w+)?'
+        r'\s+(\(.*?\))'
+        r'(?:\s+NULLS\s+NOT\s+DISTINCT)?'
+        r'(?:\s+WHERE\s+(.*?))?$')
 
     match = re.search(pattern, definition)
     if match:
-        column_clause = match.group(1)
-        where_clause = match.group(2)
+        column_clause, where_clause = match.group(1), match.group(2)
         if where_clause:
             return f'{column_clause} WHERE {where_clause}'
-        else:
-            return column_clause
+        return column_clause
 
     paren_match = re.search(r'\(([^()]*(?:\([^()]*\)[^()]*)*)\)', definition)
     if paren_match:
         column_def = paren_match.group(0)
-
         where_match = re.search(r'\)\s+WHERE\s+(.*?)(?:\s*$|\s+NULLS)', definition)
         if where_match:
             return f'{column_def} WHERE {where_match.group(1)}'

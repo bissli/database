@@ -1,13 +1,4 @@
-"""
-SQLite-specific strategy implementation.
-
-This module implements the DatabaseStrategy interface with SQLite-specific operations.
-It handles SQLite's unique features and limitations such as:
-- Database-wide VACUUM (no table-specific optimization)
-- REINDEX for index rebuilding
-- Lack of CLUSTER support
-- Automatic rowid management (no explicit sequence resetting needed)
-- Metadata retrieval using SQLite PRAGMA statements
+"""SQLite DatabaseStrategy, registered for the 'sqlite' dialect.
 """
 import datetime
 import json
@@ -35,7 +26,8 @@ OPEN_MODES = {'ro': 'mode=ro', 'immutable': 'mode=ro&immutable=1'}
 
 
 def _raw_sqlite(conn: Any) -> Any:
-    """Return the sqlite3 connection behind a pooled wrapper."""
+    """The sqlite3 connection behind a pooled wrapper, or conn itself.
+    """
     if hasattr(conn, 'dbapi_connection'):
         return conn.dbapi_connection
     return conn
@@ -61,10 +53,7 @@ def _pragma_target(table: str) -> tuple[str, str | None]:
 
 
 def _is_memory_db(sqlite_conn: Any) -> bool:
-    """Return True when the 'main' database is backed by ':memory:'.
-
-    PRAGMA database_list yields (seq, name, file); the file path is
-    empty for in-memory databases.
+    """True when 'main' has no file: ':memory:' or the '' temporary database.
     """
     cursor = sqlite_conn.execute('pragma database_list')
     for row in cursor.fetchall():
@@ -75,9 +64,6 @@ def _is_memory_db(sqlite_conn: Any) -> bool:
 
 class JsonBindingCursor(sqlite3.Cursor):
     """sqlite3 cursor that binds a dict or list parameter as JSON text.
-
-    A raw sqlite3 connection in the same process keeps raising
-    ProgrammingError on a dict or list.
     """
 
     def execute(self, sql: str, parameters: Any = (), /) -> 'JsonBindingCursor':
@@ -103,10 +89,9 @@ class JsonBindingCursor(sqlite3.Cursor):
         Returns
         -------
         dict or tuple
-            A dict for named parameters, else a tuple.
+            A dict for named parameters, else a tuple. A dict or list
+            subclass, such as attrdict, passes through unchanged.
         """
-        # Exact types, as sqlite3 matches an adapter, so a dict
-        # subclass such as attrdict still raises.
         if isinstance(parameters, dict):
             return {
                 name: json.dumps(value) if type(value) in {dict, list} else value
@@ -124,7 +109,8 @@ class SQLiteStrategy(DatabaseStrategy):
 
     @property
     def dialect_name(self) -> str:
-        """Return the dialect identifier for SQLite."""
+        """'sqlite'.
+        """
         return 'sqlite'
 
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
@@ -147,55 +133,62 @@ class SQLiteStrategy(DatabaseStrategy):
         return f'sqlite:///{file_uri}?{OPEN_MODES[options.open_mode]}&uri=true'
 
     def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
-        """Return SQLAlchemy create_engine kwargs for SQLite."""
+        """create_engine kwargs that turn on sqlite3's type converters.
+        """
         return {
             'connect_args': {
-                'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
+                'detect_types': sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                },
             }
-        }
 
     def register_type_adapters(self, connection: Any) -> None:
-        """Register dialect-specific type adapters and converters for SQLite.
+        """Register the sqlite3 date and datetime adapters and converters.
 
-        Notes
-        -----
-        - The date, datetime and timestamp registrations replace the
-          stdlib defaults, which Python 3.12 deprecates. A bound datetime
-          keeps the stdlib's text form, ISO 8601 with a space separator.
+        Parameters
+        ----------
+        connection : Any
+            Raw sqlite3 connection. The registrations are global to the
+            sqlite3 module.
         """
-        # Adapters (Python -> SQLite)
         sqlite3.register_adapter(datetime.date, datetime.date.isoformat)
-        # The space keeps new rows comparable and sortable as text
-        # against rows the stdlib adapter already wrote.
+        # The space keeps new rows sortable as text against rows the
+        # stdlib adapter wrote.
         sqlite3.register_adapter(
             datetime.datetime,
             lambda value: value.isoformat(' '))
 
-        # Converters (SQLite -> Python)
         connection.execute('select 1')
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
         sqlite3.register_converter('timestamp', convert_datetime)
 
     def create_dict_cursor(self, raw_conn: Any) -> Any:
-        """Create a cursor that returns rows as dictionaries.
+        """Cursor whose rows are sqlite3.Row and which binds JSON.
 
-        Uses sqlite3.Row for SQLite connections, and binds a dict or list
-        parameter as JSON text.
+        Parameters
+        ----------
+        raw_conn : Any
+            Pooled or raw sqlite3 connection. Its row_factory is set to
+            sqlite3.Row, so every later cursor on it returns Row too.
+
+        Returns
+        -------
+        JsonBindingCursor
+            Binds a dict or list parameter as JSON text.
         """
-        sqlite_conn = raw_conn
-        if hasattr(raw_conn, 'dbapi_connection'):
-            sqlite_conn = raw_conn.dbapi_connection
+        sqlite_conn = _raw_sqlite(raw_conn)
         sqlite_conn.row_factory = sqlite3.Row
         return sqlite_conn.cursor(factory=JsonBindingCursor)
 
     def get_type_map(self) -> dict[str, type]:
-        """Return mapping of SQLite type names to Python types."""
+        """SQLite declared type name to Python type.
+        """
         return sqlite_types
 
     @classmethod
     def get_required_options(cls) -> list[str]:
-        """Return required options for SQLite connections."""
+        """['database'].
+        """
         return ['database']
 
     @classmethod
@@ -225,33 +218,42 @@ class SQLiteStrategy(DatabaseStrategy):
                 f'got {options.open_mode!r}')
 
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Optimize a table with VACUUM.
+        """Vacuum the whole database; table is ignored.
         """
         self._execute_raw(cn, 'vacuum')
         logger.info('Executed VACUUM on entire SQLite database (table-specific vacuum not supported)')
 
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Rebuild indexes for a table.
+        """Rebuild every index on a table.
         """
         quoted_table = self.quote_identifier(table)
         self._execute_raw(cn, f'reindex {quoted_table}')
 
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
-        """SQLite doesn't support CLUSTER.
+        """Log a warning and do nothing.
         """
         logger.warning('CLUSTER operation not supported in SQLite')
 
     def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
                        identity: str | None = None) -> None:
-        """SQLite doesn't need explicit sequence resetting.
+        """Change nothing, since SQLite assigns rowids without a sequence.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to the database.
+        table : str
+            Table name.
+        identity : str or None, default None
+            Ignored.
         """
         if identity is None:
             identity = self.find_sequence_column(cn, table)
 
     def copy_from(self, cn: 'ConnectionWrapper', table: str,
                   file: TextIO, columns: list[str] | None = None) -> int:
-        """SQLite doesn't support COPY.
+        """Log a warning and return 0, loading nothing.
         """
         logger.warning('COPY operation not supported in SQLite, use insert_rows instead')
         return 0
@@ -259,7 +261,23 @@ class SQLiteStrategy(DatabaseStrategy):
     @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
-        """Get primary key columns for a table.
+        """Primary key columns of a table, in column order.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to the database.
+        table : str
+            Table name in any form _pragma_target accepts. A missing table
+            returns [].
+        bypass_cache : bool, default False
+            Read the database and skip the strategy cache.
+
+        Returns
+        -------
+        list[str]
+            Column names in column-position order: 'primary key (b, a)'
+            over columns a, b returns ['a', 'b'].
         """
         sql = """
 select l.name as column from pragma_table_info(?, ?) as l where l.pk <> 0
@@ -269,17 +287,17 @@ select l.name as column from pragma_table_info(?, ?) as l where l.pk <> 0
     @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
-        """Get all columns for a table.
+        """Column names of a table, or [] for a missing table.
         """
         sql = """
 select name as column from pragma_table_info(?, ?)
-    """
+"""
         return self._select_column_raw(cn, sql, _pragma_target(table))
 
     @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
-        """SQLite uses rowid but reports primary keys as sequence columns.
+        """The primary key columns, which stand in for SQLite's rowid.
         """
         return self.get_primary_keys(cn, table, bypass_cache=bypass_cache)
 
@@ -290,12 +308,6 @@ select name as column from pragma_table_info(?, ?)
         ----------
         conn : Any
             Pooled or raw sqlite3 connection.
-
-        Notes
-        -----
-        - foreign_keys, busy_timeout, the row factory, and auto-commit
-          live in the connection, not the database, so a reader takes
-          them too.
         """
         sqlite_conn = _raw_sqlite(conn)
         sqlite_conn.execute('pragma foreign_keys = on')
@@ -310,28 +322,18 @@ select name as column from pragma_table_info(?, ?)
         Parameters
         ----------
         conn : Any
-            Pooled or raw sqlite3 connection.
+            Pooled or raw sqlite3 connection. A connection with no file
+            behind it, such as ':memory:', is left untouched.
         options : DatabaseOptions
             journal_mode names the mode. 'wal' takes synchronous
-            NORMAL, every other mode FULL.
+            normal, every other mode full.
 
-        Notes
-        -----
-        - Only WAL is stored in the database header. Setting it changes
-          the file for every later opener and fails on a database whose
-          permissions deny writing. query_only does not cover it, which
-          is why a reader has to skip it rather than rely on the
-          session setting.
-        - A WAL file switched to another mode raises 'database is
-          locked' at once, whatever busy_timeout says, while any other
-          connection has read the file since opening it.
-        - Setting the mode the file already has needs only the shared
-          lock any read takes, so another connection's read or write
-          transaction never blocks it.
-        - synchronous is set in both branches, so a pooled connection
-          never keeps the level an earlier checkout chose.
-        - Skipped for ':memory:', which has no on-disk log to write
-          ahead of.
+        Raises
+        ------
+        sqlite3.OperationalError
+            'database is locked', at once despite busy_timeout, when
+            switching a WAL file to another mode while another connection
+            has read it.
         """
         sqlite_conn = _raw_sqlite(conn)
         if _is_memory_db(sqlite_conn):
@@ -351,19 +353,12 @@ select name as column from pragma_table_info(?, ?)
         raw_conn.isolation_level = 'DEFERRED'
 
     def set_session_readonly(self, conn: Any) -> None:
-        """Put a SQLite connection in read-only mode.
+        """Make a connection refuse every write, DDL included.
 
         Parameters
         ----------
         conn : Any
             Pooled or raw sqlite3 connection.
-
-        Notes
-        -----
-        - query_only makes the database reject every write on this
-          connection, including DDL, while leaving reads untouched.
-        - It does not cover journal_mode, which is why
-          configure_writer_connection holds that pragma instead.
         """
         _raw_sqlite(conn).execute('pragma query_only = on')
 
@@ -379,7 +374,27 @@ select name as column from pragma_table_info(?, ?)
 
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
-        """Get the definition of a constraint by name (SQLite implementation).
+        """Columns of the index named constraint_name, read as unique.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to the database.
+        table : str
+            Used only in the error message. The index is found by name
+            alone.
+        constraint_name : str
+            Index name.
+
+        Returns
+        -------
+        dict[str, Any]
+            'name', 'definition' as 'unique (col, ...)', and 'columns'.
+
+        Raises
+        ------
+        QueryError
+            When no index has that name.
         """
         logger.warning("SQLite doesn't fully support constraint definition retrieval")
         quoted_constraint = quote_identifier(constraint_name, 'sqlite')
@@ -394,11 +409,11 @@ select name as column from pragma_table_info(?, ?)
             'name': constraint_name,
             'definition': f"unique ({', '.join(columns)})",
             'columns': columns,
-        }
+            }
 
     def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get columns suitable for general data display.
+        """Column names of a table in position order, never cached.
         """
         sql = """
 select name from pragma_table_info(?, ?)
@@ -408,7 +423,7 @@ order by cid
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get all column names for a table ordered by their position.
+        """Column names of a table in position order, never cached.
         """
         sql = """
 select name from pragma_table_info(?, ?)
@@ -424,7 +439,21 @@ order by cid
 
     def get_unique_columns(self, cn: 'ConnectionWrapper', table: str,
                            bypass_cache: bool = False) -> list[list[str]]:
-        """Get columns that have UNIQUE constraints (excluding primary key).
+        """Columns of each unique index other than the primary key's.
+
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to the database.
+        table : str
+            Table name in any form _pragma_target accepts.
+        bypass_cache : bool, default False
+            Passed to get_primary_keys.
+
+        Returns
+        -------
+        list[list[str]]
+            Each index's columns in index order.
         """
         name, schema = _pragma_target(table)
         sql = 'select name from pragma_index_list(?, ?) where "unique" = 1'
@@ -433,12 +462,12 @@ order by cid
         unique_columns = []
         primary_keys = set(self.get_primary_keys(cn, table, bypass_cache=bypass_cache))
 
-        for idx_name in index_names:
+        for index_name in index_names:
             col_sql = 'select name from pragma_index_info(?, ?)'
-            cols = self._select_column_raw(cn, col_sql, (idx_name, schema))
+            index_columns = self._select_column_raw(cn, col_sql, (index_name, schema))
 
-            if cols and set(cols) != primary_keys:
-                unique_columns.append(cols)
+            if index_columns and set(index_columns) != primary_keys:
+                unique_columns.append(index_columns)
 
         return unique_columns
 
@@ -451,7 +480,6 @@ order by cid
             Every table except SQLite's internal 'sqlite_' tables. Views
             and temporary tables are left out.
         """
-        # GLOB, because LIKE reads the '_' in 'sqlite_' as a wildcard.
         sql = """
 select name from sqlite_master
 where type = 'table' and name not glob 'sqlite_*'
@@ -487,8 +515,7 @@ where type = 'table' and name = ? collate nocase
         Returns
         -------
         list[ColumnInfo]
-            One record per column, read from pragma_table_info, which
-            leaves out generated columns.
+            One record per column. Generated columns are left out.
 
         Raises
         ------
@@ -528,7 +555,7 @@ order by cid
         list[list[str | None]]
             Each index's columns in index order, primary-key and partial
             indexes included. An expression column appears as None. An
-            INTEGER PRIMARY KEY is the rowid and has no index, so it does
+            integer primary key is the rowid and has no index, so it does
             not appear.
         """
         sql = """
@@ -540,11 +567,12 @@ order by il.name, ii.seqno
 """
         columns_by_index: dict[str, list[str | None]] = {}
         for row in self._select_raw(cn, sql, (table,)):
-            columns_by_index.setdefault(row['index_name'], []).append(row['column_name'])
+            columns_by_index.setdefault(
+                row['index_name'], []).append(row['column_name'])
         return list(columns_by_index.values())
 
     def table_ddl(self, cn: 'ConnectionWrapper', table: str) -> str:
-        """CREATE TABLE statement text as SQLite stored it.
+        """The create table statement as SQLite stored it.
 
         Parameters
         ----------
@@ -554,7 +582,7 @@ order by il.name, ii.seqno
         Returns
         -------
         str
-            The statement as written, with any later ALTER TABLE applied.
+            The statement as written, with any later alter table applied.
             It leaves out the table's indexes and triggers.
 
         Raises
@@ -580,15 +608,37 @@ where type = 'table' and name = ? collate nocase
         update_cols_always: list[str] | None = None,
         update_cols_ifnull: list[str] | None = None,
     ) -> str:
-        """Generate SQLite upsert SQL using INSERT ... ON CONFLICT.
+        """An 'insert ... on conflict (key_columns)' statement for one row.
 
-        Note: constraint_expr is ignored for SQLite (only PostgreSQL supports named constraints).
+        Parameters
+        ----------
+        table : str
+            Target table.
+        columns : list[str]
+            Inserted columns, one '?' placeholder each.
+        key_columns : list[str]
+            Conflict target.
+        constraint_expr : str or None, default None
+            Ignored.
+        update_cols_always : list[str] or None, default None
+            Columns set to the incoming value on conflict.
+        update_cols_ifnull : list[str] or None, default None
+            Columns set to the incoming value on conflict only where the
+            stored value is null.
+
+        Returns
+        -------
+        str
+            Ends in 'do nothing' when both update lists are empty or None.
         """
         quoted_table = self.quote_identifier(table)
         quoted_columns = [self.quote_identifier(col) for col in columns]
         placeholders = make_placeholders(len(columns), 'sqlite')
 
-        insert_sql = f"insert into {quoted_table} ({', '.join(quoted_columns)}) values ({placeholders})"
+        column_list = ', '.join(quoted_columns)
+        insert_sql = (
+            f'insert into {quoted_table} ({column_list}) '
+            f'values ({placeholders})')
 
         quoted_keys = [self.quote_identifier(k) for k in key_columns]
         conflict_sql = f"on conflict ({', '.join(quoted_keys)})"
@@ -596,5 +646,6 @@ where type = 'table' and name = ? collate nocase
         if not (update_cols_always or update_cols_ifnull):
             return f'{insert_sql} {conflict_sql} do nothing'
 
-        update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
+        update_exprs = self._build_update_exprs(
+            table, update_cols_always, update_cols_ifnull)
         return f"{insert_sql} {conflict_sql} do update set {', '.join(update_exprs)}"

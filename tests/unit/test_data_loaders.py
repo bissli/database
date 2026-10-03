@@ -13,12 +13,8 @@ from database.types import Column
 def test_numpy_loader_orders_columns_by_metadata():
     """Verify column order and membership come from the Column metadata.
 
-    Mutation: dropping the columns= argument of pd.DataFrame.from_records
-        in pandas_numpy_data_loader, or dropping **kwargs from the loader
-        signature (cursor.load_data always forwards kwargs to the loader).
-    Oracle: hand-written ['age', 'name'] against rows whose dict order is
-        the reverse and which carry an extra key; table_name kwarg exercises
-        the **kwargs path.
+    Mutation: columns= dropped from from_records, or **kwargs from the loader.
+    Oracle: ['age', 'name'] from reversed rows carrying an extra key.
     """
     columns = [
         Column(name='age', type_code=None),
@@ -37,12 +33,10 @@ def test_numpy_loader_orders_columns_by_metadata():
 
 
 def test_numpy_loader_fills_missing_key_with_null():
-    """Verify a row missing a column yields a null, not a shift or a raise.
+    """Verify a row missing a column yields a null in that column.
 
-    Mutation: building the frame by indexing every row for every column
-        (row[col]), the way pandas_pyarrow_data_loader does.
-    Oracle: hand-computed 30 in row 0 and a null in row 1, whose source
-        dict has no 'age' key at all.
+    Mutation: every row indexed as row[col].
+    Oracle: hand-computed [30, null] for the 'age' column.
     """
     columns = [
         Column(name='age', type_code=None),
@@ -61,11 +55,8 @@ def test_numpy_loader_fills_missing_key_with_null():
 def test_pyarrow_loader_returns_arrow_backed_dtypes():
     """Verify the pyarrow loader maps every column to an arrow-backed dtype.
 
-    Mutation: dropping types_mapper=pd.ArrowDtype from the to_pandas call
-        in pandas_pyarrow_data_loader.
-    Oracle: pa.int64()/pa.string()/pa.date32() named independently, plus a
-        differential against pandas_numpy_data_loader, which widens the
-        same nullable integer column to float64.
+    Mutation: types_mapper=pd.ArrowDtype dropped from to_pandas.
+    Oracle: pa.int64/string/date32, and numpy's float64 for the same column.
     """
     columns = [
         Column(name='age', type_code=None),
@@ -98,14 +89,8 @@ def test_pyarrow_loader_returns_arrow_backed_dtypes():
 def test_pyarrow_loader_orders_columns_by_metadata():
     """Verify each arrow column keeps the name and values its metadata gives.
 
-    Mutation: column_names = list(data[0]) in place of
-        Column.get_names(columns) in pandas_pyarrow_data_loader, or
-        transposing the columns_data comprehension, or dropping **kwargs
-        from the loader signature (cursor.load_data always forwards kwargs
-        to the loader).
-    Oracle: hand-written ['age', 'name'] and per-column value lists,
-        against rows whose dict order is the reverse and which carry an
-        extra key; table_name kwarg exercises the **kwargs path.
+    Mutation: names from data[0], columns_data transposed, or **kwargs dropped.
+    Oracle: ['age', 'name'] and per-column values from reversed rows.
     """
     columns = [
         Column(name='age', type_code=None),
@@ -126,12 +111,8 @@ def test_pyarrow_loader_orders_columns_by_metadata():
 def test_pyarrow_loader_nulls_a_missing_column_like_the_numpy_one():
     """Verify both loaders answer a row missing a column the same way.
 
-    Mutation: row[col] in place of row.get(col) in
-        pandas_pyarrow_data_loader, which raises KeyError where the numpy
-        loader nulls the gap - so swapping data_loader would decide
-        whether a sparse result set loads at all.
-    Oracle: a differential against pandas_numpy_data_loader over the same
-        rows, plus hand-computed [30, null] for the sparse column.
+    Mutation: row[col] in place of row.get(col) in the pyarrow loader.
+    Oracle: the numpy loader on the same rows, and hand-computed [30, null].
     """
     columns = [
         Column(name='age', type_code=None),
@@ -155,13 +136,8 @@ def test_pyarrow_loader_nulls_a_missing_column_like_the_numpy_one():
 def test_loaders_keep_columns_for_empty_input(loader):
     """Verify every falsy input returns a 0-row frame carrying the columns.
 
-    Mutation: pd.DataFrame(columns=...) -> pd.DataFrame() in
-        _empty_dataframe (both loaders), or dropping the dtype argument
-        _empty_dataframe forwards, which would leave the pyarrow loader
-        numpy-backed for an empty result and arrow-backed otherwise.
-    Oracle: hand-written ['age', 'name'] and row count 0 for three falsy
-        inputs ([], None, ()), plus the backing each loader uses on a
-        populated frame, named per parametrization.
+    Mutation: columns= dropped in _empty_dataframe, or its dtype argument.
+    Oracle: ['age', 'name'], 0 rows and the loader's backing for [], None, ().
     """
     columns = [
         Column(name='age', type_code=None),
@@ -185,11 +161,8 @@ def test_loaders_keep_columns_for_empty_input(loader):
 def test_loaders_attach_full_column_metadata(loader):
     """Verify attrs['column_types'] carries every field of each column.
 
-    Mutation: dropping the df.attrs assignment, or storing
-        Column.get_names(columns) in place of
-        Column.get_column_types_dict(columns).
-    Oracle: a hand-written metadata dict for a numeric column with
-        precision, scale and nullable all set.
+    Mutation: the attrs assignment dropped, or holding the column names alone.
+    Oracle: hand-written metadata dict for a numeric column.
     """
     columns = [
         Column(
@@ -217,10 +190,8 @@ def test_loaders_attach_full_column_metadata(loader):
 def test_iterdict_loader_copies_rows_into_a_new_list():
     """Verify the loader materializes rows into a list the caller owns.
 
-    Mutation: `return data` in place of `return list(data)` in
-        iterdict_data_loader.
-    Oracle: a tuple input comes back as a list, a generator is drained,
-        and appending to the result leaves the input list at length 2.
+    Mutation: `return data` for `return list(data)`, or rows cut to columns.
+    Oracle: tuple and generator inputs return lists; the input keeps 2 rows.
     """
     rows = [{'a': 1}, {'a': 2}]
 
@@ -235,10 +206,8 @@ def test_iterdict_loader_copies_rows_into_a_new_list():
 def test_iterdict_loader_returns_empty_list_for_no_rows():
     """Verify every falsy input, None included, comes back as [].
 
-    Mutation: `return data` in place of `return []` in
-        iterdict_data_loader.
-    Oracle: hand-written [] for None, [] and (), where None cannot
-        survive list() and () would come back as a tuple.
+    Mutation: `return data` in place of `return []`.
+    Oracle: [] for None, [] and (), checked as a list.
     """
     for empty in (None, [], ()):
         result = iterdict_data_loader(empty, [])
@@ -249,13 +218,8 @@ def test_iterdict_loader_returns_empty_list_for_no_rows():
 def test_use_iterdict_swaps_loader_for_the_call():
     """Verify the decorator installs the dict loader only for the call.
 
-    Mutation: dropping the `cn.options.data_loader = iterdict_data_loader`
-        assignment, or the restore in the finally block, of
-        use_iterdict_data_loader, or reading `cn = args[-1]` instead of
-        `cn = args[0]` so the loader swap targets the wrong argument.
-    Oracle: a 2-arg spy recording the live loader mid-call, checked against
-        iterdict_data_loader and against the original loader afterward; the
-        second argument catches the args[-1] mutation.
+    Mutation: the swap or the restore dropped, or cn read from args[-1].
+    Oracle: a two-argument spy recording the loader mid-call.
     """
     seen = []
 
@@ -275,10 +239,8 @@ def test_use_iterdict_swaps_loader_for_the_call():
 def test_use_iterdict_restores_loader_when_the_call_raises():
     """Verify a raising call still leaves the original loader in place.
 
-    Mutation: moving the restore out of the finally block in
-        use_iterdict_data_loader.
-    Oracle: the loader identity after a deliberate RuntimeError, checked
-        against the pyarrow loader the connection started with.
+    Mutation: the restore moved out of the finally block.
+    Oracle: the loader identity after a RuntimeError.
     """
     @use_iterdict_data_loader
     def blow_up(cn):
@@ -296,12 +258,8 @@ def test_use_iterdict_restores_loader_when_the_call_raises():
 def test_use_iterdict_unwraps_a_transaction():
     """Verify an object holding only .connection is unwrapped to swap on it.
 
-    Mutation: dropping the `cn = cn.connection` unwrap in
-        use_iterdict_data_loader, or changing `func(*args, **kwargs)` to
-        `func(cn, *args[1:], **kwargs)`, which hands func the unwrapped
-        connection rather than the original caller argument.
-    Oracle: spy captures its own cn parameter; must equal the transaction
-        object, not the unwrapped inner connection.
+    Mutation: the unwrap dropped, or func called with the unwrapped connection.
+    Oracle: a spy recording its cn and the inner loader mid-call.
     """
     inner = SimpleNamespace(
         options=SimpleNamespace(data_loader=pandas_numpy_data_loader))
@@ -321,11 +279,8 @@ def test_use_iterdict_unwraps_a_transaction():
 def test_use_iterdict_keeps_the_object_that_owns_options():
     """Verify an object holding both .connection and .options is not unwrapped.
 
-    Mutation: dropping `and not hasattr(cn, 'options')` from the unwrap
-        guard in use_iterdict_data_loader, which would then swap the
-        loader on the wrapped connection instead of the wrapper.
-    Oracle: a spy reading both loaders mid-call - the wrapper's must be
-        the dict loader, the inner one untouched.
+    Mutation: `and not hasattr(cn, 'options')` dropped from the guard.
+    Oracle: a spy reading both loaders mid-call.
     """
     inner = SimpleNamespace(
         options=SimpleNamespace(data_loader=pandas_pyarrow_data_loader))
@@ -342,6 +297,20 @@ def test_use_iterdict_keeps_the_object_that_owns_options():
 
     assert seen == [(iterdict_data_loader, pandas_pyarrow_data_loader)]
     assert wrapper.options.data_loader is pandas_numpy_data_loader
+
+
+def test_use_iterdict_preserves_wrapped_function_identity():
+    """Verify the decorated connection methods keep their own name and doc.
+
+    Mutation: `@wraps(func)` dropped from the wrapper.
+    Oracle: name and docstring of the undecorated function.
+    """
+    @use_iterdict_data_loader
+    def select_row(cn):
+        """Execute a query and return a single row."""
+
+    assert select_row.__name__ == 'select_row'
+    assert select_row.__doc__ == 'Execute a query and return a single row.'
 
 
 if __name__ == '__main__':

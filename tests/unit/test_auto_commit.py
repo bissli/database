@@ -1,5 +1,4 @@
-"""
-Test auto-commit management and transaction lifecycle.
+"""Auto-commit switching, connection diagnostics, and Transaction.
 """
 import threading
 
@@ -9,16 +8,7 @@ from database.transaction import disable_auto_commit, enable_auto_commit
 
 
 class RecordingRawConnection:
-    """Raw DBAPI-style connection that records commit/rollback order.
-
-    Attributes
-    ----------
-    autocommit : bool
-        Mode the auto-commit machinery toggles.
-    calls : list[str]
-        Names of the transaction methods called, in order.
-    fail_on_commit : bool
-        When True, commit() raises after recording the call.
+    """Raw connection logging commit/rollback; fail_on_commit raises.
     """
 
     def __init__(self) -> None:
@@ -40,17 +30,7 @@ class RecordingRawConnection:
 
 
 class RecordingConnection:
-    """Wrapper exposing a raw connection the way ConnectionWrapper does.
-
-    Attributes
-    ----------
-    connection : RecordingRawConnection
-        Inner connection the transaction is expected to commit.
-    driver_connection : RecordingRawConnection
-        Same object, reached by get_raw_connection().
-    calls : list[str]
-        Transaction methods called on the wrapper itself, which the
-        source must never use.
+    """ConnectionWrapper stand-in whose own calls log must stay empty.
     """
 
     def __init__(self) -> None:
@@ -71,16 +51,7 @@ class RecordingConnection:
 
 
 class FlagRecordingConnection:
-    """Wrapper recording every write to its in_transaction flag.
-
-    Attributes
-    ----------
-    connection : RecordingRawConnection
-        Inner connection the transaction commits or rolls back.
-    driver_connection : RecordingRawConnection
-        Same object, reached by get_raw_connection().
-    flag_writes : list[bool]
-        Values written to in_transaction, in order.
+    """Wrapper logging every in_transaction write to flag_writes.
     """
 
     def __init__(self) -> None:
@@ -103,11 +74,6 @@ class FlagRecordingConnection:
 
 class DriverOnlyConnection:
     """Wrapper carrying nothing but a driver connection.
-
-    Attributes
-    ----------
-    driver_connection : object
-        Raw handle returned by get_raw_connection().
     """
 
     def __init__(self, driver_connection) -> None:
@@ -115,14 +81,7 @@ class DriverOnlyConnection:
 
 
 class DualModeRawConnection:
-    """Raw connection exposing both autocommit and isolation_level.
-
-    Attributes
-    ----------
-    autocommit : bool
-        Preferred switch, tried first by _set_autocommit().
-    isolation_level : str | None
-        SQLite-style switch, reached only if autocommit is unusable.
+    """Raw connection with both autocommit and isolation_level.
     """
 
     def __init__(self) -> None:
@@ -131,12 +90,7 @@ class DualModeRawConnection:
 
 
 class IsolationOnlyRawConnection:
-    """Raw connection exposing only isolation_level, like sqlite3.
-
-    Attributes
-    ----------
-    isolation_level : str | None
-        None means auto-commit, 'DEFERRED' means an explicit transaction.
+    """Raw connection with only isolation_level, like sqlite3.
     """
 
     def __init__(self) -> None:
@@ -144,12 +98,7 @@ class IsolationOnlyRawConnection:
 
 
 class RaisingExecutionOptionsConnection:
-    """Wrapper whose execution_options rejects the isolation level.
-
-    Attributes
-    ----------
-    driver_connection : DualModeRawConnection
-        Raw handle the fallback must still reach.
+    """Wrapper whose execution_options raises.
     """
 
     def __init__(self, driver_connection) -> None:
@@ -162,12 +111,7 @@ class RaisingExecutionOptionsConnection:
 
 
 class LockedAutocommitRawConnection:
-    """Raw connection whose autocommit setter always fails.
-
-    Attributes
-    ----------
-    isolation_level : str | None
-        Fallback switch reached after the autocommit setter raises.
+    """Raw connection whose autocommit setter raises.
     """
 
     def __init__(self) -> None:
@@ -185,15 +129,7 @@ class LockedAutocommitRawConnection:
 
 
 class RecordingCursor:
-    """Cursor stub recording the SQL it received and replaying fixed rows.
-
-    Attributes
-    ----------
-    rows : list[dict] | None
-        Rows fetchall() returns; None makes fetchall() raise, as a
-        cursor with no result set does.
-    executed : tuple | None
-        The (sql, args) pair passed to execute().
+    """Cursor stub logging execute; rows None makes fetchall raise.
     """
 
     def __init__(self, rows) -> None:
@@ -219,9 +155,7 @@ class TestAutoCommit:
     def test_enable_auto_commit_delegates_to_strategy(self, mocker):
         """Verify enabling routes to strategy.enable_autocommit(raw_conn).
 
-        Mutation: swapping the enable/disable arms of
-        _try_strategy_autocommit, or handing it the wrapper instead of
-        get_raw_connection(connection).
+        Mutation: swapped enable/disable arms, or the wrapper as raw_conn.
         Oracle: strategy spy showing which method ran and with what.
         """
         raw = DualModeRawConnection()
@@ -240,8 +174,7 @@ class TestAutoCommit:
     def test_disable_auto_commit_delegates_to_strategy(self, mocker):
         """Verify disabling routes to strategy.disable_autocommit(raw_conn).
 
-        Mutation: disable_auto_commit() passing enable=True to
-        _set_autocommit, or the enable/disable arms being swapped.
+        Mutation: disable_auto_commit passing enable=True.
         Oracle: strategy spy showing which method ran and with what.
         """
         raw = DualModeRawConnection()
@@ -261,11 +194,8 @@ class TestAutoCommit:
     def test_strategy_success_skips_the_fallback_switches(self, mocker):
         """Verify a successful strategy call ends _set_autocommit().
 
-        Mutation: dropping the early return after
-        _try_strategy_autocommit() succeeds, which would then also
-        write raw_conn.autocommit and raw_conn.isolation_level.
-        Oracle: raw connection left in its pre-call state by a strategy
-        spy that touches nothing.
+        Mutation: dropping the return after the strategy call succeeds.
+        Oracle: raw connection left as it was by a no-op strategy spy.
         """
         raw = DualModeRawConnection()
         conn = mocker.Mock()
@@ -284,8 +214,7 @@ class TestAutoCommit:
     def test_execution_options_isolation_matches_mode(self, mocker):
         """Verify SQLAlchemy isolation is AUTOCOMMIT only when enabling.
 
-        Mutation: swapping 'AUTOCOMMIT' and 'READ COMMITTED' in
-        _set_autocommit().
+        Mutation: swapping 'AUTOCOMMIT' and 'READ COMMITTED'.
         Oracle: hand-written isolation names per direction.
         """
         on = mocker.Mock(spec=['execution_options', 'driver_connection'])
@@ -301,10 +230,8 @@ class TestAutoCommit:
     def test_strategy_failure_falls_back_to_autocommit_property(self, mocker):
         """Verify a raising strategy is swallowed and the fallback runs.
 
-        Mutation: narrowing the except in _try_strategy_autocommit() so
-        the strategy error escapes instead of returning False.
-        Oracle: raw autocommit flipped by the fallback branch, proving
-        control reached it.
+        Mutation: narrowing the except around the strategy call.
+        Oracle: raw autocommit flipped by the fallback branch.
         """
         raw = DualModeRawConnection()
         conn = DriverOnlyConnection(raw)
@@ -321,11 +248,8 @@ class TestAutoCommit:
     def test_fallback_autocommit_property_tracks_mode(self):
         """Verify the fallback writes the requested mode and stops there.
 
-        Mutation: raw_conn.autocommit = True in place of
-        raw_conn.autocommit = enable, or dropping the return that keeps
-        the isolation_level branch from also firing.
-        Oracle: hand-written expected value per direction plus an
-        untouched isolation_level.
+        Mutation: autocommit = True in place of = enable, or a dropped return.
+        Oracle: expected value per direction, and an untouched isolation_level.
         """
         raw = DualModeRawConnection()
         conn = DriverOnlyConnection(raw)
@@ -341,8 +265,7 @@ class TestAutoCommit:
     def test_execution_options_failure_still_reaches_the_fallback(self):
         """Verify a rejected isolation level does not abort the toggle.
 
-        Mutation: narrowing or dropping the except around
-        connection.execution_options() in _set_autocommit().
+        Mutation: narrowing or dropping the except around execution_options().
         Oracle: raw autocommit flipped to False by the later branch.
         """
         raw = DualModeRawConnection()
@@ -356,8 +279,7 @@ class TestAutoCommit:
     def test_fallback_isolation_level_tracks_mode(self):
         """Verify a sqlite handle gets None to enable, DEFERRED to disable.
 
-        Mutation: swapping the arms of
-        level = None if enable else 'DEFERRED'.
+        Mutation: swapping the arms of level = None if enable else 'DEFERRED'.
         Oracle: hand-written sqlite3 isolation values per direction.
         """
         raw = IsolationOnlyRawConnection()
@@ -372,9 +294,7 @@ class TestAutoCommit:
     def test_isolation_level_used_when_autocommit_setter_raises(self):
         """Verify a rejected autocommit write falls through to isolation_level.
 
-        Mutation: narrowing the except around raw_conn.autocommit =
-        enable, which would let the setter error escape and never reach
-        the isolation_level branch.
+        Mutation: narrowing the except around raw_conn.autocommit = enable.
         Oracle: isolation_level moved to None by the later branch.
         """
         raw = LockedAutocommitRawConnection()
@@ -388,12 +308,11 @@ class TestAutoCommit:
 class TestDiagnoseConnection:
     """Connection diagnostics reported to callers."""
 
-    def test_reports_wrapper_state_not_raw_state(self, mocker):
+    def test_reports_wrapper_state_over_raw_state(self, mocker):
         """Verify dialect, closed and in_transaction come off the wrapper.
 
-        Mutation: reading 'closed' from the raw connection instead of
-        the wrapper in diagnose_connection().
-        Oracle: wrapper and raw handle deliberately disagree on closed.
+        Mutation: diagnose_connection reading closed off the raw connection.
+        Oracle: wrapper and raw handle disagree on closed.
         """
         raw = mocker.Mock(spec=['autocommit', 'closed'])
         raw.autocommit = True
@@ -417,11 +336,8 @@ class TestDiagnoseConnection:
     def test_autocommit_attribute_wins_over_isolation_level(self):
         """Verify isolation_level is consulted only when autocommit is absent.
 
-        Mutation: guarding the isolation_level branch with
-        `if not info['auto_commit']` instead of
-        `if info['auto_commit'] is None`.
-        Oracle: a handle reporting autocommit False alongside
-        isolation_level None, where the two rules disagree.
+        Mutation: `not info['auto_commit']` in place of `is None`.
+        Oracle: autocommit False beside isolation_level None.
         """
         raw = DualModeRawConnection()
         raw.isolation_level = None
@@ -433,8 +349,7 @@ class TestDiagnoseConnection:
     def test_autocommit_inferred_from_isolation_level(self):
         """Verify isolation_level None reads as auto-commit, DEFERRED as not.
 
-        Mutation: flipping `raw_conn.isolation_level is None` to
-        `is not None` in diagnose_connection().
+        Mutation: `is not None` in place of `is None` on isolation_level.
         Oracle: hand-written sqlite3 mapping, both directions.
         """
         raw = IsolationOnlyRawConnection()
@@ -448,10 +363,8 @@ class TestDiagnoseConnection:
     def test_defaults_when_attributes_absent(self):
         """Verify a bare connection yields the documented default report.
 
-        Mutation: keying is_sqlalchemy off 'connection' rather than
-        'sa_connection', or dropping the hasattr guard on conn.dialect.
-        Oracle: a handle carrying 'connection' but no 'sa_connection',
-        where the two attribute names disagree.
+        Mutation: is_sqlalchemy keyed off 'connection', or no dialect guard.
+        Oracle: a handle with 'connection' but no 'sa_connection'.
         """
         conn = RecordingConnection()
 
@@ -469,11 +382,8 @@ class TestTransactionLifecycle:
     def test_commits_raw_connection_and_restores_auto_commit(self):
         """Verify a clean block commits raw handle and re-enables auto-commit.
 
-        Mutation: __enter__ calling enable_auto_commit, __exit__
-        committing self.connection instead of its inner .connection, or
-        the cleanup dropping enable_auto_commit.
-        Oracle: recording connection reporting mode and call order at
-        each point.
+        Mutation: committing the wrapper, or a swapped or dropped auto-commit.
+        Oracle: recording connection's mode and call order at each point.
         """
         conn = RecordingConnection()
 
@@ -490,10 +400,8 @@ class TestTransactionLifecycle:
     def test_rolls_back_and_reraises_on_exception(self):
         """Verify a failing block rolls back and lets the error propagate.
 
-        Mutation: flipping `if exc_type is not None` in __exit__, or
-        swapping cn.rollback() and cn.commit().
-        Oracle: recording connection showing rollback and no commit,
-        plus the raised error reaching the caller.
+        Mutation: flipping the exc_type test in __exit__.
+        Oracle: a rollback and no commit, and the error reaching the caller.
         """
         conn = RecordingConnection()
 
@@ -509,10 +417,8 @@ class TestTransactionLifecycle:
     def test_nested_transaction_on_same_connection_rejected(self):
         """Verify a second Transaction for a live connection raises.
 
-        Mutation: dropping the `connection_id in _local.active_transactions`
-        guard in Transaction.__init__.
-        Oracle: RuntimeError with the nested-transaction message, and an
-        outer transaction that still commits afterwards.
+        Mutation: dropping the active_transactions guard in __init__.
+        Oracle: the nested-transaction RuntimeError, then the outer commit.
         """
         conn = RecordingConnection()
 
@@ -525,10 +431,8 @@ class TestTransactionLifecycle:
     def test_distinct_connections_run_concurrent_transactions(self):
         """Verify two connections hold transactions at the same time.
 
-        Mutation: the guard in Transaction.__init__ firing whenever any
-        transaction is active rather than one for this connection id.
-        Oracle: an inner transaction on a second connection that must
-        open and commit while the first is live.
+        Mutation: the nested guard ignoring the connection id.
+        Oracle: a second connection's block commits inside the first.
         """
         first = RecordingConnection()
         second = RecordingConnection()
@@ -544,10 +448,8 @@ class TestTransactionLifecycle:
     def test_transaction_state_is_per_thread(self):
         """Verify another thread may transact the same connection object.
 
-        Mutation: _local = threading.local() replaced by shared module
-        state, which would make the second thread hit the nested guard.
-        Oracle: child thread's captured exception list, plus the commit
-        count on the shared raw connection.
+        Mutation: shared module state in place of threading.local().
+        Oracle: the child thread's errors, and the shared commit count.
         """
         conn = RecordingConnection()
         child_errors = []
@@ -571,10 +473,8 @@ class TestTransactionLifecycle:
     def test_connection_reusable_after_commit_failure(self):
         """Verify a failed commit still clears state and restores auto-commit.
 
-        Mutation: moving the active_transactions.pop or the
-        enable_auto_commit call out of __exit__'s finally block.
-        Oracle: a second Transaction on the same connection, which the
-        nested guard would reject if cleanup had been skipped.
+        Mutation: the pop or enable_auto_commit moved out of the finally.
+        Oracle: a second Transaction, which the nested guard would reject.
         """
         conn = RecordingConnection()
         conn.connection.fail_on_commit = True
@@ -595,12 +495,8 @@ class TestTransactionLifecycle:
     def test_unentered_transaction_leaves_the_connection_unflagged(self):
         """Verify building a Transaction without entering changes nothing.
 
-        Mutation: setting connection.in_transaction = True in
-        Transaction.__init__ instead of __enter__, which strands the
-        flag on a transaction whose block never opens.
-        Oracle: recording connection reporting the flag, the auto-commit
-        mode and an empty call log after construction alone, then a
-        later block that must still flag and commit normally.
+        Mutation: setting in_transaction in __init__ in place of __enter__.
+        Oracle: flag, mode and empty call log after construction alone.
         """
         conn = RecordingConnection()
 
@@ -619,10 +515,8 @@ class TestTransactionLifecycle:
     def test_in_transaction_written_only_on_enter_and_exit(self):
         """Verify the flag is written once entering and once leaving.
 
-        Mutation: moving `self.connection.in_transaction = True` from
-        __enter__ back into Transaction.__init__.
-        Oracle: a connection spying on every write to in_transaction,
-        whose log must stay empty until __enter__ runs.
+        Mutation: `in_transaction = True` moved from __enter__ to __init__.
+        Oracle: a spy on every in_transaction write.
         """
         conn = FlagRecordingConnection()
         transaction = Transaction(conn)
@@ -642,10 +536,8 @@ class TestTransactionExecute:
     def test_execute_without_returnid_delegates_to_connection(self, mocker):
         """Verify a plain execute goes straight to the connection, uncursored.
 
-        Mutation: flipping `if not returnid` in Transaction.execute(),
-        which would route plain statements through the cursor path.
-        Oracle: connection spy holding the forwarded call plus a
-        get_dict_cursor spy that must stay untouched.
+        Mutation: flipping `if not returnid` in Transaction.execute.
+        Oracle: connection spy, and a get_dict_cursor spy left untouched.
         """
         conn = mocker.Mock()
         conn.dialect = 'sqlite'
@@ -662,11 +554,8 @@ class TestTransactionExecute:
     def test_execute_with_returnid_prepares_sql_for_the_dialect(self, mocker):
         """Verify returnid execution converts placeholders and unwraps one row.
 
-        Mutation: prepare_query() called with a hardcoded dialect
-        instead of self.connection.dialect, or the len(results) == 1
-        branch losing to the multi-row branch.
-        Oracle: hand-written qmark SQL for sqlite and a hand-written
-        scalar for the single row.
+        Mutation: a hardcoded dialect for prepare_query, or the multi-row arm.
+        Oracle: hand-written qmark SQL and the single row's scalar.
         """
         cursor = RecordingCursor([{'id': 7}])
         conn = mocker.Mock()
@@ -685,8 +574,7 @@ class TestTransactionExecute:
     def test_execute_returns_one_value_per_row_for_many_rows(self, mocker):
         """Verify a multi-row result with a scalar returnid yields a flat list.
 
-        Mutation: `if len(results) == 1` widened to `> 1`, which would
-        return only the first row's value.
+        Mutation: `> 1` in place of `== 1` on len(results).
         Oracle: hand-written list across two rows.
         """
         cursor = RecordingCursor([{'id': 1}, {'id': 2}])
@@ -704,10 +592,8 @@ class TestTransactionExecute:
     def test_execute_maps_a_returnid_list_over_each_row(self, mocker):
         """Verify a list returnid yields one value list per row.
 
-        Mutation: the isiterable(returnid) arm returning a single field
-        rather than one entry per requested name.
-        Oracle: hand-written value lists for a one-row and a two-row
-        result.
+        Mutation: the isiterable(returnid) arm returning a single field.
+        Oracle: hand-written value lists for one-row and two-row results.
         """
         conn = mocker.Mock()
         conn.dialect = 'sqlite'
@@ -725,12 +611,10 @@ class TestTransactionExecute:
                               1, returnid=['id', 'name']) == [[1, 'a'], [2, 'b']]
 
     def test_execute_returns_none_when_there_is_no_result_set(self, mocker):
-        """Verify an empty or absent result set yields None, not an error.
+        """Verify an empty or absent result set yields None without raising.
 
-        Mutation: narrowing the except around cursor.fetchall(), which
-        would let a cursor with no result set raise at the caller.
-        Oracle: both a cursor returning no rows and one that raises on
-        fetchall.
+        Mutation: narrowing the except around cursor.fetchall().
+        Oracle: a cursor with no rows, and one whose fetchall raises.
         """
         conn = mocker.Mock()
         conn.dialect = 'sqlite'
@@ -754,11 +638,8 @@ class TestTransactionExecute:
     def test_select_helpers_delegate_to_the_matching_connection_method(self, mocker):
         """Verify each select helper forwards to its namesake, args intact.
 
-        Mutation: a helper delegating to a neighbor, e.g. select_row()
-        calling connection.select_row_or_none(), or select() dropping
-        **kwargs.
-        Oracle: per-method connection spies, each asserted on its own
-        forwarded call.
+        Mutation: a helper calling its neighbor, or select dropping **kwargs.
+        Oracle: per-method connection spies.
         """
         conn = mocker.Mock()
         conn.dialect = 'sqlite'

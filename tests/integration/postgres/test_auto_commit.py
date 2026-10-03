@@ -1,147 +1,76 @@
+"""Auto-commit and Transaction commits, seen from a second PostgreSQL session.
 """
-Integration tests for auto-commit functionality with PostgreSQL.
-
-Note: Common auto-commit tests are in tests/integration/common/test_auto_commit.py
-This file contains only PostgreSQL-specific tests (e.g., connection reopening).
-"""
-import logging
-
 import database as db
 import pytest
 from database.transaction import diagnose_connection
 
-logger = logging.getLogger(__name__)
+
+@pytest.fixture
+def scratch_table(pg_conn, test_table_prefix):
+    """Name of an empty table with a serial id and a data column.
+    """
+    name = f'{test_table_prefix}_scratch'
+    db.execute(pg_conn, f'create table {name} (id serial primary key, data text)')
+    yield name
+    db.execute(pg_conn, f'drop table if exists {name}')
 
 
-@pytest.mark.usefixtures('psql_docker', 'pg_conn')
+def rows_seen_by_new_session(pg_conn, table):
+    """Values of table's data column, read over a fresh connection.
+    """
+    other = db.connect(**pg_conn.options.__dict__)
+    try:
+        return db.select_column(other, f'select data from {table} order by id')
+    finally:
+        other.close()
+
+
+@pytest.mark.usefixtures('psql_docker')
 class TestPostgresAutoCommit:
-    """Test auto-commit functionality with real PostgreSQL connections."""
+    """Commit visibility across sessions on a real PostgreSQL server."""
 
-    def test_changes_persist_with_auto_commit(self, pg_conn, test_table_prefix):
-        """Test that changes persist without explicit commit when auto-commit is enabled."""
-        test_table_name = f'{test_table_prefix}_persist'
-        db.execute(pg_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id SERIAL PRIMARY KEY,
-            data TEXT
-        )
-        """)
+    def test_statement_outside_a_transaction_commits(self, pg_conn, scratch_table):
+        """Verify a bare execute commits before returning.
 
-        try:
-            # Insert data without explicit commit
-            db.execute(pg_conn, f"INSERT INTO {test_table_name} (data) VALUES ('test1')")
+        Mutation: the strategy leaving the driver's auto-commit off.
+        Oracle: a second session, which sees only committed rows.
+        """
+        db.execute(pg_conn, f"insert into {scratch_table} (data) values ('test1')")
 
-            # Create a new connection to verify the data was committed
-            new_conn = db.connect(**pg_conn.options.__dict__)
-            try:
-                count = db.select_scalar(new_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-                assert count == 1, 'Data should be committed automatically'
+        assert rows_seen_by_new_session(pg_conn, scratch_table) == ['test1']
 
-                data = db.select_scalar(new_conn,
-                                        f'SELECT data FROM {test_table_name} WHERE id = 1')
-                assert data == 'test1', 'Correct data should be committed'
-            finally:
-                new_conn.close()
-        finally:
-            db.execute(pg_conn, f'DROP TABLE IF EXISTS {test_table_name}')
+    def test_transaction_turns_auto_commit_off_then_back_on(
+            self, pg_conn, scratch_table):
+        """Verify auto-commit is off inside a block and on after it commits.
 
-    def test_transaction_commits_on_exit(self, pg_conn, test_table_prefix):
-        """Test that Transaction commits changes when exiting normally."""
-        test_table_name = f'{test_table_prefix}_commit'
-        db.execute(pg_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id SERIAL PRIMARY KEY,
-            data TEXT
-        )
-        """)
+        Mutation: auto-commit left on in the block, or left off after it.
+        Oracle: psycopg's autocommit flag, and a second session's rows.
+        """
+        with db.transaction(pg_conn) as tx:
+            tx.execute(f"insert into {scratch_table} (data) values ('test_tx')")
+            assert pg_conn.in_transaction is True
+            assert diagnose_connection(pg_conn)['auto_commit'] is False
 
-        try:
+        assert pg_conn.in_transaction is False
+        assert diagnose_connection(pg_conn)['auto_commit'] is True
+        assert rows_seen_by_new_session(pg_conn, scratch_table) == ['test_tx']
+
+    def test_exception_rolls_back_and_restores_auto_commit(
+            self, pg_conn, scratch_table):
+        """Verify a failed block leaves nothing committed and auto-commit on.
+
+        Mutation: __exit__ committing on an exception, or skipping the restore.
+        Oracle: no rows in a second session, and psycopg's autocommit flag.
+        """
+        with pytest.raises(ValueError, match='rollback'):
             with db.transaction(pg_conn) as tx:
-                tx.execute(f"INSERT INTO {test_table_name} (data) VALUES ('test_tx')")
+                tx.execute(
+                    f"insert into {scratch_table} (data) values ('should_rollback')")
+                raise ValueError('rollback')
 
-                assert pg_conn.in_transaction is True
-
-                info = diagnose_connection(pg_conn)
-                assert info['auto_commit'] is False, 'Auto-commit should be disabled in transaction'
-
-            assert pg_conn.in_transaction is False
-
-            info = diagnose_connection(pg_conn)
-            assert info['auto_commit'] is True, 'Auto-commit should be re-enabled after transaction'
-
-            new_conn = db.connect(**pg_conn.options.__dict__)
-            try:
-                count = db.select_scalar(new_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-                assert count == 1, 'Transaction should commit data on exit'
-
-                data = db.select_scalar(new_conn,
-                                        f'SELECT data FROM {test_table_name} WHERE id = 1')
-                assert data == 'test_tx', 'Correct data should be committed'
-            finally:
-                new_conn.close()
-        finally:
-            db.execute(pg_conn, f'DROP TABLE IF EXISTS {test_table_name}')
-
-    def test_transaction_rollback_on_exception(self, pg_conn, test_table_prefix):
-        """Test that Transaction rolls back changes on exception."""
-        test_table_name = f'{test_table_prefix}_rollback'
-        db.execute(pg_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id SERIAL PRIMARY KEY,
-            data TEXT
-        )
-        """)
-
-        try:
-            try:
-                with db.transaction(pg_conn) as tx:
-                    tx.execute(f"INSERT INTO {test_table_name} (data) VALUES ('should_rollback')")
-                    raise ValueError('Test exception to trigger rollback')
-            except ValueError:
-                pass  # Expected exception
-
-            assert pg_conn.in_transaction is False
-
-            info = diagnose_connection(pg_conn)
-            assert info['auto_commit'] is True, 'Auto-commit should be re-enabled after exception'
-
-            new_conn = db.connect(**pg_conn.options.__dict__)
-            try:
-                count = db.select_scalar(new_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-                assert count == 0, 'Transaction should rollback data on exception'
-            finally:
-                new_conn.close()
-        finally:
-            db.execute(pg_conn, f'DROP TABLE IF EXISTS {test_table_name}')
-
-    def test_connection_closes_properly(self, pg_conn, test_table_prefix):
-        """Test that connection close properly commits any pending changes."""
-        test_table_name = f'{test_table_prefix}_close'
-        db.execute(pg_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id SERIAL PRIMARY KEY,
-            data TEXT
-        )
-        """)
-
-        test_conn = db.connect(**pg_conn.options.__dict__)
-
-        try:
-            db.execute(test_conn, f"INSERT INTO {test_table_name} (data) VALUES ('close_test')")
-            test_conn.close()
-
-            verify_conn = db.connect(**pg_conn.options.__dict__)
-            try:
-                count = db.select_scalar(verify_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-                assert count == 1, 'Data should be committed when connection is closed'
-
-                data = db.select_scalar(verify_conn,
-                                        f'SELECT data FROM {test_table_name} WHERE id = 1')
-                assert data == 'close_test', 'Correct data should be committed'
-            finally:
-                verify_conn.close()
-        finally:
-            db.execute(pg_conn, f'DROP TABLE IF EXISTS {test_table_name}')
+        assert pg_conn.in_transaction is False
+        assert diagnose_connection(pg_conn)['auto_commit'] is True
+        assert rows_seen_by_new_session(pg_conn, scratch_table) == []
 
 
 if __name__ == '__main__':

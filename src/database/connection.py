@@ -1,18 +1,4 @@
-"""
-Database connection handling with SQLAlchemy.
-
-This module provides:
-1. The `connect()` function for creating new database connections
-2. The `ConnectionWrapper` class that wraps SQLAlchemy connections with query methods
-3. Engine creation and management through a thread-safe registry
-4. Connection type detection and dialect utilities
-
-The ConnectionWrapper is the primary database client, providing methods like:
-- execute(sql, *args) - Execute SQL and return affected row count
-- select(sql, *args) - Execute SELECT and return results
-- select_row(sql, *args) - Execute SELECT expecting exactly 1 row
-- insert_rows(table, rows) - Bulk insert multiple rows
-- upsert_rows(table, rows, ...) - Insert or update rows
+"""Database connections over SQLAlchemy.
 """
 import atexit
 import logging
@@ -25,8 +11,8 @@ from typing import Any, Self, TextIO, TypeVar
 
 import pandas as pd
 import sqlalchemy as sa
-from database.cursor import extract_column_info, get_dict_cursor, load_data
-from database.cursor import process_multiple_result_sets
+from database.cursor import Cursor, extract_column_info, get_dict_cursor
+from database.cursor import load_data, process_multiple_result_sets
 from database.exceptions import DbConnectionError, ReadOnlyError
 from database.exceptions import ValidationError, is_retryable_error
 from database.options import DatabaseOptions, use_iterdict_data_loader
@@ -59,12 +45,23 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
+_schema_cache: dict[tuple, list[str]] = {}
+_schema_cache_lock = threading.RLock()
 _CONNECTION_ROLES = frozenset({'writer', 'reader'})
 
 
 def _split_schema_for_inspector(table: str) -> tuple[str | None, str]:
-    """Split a possibly schema-qualified table into (schema, name) for use
-    with SQLAlchemy's Inspector, which takes schema separately.
+    """(schema, name) for SQLAlchemy's Inspector, schema None when unqualified.
+
+    Parameters
+    ----------
+    table : str
+        Table name. Only the last two dotted segments count.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        Schema and table name.
     """
     parts = _split_qualified_identifier(table)
     if len(parts) >= 2:
@@ -76,27 +73,27 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
                                pool_size: int, pool_recycle: int,
                                pool_timeout: int,
                                readonly: bool = False) -> str:
-    """Build a stable, password-free cache key for the engine registry.
+    """Engine registry key over every engine setting but the password.
 
-    The key must identify an engine uniquely per (drivername, host, port,
-    user, database, appname, timeout, open_mode, pool config, readonly) -
-    but never expose the password. Two options with the same credentials except different
-    passwords still collide; that is acceptable because the registry is
-    process-local and the engine pool will fail-fast on the real
-    connection if the password is wrong.
+    Parameters
+    ----------
+    options : DatabaseOptions
+        Connection settings.
+    use_pool : bool
+        Whether the engine pools.
+    pool_size : int
+        Pool ceiling.
+    pool_recycle : int
+        Seconds before a pooled connection is discarded.
+    pool_timeout : int
+        Seconds a caller waits for a pooled connection.
+    readonly : bool, default False
+        Whether the engine serves the reader role.
 
-    Notes
-    -----
-    - timeout belongs in the key because the strategies bake it into the
-      engine URL; leaving it out hands the second caller the first
-      caller's timeout.
-    - Parts are joined through repr() so a '|' inside a username,
-      database, or appname cannot shift the boundary between two fields
-      and make unlike configurations share an engine.
-    - open_mode belongs in the key for the same reason as timeout.
-    - readonly belongs in the key because the read-only session
-      setting outlives a return to the pool; one shared engine would
-      hand a writer a connection the server refuses to write on.
+    Returns
+    -------
+    str
+        The registry key.
     """
     return '|'.join(repr(part) for part in (
         options.drivername, options.hostname, options.port,
@@ -107,97 +104,85 @@ def _build_engine_registry_key(options: DatabaseOptions, use_pool: bool,
     ))
 
 
-# Simple cache for schema info (cleared on bypass_cache=True)
-_schema_cache: dict[tuple, list[str]] = {}
-_schema_cache_lock = threading.RLock()
-
-
 def create_url_from_options(options: DatabaseOptions,
                             url_creator: Callable[..., sa.URL] | None = None) -> sa.URL:
-    """Convert DatabaseOptions to SQLAlchemy URL.
+    """SQLAlchemy URL the dialect's strategy builds from options.
 
     Parameters
     ----------
     options : DatabaseOptions
-        Connection settings; options.database is authoritative over
-        whatever survives the URL round trip.
+        Connection settings.
     url_creator : Callable[..., sa.URL] | None, default None
-        Test seam. When given, the parsed parts are handed to it instead
-        of the sa.URL that make_url produced.
+        Test seam. When given, it receives the URL's parts as keyword
+        arguments (drivername, username, password, host, port,
+        database, query) and its result is returned.
 
     Returns
     -------
     sa.URL
-        A SQLAlchemy URL ready for create_engine.
-
-    Notes
-    -----
-    - The strategies percent-encode the database name so a '?' or '#' in
-      it cannot inject libpq query parameters. The raw name is put back
-      after make_url, which in SQLAlchemy 2.0 leaves it encoded; without
-      that, a database called 'my db' would be opened as 'my%20db'.
-    - For a SQLite open_mode, url.database is the percent-encoded file:
-      URI the strategy built. The raw name would turn the URI back into
-      a plain filename.
+        A URL ready for create_engine.
     """
     strategy = get_strategy(options.drivername)
     url_string = strategy.build_connection_url(options)
     if options.drivername == 'sqlite' and options.open_mode is not None:
-        # make_url in SQLAlchemy 2.1 unquotes the database part, and
-        # SQLite would then read '%20' as a space and end the path at
-        # a '#' or '?'.
         database = url_string.removeprefix('sqlite:///').partition('?')[0]
     else:
         database = options.database
 
-    if url_creator is not None:
-        # For testing - parse and recreate using the provided factory
-        parsed = sa.make_url(url_string)
-        if database and parsed.database != database:
-            parsed = parsed.set(database=database)
-        return url_creator(
-            drivername=parsed.drivername,
-            username=parsed.username,
-            password=parsed.password,
-            host=parsed.host,
-            port=parsed.port,
-            database=parsed.database,
-            query=dict(parsed.query) if parsed.query else {}
-        )
-
     url = sa.make_url(url_string)
     if database and url.database != database:
         url = url.set(database=database)
-    return url
+    if url_creator is None:
+        return url
+    return url_creator(
+        drivername=url.drivername,
+        username=url.username,
+        password=url.password,
+        host=url.host,
+        port=url.port,
+        database=url.database,
+        query=dict(url.query))
 
 
-def check_connection(func: Callable[..., T] | None = None, *, max_retries: int = 3,
-                     retry_delay: float = 1, retry_errors: type | tuple[type, ...] | None = None,
-                     retry_backoff: float = 1.5,
-                     sleep_func: Callable[[float], None] = time.sleep,
-                     check_retryable: bool = True) -> Callable[..., T]:
-    """Connection retry decorator with backoff.
+def check_connection(
+        func: Callable[..., T] | None = None, *, max_retries: int = 3,
+        retry_delay: float = 1,
+        retry_errors: type | tuple[type, ...] | None = None,
+        retry_backoff: float = 1.5,
+        sleep_func: Callable[[float], None] = time.sleep,
+        check_retryable: bool = True) -> Callable[..., T]:
+    """Decorator that retries a call on a connection error, with backoff.
 
-    Decorator that handles connection errors by automatically retrying the operation.
-    It has configurable retry parameters and supports exponential backoff.
+    Parameters
+    ----------
+    func : Callable[..., T] | None, default None
+        The decorated function in the bare form, None in the called form.
+    max_retries : int, default 3
+        Total attempts, the first included.
+    retry_delay : float, default 1
+        Seconds before the first retry.
+    retry_errors : type | tuple[type, ...] | None, default None
+        Exception types caught. None means DbConnectionError.
+    retry_backoff : float, default 1.5
+        Factor applied to the delay after each retry.
+    sleep_func : Callable[[float], None], default time.sleep
+        Test seam for the wait between attempts.
+    check_retryable : bool, default True
+        When True, a caught error that is_retryable_error rejects
+        (syntax, type, constraint) raises at once.
 
-    Only retries for transient/recoverable errors (SSL, connection drops, timeouts)
-    unless check_retryable=False. Permanent errors (syntax, type, constraint) fail
-    immediately without retry.
-
-    Supports both @check_connection and @check_connection() syntax.
-
-    :param max_retries: Maximum number of retry attempts (default 3).
-    :param retry_delay: Initial delay between retries in seconds (default 1).
-    :param retry_errors: Exception types to catch (default DbConnectionError).
-    :param retry_backoff: Multiplier for delay between retries (default 1.5).
-    :param sleep_func: Function to use for sleeping (default time.sleep).
-    :param check_retryable: If True, only retry for transient errors (default True).
+    Returns
+    -------
+    Callable[..., T]
+        The wrapped function, or a decorator in the called form. A
+        retry of a ConnectionWrapper method outside a transaction runs
+        on a fresh connection, so session state does not carry over.
     """
     def decorator(f: Callable[..., T]) -> Callable[..., T]:
         @wraps(f)
         def inner(*args: Any, **kwargs: Any) -> T:
-            error_types = retry_errors if retry_errors is not None else DbConnectionError
+            error_types = (retry_errors if retry_errors is not None
+                           else DbConnectionError)
 
             tries = 0
             delay = retry_delay
@@ -206,17 +191,21 @@ def check_connection(func: Callable[..., T] | None = None, *, max_retries: int =
                     return f(*args, **kwargs)
                 except error_types as err:
                     if check_retryable and not is_retryable_error(err):
-                        logger.debug(f'Non-retryable error, failing immediately: {err}')
+                        logger.debug(
+                            f'Non-retryable error, failing immediately: {err}')
                         raise
 
                     tries += 1
                     if tries >= max_retries:
-                        logger.error(f'Maximum retries ({max_retries}) exceeded: {err}')
+                        logger.error(
+                            f'Maximum retries ({max_retries}) exceeded: {err}')
                         raise
                     conn = args[0] if args else None
-                    if isinstance(conn, ConnectionWrapper) and not conn.in_transaction:
+                    if (isinstance(conn, ConnectionWrapper)
+                        and not conn.in_transaction):
                         conn._invalidate()
-                    logger.warning(f'Retryable error (attempt {tries}/{max_retries}): {err}')
+                    logger.warning(
+                        f'Retryable error (attempt {tries}/{max_retries}): {err}')
                     sleep_func(delay)
                     delay *= retry_backoff
 
@@ -232,14 +221,15 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
                            pool_timeout: int = 30, readonly: bool = False,
                            engine_factory: Callable[..., Engine] = sa.create_engine,
                            **kwargs: Any) -> Engine:
-    """Get or create a SQLAlchemy engine for the given options.
+    """The registry's engine for these settings, built on first use.
 
     Parameters
     ----------
     options : DatabaseOptions
-        Connection settings.
+        Connection settings. An in-memory SQLite database gets a fresh,
+        unregistered engine on every call.
     use_pool : bool, default False
-        Whether the engine pools connections.
+        Whether the engine pools. False means NullPool.
     pool_size : int, default 5
         Hard ceiling on pooled connections.
     pool_recycle : int, default 300
@@ -247,18 +237,17 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
     pool_timeout : int, default 30
         Seconds a caller waits for a pooled connection.
     readonly : bool, default False
-        Whether connections from this engine carry the read-only
-        session setting. Engines are registered separately per value,
-        so a writer never checks out a read-only connection.
+        Whether the engine serves the reader role.
     engine_factory : Callable[..., Engine], default sa.create_engine
         Test seam for engine construction.
     **kwargs : Any
-        Extra create_engine keyword arguments.
+        Extra create_engine keyword arguments. They override the
+        defaults this function and the strategy set.
 
     Returns
     -------
     Engine
-        A cached engine, or a newly built one.
+        A registered engine, or a newly built one.
     """
     is_memory_sqlite = (options.drivername == 'sqlite'
                         and options.database == ':memory:')
@@ -271,13 +260,9 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
             return _engine_registry[key]
 
         url = create_url_from_options(options)
-        strategy = get_strategy(options.drivername)
-
         engine_kwargs: dict[str, Any] = {'echo': False}
-
-        # Get dialect-specific engine kwargs from strategy
-        strategy_kwargs = strategy.get_engine_kwargs(options)
-        engine_kwargs.update(strategy_kwargs)
+        engine_kwargs.update(
+            get_strategy(options.drivername).get_engine_kwargs(options))
 
         if is_memory_sqlite:
             engine_kwargs['poolclass'] = StaticPool
@@ -293,10 +278,6 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
         engine_kwargs.update(kwargs)
 
         engine = engine_factory(url, **engine_kwargs)
-
-        # ':memory:' engines own a private in-memory database via StaticPool;
-        # caching them would leak that database across independent connect()
-        # calls and break test isolation.
         if not is_memory_sqlite:
             _engine_registry[key] = engine
         logger.debug(f'Created new engine for {options.drivername}')
@@ -305,10 +286,10 @@ def get_engine_for_options(options: DatabaseOptions, use_pool: bool = False,
 
 
 def dispose_all_engines() -> None:
-    """Dispose all engines in the registry.
+    """Dispose every registered engine and empty the registry.
     """
     with _engine_registry_lock:
-        for key, engine in list(_engine_registry.items()):
+        for engine in _engine_registry.values():
             engine.dispose()
         _engine_registry.clear()
         logger.debug('All database engines disposed')
@@ -318,31 +299,35 @@ atexit.register(dispose_all_engines)
 
 
 class ConnectionWrapper:
-    """Wraps a SQLAlchemy connection object to track calls and execution time
+    """Query client over one SQLAlchemy connection.
 
-    This class provides a thin wrapper around SQLAlchemy connection objects that:
-    1. Tracks query execution counts and timing
-    2. Manages connection lifecycle with SQLAlchemy pooling
-    3. Supports context manager protocol for explicit resource management
-    4. Provides access to the underlying DBAPI connection via driver_connection
-    5. Delegates attribute access to the SQLAlchemy connection object
+    A closed, invalidated, or discarded connection is rebuilt from the
+    engine on the next cursor(). Leaving a with block closes it.
+
+    Attributes
+    ----------
+    calls : int
+        Statements run through this wrapper's cursors.
+    time : float
+        Seconds those statements took, summed.
+    in_transaction : bool
+        True inside a Transaction. execute() and close() then leave the
+        commit to it.
     """
 
     def __init__(self, sa_connection: sa.engine.Connection | None = None,
-                 options: 'DatabaseOptions | None' = None,
+                 options: DatabaseOptions | None = None,
                  readonly: bool = False) -> None:
-        """Initialize a connection wrapper.
+        """Wrap a SQLAlchemy connection.
 
         Parameters
         ----------
         sa_connection : sa.engine.Connection | None, default None
-            Live SQLAlchemy connection this wrapper tracks.
+            Live SQLAlchemy connection.
         options : DatabaseOptions | None, default None
-            Settings the connection was opened with. For a reader,
-            hostname and port already name the reader endpoint.
+            Settings the connection was opened with.
         readonly : bool, default False
-            Whether writes are rejected before they leave the process.
-            connect() sets it for role='reader'.
+            Whether write methods raise ReadOnlyError.
         """
         self.sa_connection = sa_connection
         self.engine = sa_connection.engine if sa_connection else None
@@ -355,13 +340,13 @@ class ConnectionWrapper:
         self.in_transaction = False
 
     def __enter__(self) -> Self:
-        """Support for context manager protocol
+        """This wrapper.
         """
         return self
 
     def __exit__(self, exc_type: type | None, exc_val: Exception | None,
                  exc_tb: Any | None) -> None:
-        """Return the connection to the pool when exiting the context manager
+        """Close the connection, logging any error the close raises.
         """
         try:
             self.close()
@@ -370,15 +355,15 @@ class ConnectionWrapper:
             logger.debug(f'Error closing connection in __exit__: {e}')
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate attribute access to the SQLAlchemy connection or the raw connection.
+        """Name on the SQLAlchemy connection, else on the DBAPI connection.
         """
         if hasattr(self.sa_connection, name):
             return getattr(self.sa_connection, name)
 
         return getattr(self.dbapi_connection, name)
 
-    def cursor(self) -> 'Cursor':
-        """Get a wrapped cursor for this connection
+    def cursor(self) -> Cursor:
+        """A dict-row cursor, reconnecting first if the connection is gone.
         """
         self._ensure_connection()
         return get_dict_cursor(self)
@@ -386,11 +371,12 @@ class ConnectionWrapper:
     def _ensure_connection(self) -> None:
         """Rebuild the connection if it is closed, invalidated, or discarded.
 
-        A server-dropped connection leaves the closed flag False, so
-        invalidated and the None sentinel also trigger a reconnect. A
-        rebuilt connection whose setup raises is discarded, so the next
-        call tries again rather than using it half configured.
+        Raises
+        ------
+        Exception
+            Whatever configure_connection raises.
         """
+        # A server-dropped connection leaves closed False.
         if (self.sa_connection is None
                 or getattr(self.sa_connection, 'closed', False)
                 or getattr(self.sa_connection, 'invalidated', False)):
@@ -417,34 +403,23 @@ class ConnectionWrapper:
             self.dbapi_connection = None
 
     def _addcall(self, elapsed: float) -> None:
-        """Track execution statistics
+        """Count one statement that took elapsed seconds.
         """
         self.time += elapsed
         self.calls += 1
 
     def _reject_if_readonly(self, operation: str) -> None:
-        """Refuse an unconditional write on a read-only connection.
+        """Refuse a write method on a read-only connection.
 
         Parameters
         ----------
         operation : str
-            Name of the calling method, quoted back in the error.
+            Method name for the error.
 
         Raises
         ------
         ReadOnlyError
             When this connection was opened for reading only.
-
-        Notes
-        -----
-        - Every method listed writes whatever its arguments, so the
-          guard needs no look at the SQL and refuses in-process,
-          before a statement reaches the replica.
-        - It also covers three cases the server-side setting reports
-          late or not at all: copy_from never builds a statement, an
-          empty row collection returns before any SQL exists and would
-          otherwise report a clean zero, and PostgreSQL's sequence
-          reset runs 'select setval(...)'.
         """
         if self.readonly:
             raise ReadOnlyError(
@@ -452,22 +427,25 @@ class ConnectionWrapper:
 
     @property
     def is_pooled(self) -> bool:
-        """Check if this connection is using SQLAlchemy's connection pooling
+        """True unless the engine uses NullPool.
         """
         return not isinstance(self.engine.pool, sa.pool.NullPool)
 
     @property
     def dialect(self) -> str:
-        """Return the dialect name ('postgresql' or 'sqlite')."""
+        """Dialect name, 'postgresql' or 'sqlite'.
+        """
         return self._dialect
 
     def commit(self) -> None:
-        """Explicit commit that works regardless of auto-commit setting
+        """Commit, whatever the auto-commit setting.
         """
         self.sa_connection.commit()
 
     def close(self) -> None:
-        """Close the SQLAlchemy connection, committing first if needed.
+        """Commit unless in a transaction, then close the connection.
+
+        An error from either step is logged at WARNING and never raised.
         """
         if not getattr(self.sa_connection, 'closed', False):
             try:
@@ -481,23 +459,41 @@ class ConnectionWrapper:
                         self.sa_connection.close()
                 except Exception as e:
                     logger.warning(f'Error closing SA connection: {e}')
-            logger.debug(f'Connection closed: {self.calls} queries in {self.time:.2f}s (avg: {self.time/max(1,self.calls):.3f}s per query)')
+            avg_seconds = self.time / max(1, self.calls)
+            logger.debug(
+                f'Connection closed: {self.calls} queries in {self.time:.2f}s'
+                f' (avg: {avg_seconds:.3f}s per query)')
 
     @check_connection
     def execute(self, sql: str, *args: Any) -> int:
-        """Execute a SQL query with the given parameters and return affected row count.
+        """Run one statement, committing outside a transaction.
+
+        Parameters
+        ----------
+        sql : str
+            Statement text.
+        *args : Any
+            Statement parameters.
+
+        Returns
+        -------
+        int
+            The cursor's rowcount.
         """
         cursor = self.cursor()
         try:
-            processed_sql, processed_args = prepare_query(sql, args, self.dialect)
+            processed_sql, processed_args = prepare_query(
+                sql, args, self.dialect)
             cursor.execute(processed_sql, processed_args)
-            logger.debug(f'Executed query with {len(processed_args) if processed_args else 0} parameters')
+            param_cnt = len(processed_args) if processed_args else 0
+            logger.debug(f'Executed query with {param_cnt} parameters')
             rowcount = cursor.rowcount
             if not self.in_transaction:
                 self.commit()
             return rowcount
         except Exception:
             if not self.in_transaction:
+                # A failed rollback must not hide the statement's error.
                 try:
                     self.rollback()
                 except Exception:
@@ -505,40 +501,76 @@ class ConnectionWrapper:
             raise
 
     @check_connection
-    def select(self, sql: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]] | pd.DataFrame | list[pd.DataFrame]:
-        """Execute a SELECT query or stored procedure.
+    def select(self, sql: str, *args: Any, **kwargs: Any
+               ) -> list[dict[str, Any]] | pd.DataFrame | list[pd.DataFrame]:
+        """Rows of a query, in the form the options' data loader builds.
+
+        Parameters
+        ----------
+        sql : str
+            Query text.
+        *args : Any
+            Query parameters.
+        **kwargs : Any
+            return_all and prefer_first choose among the result sets of
+            a procedure. The rest go to the data loader.
+
+        Returns
+        -------
+        list[dict[str, Any]] | pd.DataFrame | list[pd.DataFrame]
+            The loader's result. A statement opening with exec, call or
+            execute in any case, or return_all=True, goes through
+            process_multiple_result_sets instead.
         """
         processed_sql, processed_args = prepare_query(sql, args, self.dialect)
         cursor = self.cursor()
         cursor.execute(processed_sql, processed_args)
 
         normalized_sql = processed_sql.strip().upper()
-        is_procedure = (normalized_sql.startswith(('EXEC ', 'CALL ', 'EXECUTE ')))
+        is_procedure = normalized_sql.startswith(('EXEC ', 'CALL ', 'EXECUTE '))
         return_all = kwargs.pop('return_all', False)
         prefer_first = kwargs.pop('prefer_first', False)
 
         if not is_procedure and not return_all:
             columns = extract_column_info(cursor)
             result = load_data(cursor, columns=columns, **kwargs)
-            logger.debug(f"Select query returned {len(result) if hasattr(result, '__len__') else 'scalar'} result")
+            row_cnt = len(result) if hasattr(result, '__len__') else 'scalar'
+            logger.debug(f'Select query returned {row_cnt} result')
             return result
 
-        result = process_multiple_result_sets(cursor, return_all, prefer_first, **kwargs)
-        logger.debug(f"Procedure returned {len(result) if isinstance(result, list) else 'single'} result set(s)")
+        result = process_multiple_result_sets(
+            cursor, return_all, prefer_first, **kwargs)
+        set_cnt = len(result) if isinstance(result, list) else 'single'
+        logger.debug(f'Procedure returned {set_cnt} result set(s)')
         return result
 
     @use_iterdict_data_loader
     def select_column(self, sql: str, *args: Any) -> list[Any]:
-        """Execute a query and return a single column as a list.
+        """First-column value of each row the query returns.
         """
         data = self.select(sql, *args)
         return [RowAdapter.create(self, row).get_value() for row in data]
 
     @use_iterdict_data_loader
     def select_row(self, sql: str, *args: Any) -> attrdict:
-        """Execute a query and return a single row as an attribute dictionary.
+        """The query's one row.
 
-        Raises ValidationError if the query returns zero or multiple rows.
+        Parameters
+        ----------
+        sql : str
+            Query text.
+        *args : Any
+            Query parameters.
+
+        Returns
+        -------
+        attrdict
+            The row.
+
+        Raises
+        ------
+        ValidationError
+            When the query returns zero rows or more than one.
         """
         data = self.select(sql, *args)
         if len(data) != 1:
@@ -575,15 +607,31 @@ class ConnectionWrapper:
 
     @use_iterdict_data_loader
     def select_scalar(self, sql: str, *args: Any) -> Any:
-        """Execute a query and return a single scalar value.
+        """The first column of the query's one row.
 
-        Raises ValidationError if the query returns zero or multiple rows.
+        Parameters
+        ----------
+        sql : str
+            Query text.
+        *args : Any
+            Query parameters.
+
+        Returns
+        -------
+        Any
+            The value, null included.
+
+        Raises
+        ------
+        ValidationError
+            When the query returns zero rows or more than one.
         """
         data = self.select(sql, *args)
         if len(data) != 1:
             raise ValidationError(f'Expected one row, got {len(data)}')
         result = RowAdapter.create(self, data[0]).get_value()
-        logger.debug(f'Scalar query returned value of type {type(result).__name__}')
+        logger.debug(
+            f'Scalar query returned value of type {type(result).__name__}')
         return result
 
     @use_iterdict_data_loader
@@ -617,8 +665,21 @@ class ConnectionWrapper:
             return None
         return val
 
-    def get_table_columns(self, table: str, bypass_cache: bool = False) -> list[str]:
-        """Get all column names for a table using SQLAlchemy Inspector.
+    def get_table_columns(self, table: str,
+                          bypass_cache: bool = False) -> list[str]:
+        """Column names of a table in declaration order, cached per engine.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        bypass_cache : bool, default False
+            Re-read the schema and replace the cached entry.
+
+        Returns
+        -------
+        list[str]
+            The cached list itself, so a caller must not mutate it.
         """
         cache_key = ('columns', id(self.engine), table)
         with _schema_cache_lock:
@@ -633,8 +694,22 @@ class ConnectionWrapper:
             _schema_cache[cache_key] = columns
         return columns
 
-    def get_table_primary_keys(self, table: str, bypass_cache: bool = False) -> list[str]:
-        """Get primary key columns for a table using SQLAlchemy Inspector.
+    def get_table_primary_keys(self, table: str,
+                               bypass_cache: bool = False) -> list[str]:
+        """Primary key columns of a table, cached per engine.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        bypass_cache : bool, default False
+            Re-read the schema and replace the cached entry.
+
+        Returns
+        -------
+        list[str]
+            Empty for a table without a primary key. The cached list
+            itself, so a caller must not mutate it.
         """
         cache_key = ('primary_keys', id(self.engine), table)
         with _schema_cache_lock:
@@ -650,20 +725,23 @@ class ConnectionWrapper:
             _schema_cache[cache_key] = primary_keys
         return primary_keys
 
-    def get_sequence_columns(self, table: str, bypass_cache: bool = False) -> list[str]:
-        """Identify columns that are likely to be sequence/identity columns.
+    def get_sequence_columns(self, table: str,
+                             bypass_cache: bool = False) -> list[str]:
+        """Columns the dialect's strategy takes for sequence or identity.
         """
-        strategy = get_db_strategy(self)
-        return strategy.get_sequence_columns(self, table, bypass_cache=bypass_cache)
+        return get_db_strategy(self).get_sequence_columns(
+            self, table, bypass_cache=bypass_cache)
 
-    def find_sequence_column(self, table: str, bypass_cache: bool = False) -> str:
-        """Find the best column to reset sequence for.
+    def find_sequence_column(self, table: str,
+                             bypass_cache: bool = False) -> str:
+        """The column reset_table_sequence resets when given no identity.
         """
-        strategy = get_db_strategy(self)
-        return strategy.find_sequence_column(self, table, bypass_cache=bypass_cache)
+        return get_db_strategy(self).find_sequence_column(
+            self, table, bypass_cache=bypass_cache)
 
-    def table_fields(self, table: str, bypass_cache: bool = False) -> list[str]:
-        """Get all column names for a table ordered by their position.
+    def table_fields(self, table: str,
+                     bypass_cache: bool = False) -> list[str]:
+        """Same as get_table_columns.
         """
         return self.get_table_columns(table, bypass_cache=bypass_cache)
 
@@ -693,7 +771,7 @@ class ConnectionWrapper:
         return get_db_strategy(self).get_unique_indexes(self, table)
 
     def table_ddl(self, table: str) -> str:
-        """CREATE statement text of a table.
+        """Text of the statement that creates a table.
 
         Raises
         ------
@@ -703,49 +781,119 @@ class ConnectionWrapper:
         return get_db_strategy(self).table_ddl(self, table)
 
     def vacuum_table(self, table: str) -> None:
-        """Optimize a table by reclaiming space.
+        """Reclaim a table's dead space.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('vacuum_table')
-        strategy = get_db_strategy(self)
-        strategy.vacuum_table(self, table)
+        get_db_strategy(self).vacuum_table(self, table)
 
     def reindex_table(self, table: str) -> None:
-        """Rebuild indexes for a table.
+        """Rebuild a table's indexes.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('reindex_table')
-        strategy = get_db_strategy(self)
-        strategy.reindex_table(self, table)
+        get_db_strategy(self).reindex_table(self, table)
 
     def cluster_table(self, table: str, index: str | None = None) -> None:
-        """Order table data according to an index.
+        """Reorder a table's rows by an index.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('cluster_table')
-        strategy = get_db_strategy(self)
-        strategy.cluster_table(self, table, index)
+        get_db_strategy(self).cluster_table(self, table, index)
 
-    def reset_table_sequence(self, table: str, identity: str | None = None) -> None:
-        """Reset a table's sequence/identity column to the max value + 1.
+    def reset_table_sequence(self, table: str,
+                             identity: str | None = None) -> None:
+        """Set a table's sequence so the next value is the column max + 1.
+
+        Parameters
+        ----------
+        table : str
+            Table name.
+        identity : str | None, default None
+            Sequence column. None means find_sequence_column's pick.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('reset_table_sequence')
-        strategy = get_db_strategy(self)
-        strategy.reset_sequence(self, table, identity)
+        get_db_strategy(self).reset_sequence(self, table, identity)
 
-    def insert_row(self, table: str, fields: list[str], values: list[Any]) -> int:
-        """Insert a row into a table using the supplied list of fields and values.
+    def insert_row(self, table: str, fields: list[str],
+                   values: list[Any]) -> int:
+        """Insert one row and return the row count.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        fields : list[str]
+            Column names, used as given.
+        values : list[Any]
+            One value per field, in field order.
+
+        Returns
+        -------
+        int
+            Rows inserted.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
+        ValidationError
+            When fields and values differ in length.
         """
         self._reject_if_readonly('insert_row')
         if len(fields) != len(values):
             raise ValidationError('fields must be same length as values')
 
         quoted_table = quote_identifier(table, self.dialect)
-        quoted_columns = ', '.join(quote_identifier(col, self.dialect) for col in fields)
+        quoted_columns = ', '.join(
+            quote_identifier(col, self.dialect) for col in fields)
         placeholders = make_placeholders(len(fields), self.dialect)
-        sql = f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'
+        sql = (f'insert into {quoted_table} ({quoted_columns})'
+               f' values ({placeholders})')
 
         return self.execute(sql, *values)
 
-    def insert_rows(self, table: str, rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> int:
-        """Insert multiple rows into a table.
+    def insert_rows(
+            self, table: str,
+            rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> int:
+        """Insert rows in one executemany and return the row count.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        rows : list[dict[str, Any]] | tuple[dict[str, Any], ...]
+            Rows keyed by column name, matched without regard to case.
+            Keys the table lacks are dropped. Values bind in the first
+            row's key order, so every row needs the same keys in the
+            same order.
+
+        Returns
+        -------
+        int
+            Rows inserted, 0 for no rows.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection, even for no rows.
         """
         self._reject_if_readonly('insert_rows')
         if not rows:
@@ -761,10 +909,12 @@ class ConnectionWrapper:
         cols = tuple(rows[0].keys())
 
         quoted_table = quote_identifier(table, self.dialect)
-        quoted_cols = ','.join(quote_identifier(col, self.dialect) for col in cols)
+        quoted_cols = ','.join(
+            quote_identifier(col, self.dialect) for col in cols)
 
         placeholders = make_placeholders(len(cols), self.dialect)
-        sql = f'INSERT INTO {quoted_table} ({quoted_cols}) VALUES ({placeholders})'
+        sql = (f'insert into {quoted_table} ({quoted_cols})'
+               f' values ({placeholders})')
 
         all_params = [
             tuple(null_special_string(v) for v in row.values())
@@ -774,10 +924,36 @@ class ConnectionWrapper:
         cursor = self.cursor()
         return cursor.executemany(sql, all_params)
 
-    def update_row(self, table: str, keyfields: list[str], keyvalues: list[Any],
-                   datafields: list[str], datavalues: list[Any]) -> int:
-        """Update the specified datafields to the supplied datavalues in a table row
-        identified by the keyfields and keyvalues.
+    def update_row(self, table: str, keyfields: list[str],
+                   keyvalues: list[Any], datafields: list[str],
+                   datavalues: list[Any]) -> int:
+        """Set datafields on the rows whose keyfields match, and count them.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        keyfields : list[str]
+            Columns the where clause matches, joined by and.
+        keyvalues : list[Any]
+            One value per keyfield.
+        datafields : list[str]
+            Columns to set. None of them may be a keyfield.
+        datavalues : list[Any]
+            One value per datafield.
+
+        Returns
+        -------
+        int
+            Rows updated.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
+        ValidationError
+            When a field list and its value list differ in length, or a
+            keyfield is also a datafield.
         """
         self._reject_if_readonly('update_row')
         if len(keyfields) != len(keyvalues):
@@ -790,15 +966,37 @@ class ConnectionWrapper:
                 raise ValidationError(f'keyfield {kf} cannot be in datafields')
 
         quoted_table = quote_identifier(table, self.dialect)
-        keycols = ' and '.join([f'{quote_identifier(f, self.dialect)}=%s' for f in keyfields])
-        datacols = ','.join([f'{quote_identifier(f, self.dialect)}=%s' for f in datafields])
+        keycols = ' and '.join(
+            f'{quote_identifier(f, self.dialect)}=%s' for f in keyfields)
+        datacols = ','.join(
+            f'{quote_identifier(f, self.dialect)}=%s' for f in datafields)
         sql = f'update {quoted_table} set {datacols} where {keycols}'
 
         values = tuple(datavalues) + tuple(keyvalues)
         return self.execute(sql, *values)
 
-    def update_or_insert(self, update_sql: str, insert_sql: str, *args: Any) -> int:
-        """Try to update first; if no rows are updated, then insert.
+    def update_or_insert(self, update_sql: str, insert_sql: str,
+                         *args: Any) -> int:
+        """Run update_sql, then insert_sql if it changed no row, atomically.
+
+        Parameters
+        ----------
+        update_sql : str
+            Update statement.
+        insert_sql : str
+            Insert statement.
+        *args : Any
+            Parameters, bound to both statements alike.
+
+        Returns
+        -------
+        int
+            Row count of the last statement run.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('update_or_insert')
 
@@ -806,13 +1004,27 @@ class ConnectionWrapper:
             rc = tx.execute(update_sql, *args)
             if rc:
                 return rc
-            rc = tx.execute(insert_sql, *args)
-            return rc
+            return tx.execute(insert_sql, *args)
 
-    def filter_table_columns(self, table: str,
-                             row_dicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Filter dictionaries to only include valid columns for the table
-        and correct column name casing to match database schema.
+    def filter_table_columns(
+            self, table: str,
+            row_dicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copies of row_dicts holding only the table's columns.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        row_dicts : list[dict[str, Any]]
+            Rows keyed by column name, matched to the table's columns
+            without regard to case.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One dict per input row, in input order, keyed by the
+            table's own spelling of each name. A row with no known key
+            becomes an empty dict.
         """
         if not row_dicts:
             return []
@@ -827,8 +1039,7 @@ class ConnectionWrapper:
             filtered_row = {}
             for col, val in row.items():
                 if col.lower() in case_map:
-                    correct_col = case_map[col.lower()]
-                    filtered_row[correct_col] = val
+                    filtered_row[case_map[col.lower()]] = val
                 else:
                     removed_columns.add(col)
             filtered_rows.append(filtered_row)
@@ -840,18 +1051,35 @@ class ConnectionWrapper:
 
     def table_data(self, table: str, columns: list[str] | None = None,
                    bypass_cache: bool = False) -> Any:
-        """Get table data by columns.
+        """Every row of a table, through select().
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        columns : list[str] | None, default None
+            Column names, or (column, alias) pairs. None or empty means
+            the strategy's get_default_columns.
+        bypass_cache : bool, default False
+            Passed to get_default_columns.
+
+        Returns
+        -------
+        Any
+            What select() returns for the query.
         """
         if not columns:
-            strategy = get_db_strategy(self)
-            columns = strategy.get_default_columns(self, table, bypass_cache=bypass_cache)
+            columns = get_db_strategy(self).get_default_columns(
+                self, table, bypass_cache=bypass_cache)
 
         quoted_table = quote_identifier(table, self.dialect)
         quoted_columns = [
-            f'{quote_identifier(col, self.dialect)} as {quote_identifier(alias, self.dialect)}'
+            f'{quote_identifier(col, self.dialect)}'
+            f' as {quote_identifier(alias, self.dialect)}'
             for col, alias in peel(columns)
-        ]
-        return self.select(f"select {','.join(quoted_columns)} from {quoted_table}")
+            ]
+        return self.select(
+            f"select {','.join(quoted_columns)} from {quoted_table}")
 
     @check_connection
     def upsert_rows(
@@ -866,12 +1094,52 @@ class ConnectionWrapper:
         batch_size: int = 500,
         use_primary_key: bool = False,
     ) -> int:
-        """Perform an UPSERT operation (INSERT or UPDATE) for multiple rows.
+        """Insert rows, updating those that hit a conflict target.
 
-        Conflict-target precedence: constraint_name (postgres only, by index
-        or constraint name) > conflict_columns (explicit column list, must be
-        covered by a unique constraint or unique index) > primary-key
-        auto-detect.
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        rows : tuple[dict[str, Any], ...]
+            Rows keyed by column name, matched without regard to case.
+            Keys the table lacks are dropped. A row missing a supplied
+            column binds null for it.
+        constraint_name : str | None, default None
+            PostgreSQL only: a unique index or constraint whose
+            definition becomes the conflict target. Ignored on SQLite.
+        conflict_columns : list[str] | None, default None
+            Conflict target columns, matched without regard to case. A
+            unique constraint or index must cover them. None means the
+            primary key. With no usable target the rows go to
+            insert_rows.
+        update_cols_always : list[str] | None, default None
+            Columns set from the new row on conflict. Key columns are
+            dropped, except under constraint_name. Both update lists
+            None means do nothing on conflict.
+        update_cols_ifnull : list[str] | None, default None
+            Columns set from the new row on conflict only where the
+            stored value is null. A column also in update_cols_always is
+            set unconditionally, once.
+        reset_sequence : bool, default False
+            Whether to call reset_table_sequence after the write.
+        batch_size : int, default 500
+            Rows per executemany batch.
+        use_primary_key : bool, default False
+            SQLite only. When False and the rows omit a primary key
+            column, the first unique index whose columns the rows all
+            supply becomes the conflict target.
+
+        Returns
+        -------
+        int
+            The cursor's rowcount, or 0 when the driver reports none.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection, even for no rows.
+        ValidationError
+            When constraint_name and conflict_columns are both given.
         """
         self._reject_if_readonly('upsert_rows')
         if not rows:
@@ -879,7 +1147,8 @@ class ConnectionWrapper:
             return 0
 
         if constraint_name is not None and conflict_columns is not None:
-            raise ValidationError('constraint_name and conflict_columns are mutually exclusive')
+            raise ValidationError(
+                'constraint_name and conflict_columns are mutually exclusive')
 
         dialect = self.dialect
 
@@ -902,63 +1171,67 @@ class ConnectionWrapper:
             logger.warning(f'No valid columns provided for table {table}')
             return 0
 
-        should_update = update_cols_always is not None or update_cols_ifnull is not None
+        should_update = (update_cols_always is not None
+                         or update_cols_ifnull is not None)
 
         if conflict_columns is not None:
             key_cols = [case_map.get(c.lower(), c) for c in conflict_columns]
         else:
             key_cols = self.get_table_primary_keys(table)
 
-        provided_cols_lower = {col.lower() for col in columns}
-        key_cols_in_data = key_cols and all(k.lower() in provided_cols_lower for k in key_cols)
+        columns_lower = {col.lower() for col in columns}
+        key_cols_in_data = key_cols and all(
+            k.lower() in columns_lower for k in key_cols)
 
-        if dialect == 'sqlite' and not use_primary_key and not key_cols_in_data and conflict_columns is None:
+        if (dialect == 'sqlite' and not use_primary_key
+            and not key_cols_in_data and conflict_columns is None):
             strategy = get_db_strategy(self)
             if hasattr(strategy, 'get_unique_columns'):
                 unique_constraints = strategy.get_unique_columns(self, table)
                 for unique_cols in unique_constraints:
-                    if all(u.lower() in provided_cols_lower for u in unique_cols):
-                        logger.debug(f'Using UNIQUE columns {unique_cols} instead of primary key')
+                    if all(u.lower() in columns_lower for u in unique_cols):
+                        logger.debug(
+                            f'Using UNIQUE columns {unique_cols}'
+                            ' instead of primary key')
                         key_cols = unique_cols
                         key_cols_in_data = True
                         break
 
-        if should_update and ((dialect != 'postgresql') or (dialect == 'postgresql' and not constraint_name)):
-            if not key_cols:
-                logger.debug(f'No primary keys found for {table}, falling back to INSERT')
-                return self.insert_rows(table, rows)
+        if should_update and not constraint_name and not key_cols:
+            logger.debug(
+                f'No primary keys found for {table}, falling back to INSERT')
+            return self.insert_rows(table, rows)
 
-        columns_lower = {col.lower() for col in columns}
         key_cols_lower = {k.lower() for k in key_cols} if key_cols else set()
+        if constraint_name is not None:
+            updatable_lower = columns_lower
+        else:
+            updatable_lower = columns_lower - key_cols_lower
 
         if update_cols_always:
-            orig_update_cols_always = update_cols_always[:]
-            valid_update_always = []
-            for col in orig_update_cols_always:
-                lower = col.lower()
-                if lower in columns_lower and (constraint_name is not None or lower not in key_cols_lower):
-                    valid_update_always.append(case_map[lower])
-            update_cols_always = valid_update_always
+            update_cols_always = [
+                case_map[col.lower()] for col in update_cols_always
+                if col.lower() in updatable_lower]
 
         if update_cols_ifnull:
-            orig_update_cols_ifnull = update_cols_ifnull[:]
-            valid_update_ifnull = []
-            uc_always_lower = {c.lower() for c in update_cols_always} if update_cols_always else set()
-            for col in orig_update_cols_ifnull:
-                lower = col.lower()
-                if lower in columns_lower and (constraint_name is not None or lower not in key_cols_lower) and lower not in uc_always_lower:
-                    valid_update_ifnull.append(case_map[lower])
-            update_cols_ifnull = valid_update_ifnull
+            always_lower = {c.lower() for c in update_cols_always or ()}
+            ifnull_lower = updatable_lower - always_lower
+            update_cols_ifnull = [
+                case_map[col.lower()] for col in update_cols_ifnull
+                if col.lower() in ifnull_lower]
 
-        if (not key_cols or not key_cols_in_data) and (dialect != 'postgresql' or not constraint_name):
-            logger.debug(f'No usable constraint or key columns for {dialect} upsert, falling back to INSERT')
+        if (not key_cols or not key_cols_in_data) and not constraint_name:
+            logger.debug(
+                f'No usable constraint or key columns for {dialect} upsert,'
+                ' falling back to INSERT')
             return self.insert_rows(table, rows)
 
         strategy = get_db_strategy(self)
 
         constraint_expr = None
-        if constraint_name and dialect == 'postgresql':
-            constraint_expr = strategy.get_constraint_definition(self, table, constraint_name)
+        if constraint_name:
+            constraint_expr = strategy.get_constraint_definition(
+                self, table, constraint_name)
 
         sql = strategy.build_upsert_sql(
             table=table,
@@ -988,37 +1261,52 @@ class ConnectionWrapper:
 
     def copy_from(self, table: str, file: TextIO,
                   columns: list[str] | None = None) -> int:
-        """Bulk load data from a file-like object using COPY.
+        """Bulk load CSV text into a table with PostgreSQL's copy.
+
+        Parameters
+        ----------
+        table : str
+            Table name, optionally schema-qualified.
+        file : TextIO
+            CSV text with no header row.
+        columns : list[str] | None, default None
+            Columns the file fills, in file order. None means every
+            column.
+
+        Returns
+        -------
+        int
+            Rows loaded. SQLite has no copy, so it loads nothing, logs
+            a warning, and returns 0.
+
+        Raises
+        ------
+        ReadOnlyError
+            On a read-only connection.
         """
         self._reject_if_readonly('copy_from')
-        strategy = get_db_strategy(self)
-        return strategy.copy_from(self, table, file, columns)
+        return get_db_strategy(self).copy_from(self, table, file, columns)
 
 
 def configure_connection(sa_connection: sa.engine.Connection,
                          readonly: bool = False, *,
                          options: DatabaseOptions) -> None:
-    """Configure a SQLAlchemy connection with database-specific settings.
+    """Apply the dialect's session settings and type adapters.
 
     Parameters
     ----------
     sa_connection : sa.engine.Connection
         Connection to configure.
     readonly : bool, default False
-        Whether to put the session in read-only mode, so the server
-        refuses a write the local guard cannot classify. A writer
+        Whether to make the session read-only on the server. A writer
         takes the dialect's writer-only settings instead.
     options : DatabaseOptions
-        Options the connection was opened with. The writer-only
-        settings read them, such as SQLite's journal_mode.
+        Options the connection was opened with.
     """
     strategy = get_db_strategy(sa_connection)
     strategy.configure_connection(sa_connection.connection)
     strategy.register_type_adapters(sa_connection.connection)
     if readonly:
-        # Last, because configure_connection turns auto-commit on and
-        # psycopg refuses to change auto-commit once a statement has
-        # opened a transaction.
         strategy.set_session_readonly(sa_connection.connection)
     else:
         strategy.configure_writer_connection(sa_connection.connection, options)
@@ -1027,7 +1315,7 @@ def configure_connection(sa_connection: sa.engine.Connection,
 def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
             config: Any | None = None, *, role: str = 'writer',
             **kw: Any) -> ConnectionWrapper:
-    """Connect to a database using SQLAlchemy for connection management.
+    """Open a connection for the given options and role.
 
     Parameters
     ----------
@@ -1037,19 +1325,17 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
     config : Any | None, default None
         Configuration object a dotted path is resolved against.
     role : str, default 'writer'
-        Which cluster endpoint to open. Keyword only. 'writer' uses
-        hostname and port. 'reader' uses reader_hostname and
-        reader_port, falls back to the writer's own value for whichever
-        of the two is unset, and rejects writes.
+        Which cluster endpoint to open. 'writer' uses hostname and
+        port. 'reader' uses reader_hostname and reader_port, each
+        falling back to the writer's value, and rejects writes. On
+        SQLite, 'reader' opens the same file read-only.
     **kw : Any
         Individual options, used when options is None.
 
     Returns
     -------
     ConnectionWrapper
-        A live connection. Its 'readonly' attribute is True for a
-        reader, and its 'options' are the ones passed in, unresolved,
-        so handing them back to connect() reopens the same role.
+        A live connection holding the options as passed in.
 
     Raises
     ------
@@ -1057,28 +1343,11 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
         When role names neither 'writer' nor 'reader', when config is
         a string, when a reader asks for an in-memory SQLite database,
         or when open_mode is set on a writer.
-
-    Notes
-    -----
-    - A reader refuses the library's own write and maintenance
-      methods in-process, and its session is read-only on the server,
-      which refuses a hand-written statement at statement start.
-    - A reader and a writer to one endpoint hold separate engines, so
-      the read-only session setting cannot reach a writer through the
-      pool.
-    - SQLite has no reader endpoint, so reader_hostname and reader_port
-      are ignored there; role='reader' opens the same database
-      read-only.
-    - Pooling comes from options: use_pool, pool_max_connections,
-      pool_max_idle_time, pool_wait_timeout.
     """
     if role not in _CONNECTION_ROLES:
         raise ValidationError(
             f'role must be one of {sorted(_CONNECTION_ROLES)}, got {role!r}')
     if isinstance(config, str):
-        # role is keyword only, so a caller writing connect(options,
-        # 'reader') lands the role here, where it would otherwise be
-        # dropped in silence and hand back a writer.
         raise ValidationError(
             f'config must be a configuration object, got the string '
             f"{config!r}; pass the role by keyword, as in "
@@ -1119,9 +1388,6 @@ def connect(options: DatabaseOptions | dict[str, Any] | str | None = None,
     try:
         configure_connection(sa_connection, readonly=readonly, options=options)
     except Exception:
-        # Invalidate rather than close, so a pool does not keep the
-        # half-configured connection, which holds the file open and
-        # blocks a SQLite retry from switching out of WAL.
         sa_connection.invalidate()
         raise
 

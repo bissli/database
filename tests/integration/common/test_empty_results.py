@@ -1,95 +1,62 @@
-"""
-Database-agnostic tests for empty query result handling.
-
-Runs against both PostgreSQL and SQLite via the parametrized `db_conn`
-fixture.
+"""Empty-result and column-order tests run against PostgreSQL and SQLite.
 """
 import database as db
+import pandas as pd
 
 
-def _columns(result):
-    """Return the column names from a select result regardless of loader.
-
-    Default pandas loader returns a DataFrame; iterdict loader returns
-    a list of dicts. Tests need to inspect column names in both shapes.
+def _columns(result: list[dict] | pd.DataFrame) -> list[str]:
+    """Column names of a non-empty select result, in select-list order.
     """
     if hasattr(result, 'columns'):
         return list(result.columns)
-    if result and hasattr(result[0], 'keys'):
-        return list(result[0].keys())
-    return []
+    return list(result[0])
 
 
 def test_empty_results_handling(db_conn):
-    """Empty selects return an empty (but well-typed) result.
+    """Verify each select variant returns its empty form when no row matches.
 
-    select_scalar_or_none against COUNT(*) returns 0 (zero rows would
-    be wrong here; the aggregate is what's empty-but-zero, not the
-    overall result).
+    Mutation: select_column returning None, select_row_or_none raising,
+        or select_scalar_or_none returning None for count(*).
+    Oracle: 'where 1=0' matches nothing; count(*) over nothing is 0.
     """
-    result = db.select(db_conn, 'SELECT * FROM test_table WHERE 1=0')
-    assert result is not None
-    assert len(result) == 0
-
-    result = db.select_column(db_conn, 'SELECT name FROM test_table WHERE 1=0')
-    assert result is not None
-    assert isinstance(result, list)
-    assert len(result) == 0
-
-    result = db.select_row_or_none(db_conn, 'SELECT * FROM test_table WHERE 1=0')
-    assert result is None
-
-    result = db.select_scalar_or_none(db_conn, 'SELECT COUNT(*) FROM test_table WHERE 1=0')
-    assert result == 0
+    assert len(db.select(db_conn, 'select * from test_table where 1=0')) == 0
+    assert db.select_column(db_conn, 'select name from test_table where 1=0') == []
+    assert db.select_row_or_none(db_conn, 'select * from test_table where 1=0') is None
+    count = db.select_scalar_or_none(
+        db_conn, 'select count(*) from test_table where 1=0')
+    assert count == 0
 
     with db.transaction(db_conn) as tx:
-        result = tx.select('SELECT * FROM test_table WHERE 1=0')
-        assert result is not None
-        assert len(result) == 0
-
-        column = tx.select_column('SELECT name FROM test_table WHERE 1=0')
-        assert column is not None
-        assert isinstance(column, list)
-        assert len(column) == 0
+        assert len(tx.select('select * from test_table where 1=0')) == 0
+        assert tx.select_column('select name from test_table where 1=0') == []
 
 
-def test_empty_results_key_preservation(db_conn, dialect):
-    """Selecting from a populated table preserves the SELECT-list column order.
+def test_select_keeps_select_list_column_order(db_conn):
+    """Verify a result's columns follow the order of the select list.
 
-    Empty results don't carry column info on every backend/loader combo,
-    so we verify the populated path: column order from SELECT is reflected
-    in the returned row's key order.
+    Mutation: a loader ordering columns by table definition or by name.
+    Oracle: one select list in table order, one reordered.
     """
-    if dialect == 'postgresql':
-        ts_type = 'TIMESTAMP'
-    else:
-        ts_type = 'TEXT'  # SQLite stores timestamps as text via converters
-
     with db.transaction(db_conn) as tx:
-        tx.execute('DROP TABLE IF EXISTS empty_test')
-        tx.execute(f"""
-            CREATE TABLE empty_test (
-                id INTEGER PRIMARY KEY,
-                name TEXT,
-                value DOUBLE PRECISION,
-                created_at {ts_type}
-            )
-        """)
+        tx.execute('drop table if exists empty_test')
+        tx.execute("""
+create table empty_test (
+    id integer primary key,
+    name text,
+    value double precision,
+    created_at text
+)
+""")
+        assert len(tx.select('select id, name, value, created_at from empty_test')) == 0
 
-        empty = tx.select('SELECT id, name, value, created_at FROM empty_test')
-        assert len(empty) == 0
-
-        tx.execute("INSERT INTO empty_test VALUES (1, 'test', 1.0, CURRENT_TIMESTAMP)")
-        populated = tx.select('SELECT id, name, value, created_at FROM empty_test')
-        assert len(populated) == 1
+        tx.execute("insert into empty_test values (1, 'test', 1.0, 'stamp')")
+        populated = tx.select('select id, name, value, created_at from empty_test')
         assert _columns(populated) == ['id', 'name', 'value', 'created_at']
 
-        tx.execute('DELETE FROM empty_test')
-        tx.execute("INSERT INTO empty_test VALUES (2, 'test2', 2.0, CURRENT_TIMESTAMP)")
-        reordered = tx.select('SELECT created_at, name, id FROM empty_test')
+        reordered = tx.select('select created_at, name, id from empty_test')
         assert _columns(reordered) == ['created_at', 'name', 'id']
 
-        tx.execute('DROP TABLE empty_test')
+        tx.execute('drop table empty_test')
 
 
 if __name__ == '__main__':

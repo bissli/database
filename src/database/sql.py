@@ -1,17 +1,4 @@
-"""SQL parameter processing with clean tokenization.
-
-This is a low-level utility module. For higher-level dialect-aware operations,
-use strategy methods instead (e.g., strategy.standardize_sql(), strategy.get_placeholder_style()).
-
-Public API:
-- prepare_query(sql, args, dialect) - Main entry point for query processing
-- quote_identifier(name, dialect) - Quote table/column names
-- has_placeholders(sql) - Check for parameter placeholders
-- has_named_placeholders(sql, dialect) - Check for named placeholders only
-- standardize_placeholders(sql, dialect) - Convert %s <-> ?
-- split_statements(sql, dialect) - Split on unprotected semicolons
-- mask_protected_text(sql, dialect) - Blank literals and comments
-- raise_on_readonly_disarm(cn, sql) - Keep a reader's backstop armed
+"""SQL text processing: placeholders, identifier quoting, and scanning.
 """
 import re
 from collections import namedtuple
@@ -24,87 +11,112 @@ from libb import issequence
 
 _SUPPORTED_DIALECTS = {'postgresql', 'sqlite'}
 
-# Regex patterns
-_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')  # Input placeholders (group 1 = named param name)
-_HAS_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?|(?<!:):\w+')  # Detection regex; also covers ':name' for sqlite
-_STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")  # String literals
+_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')
+_HAS_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?|(?<!:):\w+')
+_STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
 _REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
-_UNESCAPE_PCT = re.compile(r'(?<!%)%(?![%s(])')  # Unescaped % not followed by % or s or (
-_DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')  # PG dollar-quoted-string opening tag
-_NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')  # Named pyformat placeholder
-_NAMED_SQLITE_RE = re.compile(r'(?<!:):\w+|(?<![\w$@])[$@]\w+')  # sqlite ':name', '$name', '@name'
+_UNESCAPED_PCT_RE = re.compile(r'(?<!%)%(?![%s(])')
+_DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')
+_NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')
+_NAMED_SQLITE_RE = re.compile(r'(?<!:):\w+|(?<![\w$@])[$@]\w+')
 
 _IDENT_CHARS = frozenset('_$')
 _MASKABLE_RE = re.compile(r'[\'"$]|--|/\*')
 
-# Statement that turns a reader's server-side read-only setting back
-# off. Words first, as a plain substring test: the mask below is a
-# per-character loop, and a statement naming none of these cannot
-# match the pattern.
 _DISARM_WORDS = ('query_only', 'default_transaction_read_only', 'reset')
 _DISARM_RE = re.compile(
     r'\bset\s+(?:session\s+|local\s+)?default_transaction_read_only\b'
     r'|\breset\s+(?:all\b|default_transaction_read_only\b)'
     r'|\bpragma\s+(?:\w+\s*\.\s*)?query_only\s*=', re.I)
 
-# Placeholder info: position, end, name (for named params), context, already in parens
 PH = namedtuple('PH', 'pos end name ctx in_parens')
 
 
-def prepare_query(sql: str, args: tuple | list | dict | None, dialect: str = 'postgresql') -> tuple[str, Any]:
-    """Process SQL query with parameters for the given dialect.
+def prepare_query(
+        sql: str,
+        args: tuple | list | dict | None,
+        dialect: str = 'postgresql') -> tuple[str, Any]:
+    """SQL and args rewritten for the dialect's driver.
 
-    Handles:
-    - IN clause expansion: `IN %s` with `(1,2,3)` -> `IN (%s,%s,%s)`
-    - IS NULL handling: `IS %s` with `None` -> `IS NULL`
-    - Placeholder conversion: `%s` <-> `?` based on dialect
-    - Percent escaping in string literals for PostgreSQL
+    Parameters
+    ----------
+    sql : str
+        Statement text with '%s', '?' or '%(name)s' placeholders.
+    args : tuple | list | dict | None
+        Positional values, or a dict that binds by name when sql names a
+        placeholder. A lone sequence fills several placeholders in order.
+        A sequence at 'in %s' expands to one marker per item, and an empty
+        one to '(null)'. None at 'is %s' or 'is not %s' inlines null.
+    dialect : str, default 'postgresql'
+        'sqlite' emits '?' and ':name'. Any other value emits '%s' and
+        '%(name)s'.
+
+    Returns
+    -------
+    tuple[str, Any]
+        The rewritten SQL and its args, a tuple or a dict. Args come back
+        unchanged when sql holds no '%s', '?' or '%(name)s' anywhere.
+
+    Raises
+    ------
+    QueryError
+        When the positional arg count differs from the placeholder count.
     """
-
-    # Fast path: no placeholders
     if not sql or not _PH_RE.search(sql):
         return sql, args
-
-    # Find placeholders with context
     phs = _find_contexts(sql, dialect)
-
-    # Normalize args to canonical form
-    args = _normalize(args, phs)
-
-    # Transform SQL and args
-    sql, args = _transform(sql, phs, args, dialect)
-
-    return sql, args
+    return _transform(sql, phs, _normalize(args, phs), dialect)
 
 
 def quote_identifier(identifier: str, dialect: str = 'postgresql') -> str:
-    """Quote a table or column name safely.
+    """Identifier double-quoted per segment, safe to splice into SQL.
 
-    Dotted identifiers (e.g. 'public.foo') are split on the dot and each
-    segment is quoted independently - so 'public.foo' becomes
-    '"public"."foo"', not '"public.foo"'. A dot inside an already-quoted
-    segment ('"weird.name"') is preserved as part of that segment.
+    Parameters
+    ----------
+    identifier : str
+        Table or column name, optionally schema-qualified. Each unquoted
+        dot separates a segment. A segment that opens with '"' is already
+        quoted, and a dot inside it stays part of the name.
+    dialect : str, default 'postgresql'
+        'postgresql' or 'sqlite'.
 
-    Standard SQL double-quote escaping is applied identically for all
-    supported dialects.
+    Returns
+    -------
+    str
+        Each segment wrapped in '"', with any '"' inside it doubled.
+
+    Raises
+    ------
+    DatabaseError
+        When dialect is not supported.
+    ValidationError
+        When identifier contains a null byte.
     """
     if dialect not in _SUPPORTED_DIALECTS:
         raise DatabaseError(
-            f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}'
-        )
+            f'Unknown dialect: {dialect}. Supported: {_SUPPORTED_DIALECTS}')
     if '\x00' in identifier:
         raise ValidationError(f'Identifier contains null byte: {identifier!r}')
-    parts = _split_qualified_identifier(identifier)
-    return '.'.join(f'"{p.replace(chr(34), chr(34) + chr(34))}"' for p in parts)
+    return '.'.join(
+        '"' + part.replace('"', '""') + '"'
+        for part in _split_qualified_identifier(identifier))
 
 
 def _split_qualified_identifier(identifier: str) -> list[str]:
-    """Split a possibly-qualified identifier on unquoted dots.
+    """Segments of a possibly qualified identifier, split on unquoted dots.
 
-    A segment is "quoted" only when '"' appears at the start of the
-    segment; '"' characters in the middle of an otherwise-unquoted
-    segment are treated as literal data (and the caller will double-quote
-    them). Inside a quoted segment, '""' is an escape for a literal '"'.
+    Parameters
+    ----------
+    identifier : str
+        A segment counts as quoted only when '"' is its first character.
+        Inside a quoted segment '""' stands for one '"'. A '"' anywhere
+        else is data.
+
+    Returns
+    -------
+    list[str]
+        Segment text without its enclosing quotes, in order. Never empty:
+        '' gives [''].
     """
     parts: list[str] = []
     buf: list[str] = []
@@ -141,74 +153,138 @@ def _split_qualified_identifier(identifier: str) -> list[str]:
 
 
 def make_placeholders(count: int, dialect: str = 'postgresql') -> str:
-    """Generate SQL placeholders for the given dialect.
+    """Comma-joined run of count markers, such as '%s, %s' or '?, ?'.
 
-    Args:
-        count: Number of placeholders to generate
-        dialect: Database dialect ('postgresql' or 'sqlite')
+    Parameters
+    ----------
+    count : int
+        Number of markers. Zero gives ''.
+    dialect : str, default 'postgresql'
+        'sqlite' takes '?'. Any other value takes '%s'.
 
     Returns
-        Comma-separated placeholder string (e.g., '%s, %s, %s' or '?, ?, ?')
+    -------
+    str
+        The markers joined by ', '.
     """
     marker = '?' if dialect == 'sqlite' else '%s'
     return ', '.join([marker] * count)
 
 
-def build_select_sql(table: str, dialect: str, columns: list[str] | None = None,
-                     where: str | None = None, order_by: str | None = None,
-                     limit: int | None = None) -> str:
-    """Generate a SELECT statement for the specified database type.
+def build_select_sql(
+        table: str,
+        dialect: str,
+        columns: list[str] | None = None,
+        where: str | None = None,
+        order_by: str | None = None,
+        limit: int | None = None) -> str:
+    """Select statement over a quoted table.
+
+    Parameters
+    ----------
+    table : str
+        Table name, quoted per segment by quote_identifier.
+    dialect : str
+        'postgresql' or 'sqlite'.
+    columns : list[str] | None, default None
+        Columns to select, each quoted. None or empty selects '*'.
+    where : str | None, default None
+        Condition text, spliced in as written.
+    order_by : str | None, default None
+        Ordering text, spliced in as written.
+    limit : int | None, default None
+        Row limit. None emits no limit clause, and 0 emits 'limit 0'.
+
+    Returns
+    -------
+    str
+        The statement, with lower-case keywords.
+
+    Raises
+    ------
+    DatabaseError
+        When dialect is not supported.
+    ValidationError
+        When the table or a column name contains a null byte.
     """
     quoted_table = quote_identifier(table, dialect)
 
     if columns:
         quoted_cols = ', '.join(quote_identifier(col, dialect) for col in columns)
-        select_clause = f'SELECT {quoted_cols}'
+        select_clause = f'select {quoted_cols}'
     else:
-        select_clause = 'SELECT *'
+        select_clause = 'select *'
 
-    sql = f'{select_clause} FROM {quoted_table}'
+    sql = f'{select_clause} from {quoted_table}'
 
     if where:
-        sql += f' WHERE {where}'
+        sql += f' where {where}'
 
     if order_by:
-        sql += f' ORDER BY {order_by}'
+        sql += f' order by {order_by}'
 
     if limit is not None:
-        sql += f' LIMIT {limit}'
+        sql += f' limit {limit}'
 
     return sql
 
 
 def build_insert_sql(dialect: str, table: str, columns: list[str]) -> str:
-    """Generate an INSERT statement.
+    """Insert statement with one placeholder per column.
+
+    Parameters
+    ----------
+    dialect : str
+        'postgresql' takes '%s' markers, 'sqlite' takes '?'.
+    table : str
+        Table name, quoted per segment by quote_identifier.
+    columns : list[str]
+        Column names, each quoted, in the order the values bind.
+
+    Returns
+    -------
+    str
+        The statement, with lower-case keywords.
+
+    Raises
+    ------
+    DatabaseError
+        When dialect is not supported.
+    ValidationError
+        When the table or a column name contains a null byte.
     """
     quoted_table = quote_identifier(table, dialect)
     quoted_columns = ', '.join(quote_identifier(col, dialect) for col in columns)
     placeholders = make_placeholders(len(columns), dialect)
 
-    return f'INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})'
+    return f'insert into {quoted_table} ({quoted_columns}) values ({placeholders})'
 
 
 def has_placeholders(sql: str | None) -> bool:
-    """Check if SQL contains parameter placeholders.
+    """True when sql holds a placeholder in any style a driver takes.
 
-    Covers pyformat ('%(name)s'), classic positional ('%s'), qmark ('?'),
-    and sqlite named (':name') - i.e. any placeholder that might appear
-    in SQL on its way to the DBAPI cursor. '::' (PG type cast) is
-    explicitly excluded.
+    Parameters
+    ----------
+    sql : str | None
+        Statement text. Empty or None gives False.
+
+    Returns
+    -------
+    bool
+        True for '%s', '?', '%(name)s' or ':name'. A PostgreSQL '::' cast
+        does not count. Unlike has_named_placeholders, a placeholder inside
+        a literal or comment counts.
     """
     return bool(sql and _HAS_PH_RE.search(sql))
 
 
 def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool:
-    """Report whether SQL carries named placeholders the caller must bind.
+    """True when sql holds a named placeholder outside protected text.
 
     Parameters
     ----------
     sql : str | None
-        SQL to inspect, already standardized for the dialect.
+        Statement text, already standardized for the dialect.
     dialect : str, default 'postgresql'
         Which named syntaxes count. PostgreSQL recognizes pyformat
         '%(name)s' only; sqlite also recognizes ':name', '$name' and
@@ -217,17 +293,8 @@ def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool
     Returns
     -------
     bool
-        True when at least one named placeholder sits outside a string
-        literal, comment, or dollar-quoted body.
-
-    Notes
-    -----
-    - This is what separates a dict argument that names parameters from
-      a dict argument that IS a value (a JSON column, say). Without the
-      distinction every dict is bound by name.
-    - The ':name' form is left out for PostgreSQL on purpose: '::' casts
-      and array slices ('arr[1:3]') would otherwise read as named
-      placeholders.
+        True when a named placeholder sits outside a string literal,
+        comment, or dollar-quoted body.
     """
     if not sql:
         return False
@@ -255,12 +322,11 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
     -------
     str
         The rewritten statement. A placeholder inside a string literal, a
-        comment, or a dollar-quoted body stays as written.
+        comment, or a dollar-quoted body stays as written, and so does a
+        PostgreSQL JSONB '?' operator.
     """
     if not sql:
         return sql
-
-    # Quick check: nothing to convert
     if dialect == 'sqlite' and '%' not in sql:
         return sql
     if dialect == 'postgresql' and '?' not in sql:
@@ -269,9 +335,9 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
     protected = _protected_ranges(sql, dialect)
     target = '?' if dialect == 'sqlite' else '%s'
 
-    def replace(m):
+    def replace(m: re.Match[str]) -> str:
         if m.start() in protected:
-            return m.group(0)  # Preserve protected content
+            return m.group(0)
         if (dialect == 'postgresql' and m.group(0) == '?'
                 and _is_jsonb_op(sql, m.start())):
             return m.group(0)
@@ -290,9 +356,9 @@ def mask_protected_text(sql: str, dialect: str = 'postgresql') -> str | None:
     sql : str
         Statement text.
     dialect : str, default 'postgresql'
-        Governs the two dialect-specific rules: PostgreSQL nests block
-        comments, honors a backslash escape inside an E'' string, and
-        has dollar quoting; SQLite has none of the three.
+        PostgreSQL nests block comments, honors a backslash escape inside
+        an E'' string, and has dollar quoting. SQLite has none of the
+        three.
 
     Returns
     -------
@@ -301,18 +367,6 @@ def mask_protected_text(sql: str, dialect: str = 'postgresql') -> str | None:
         preserving length and offsets. None when a literal, comment, or
         dollar-quoted body never closes, so no offset after it can be
         trusted.
-
-    Notes
-    -----
-    - Separate from _protected_ranges, which serves placeholder
-      processing and must keep going on text this rejects. This one
-      fails closed instead, so a caller reading it as a permission
-      check cannot be fooled by an unterminated quote.
-    - Leaves regexp_replace() calls alone. _protected_ranges masks the
-      whole call, which would hide a write sitting after it.
-    - Text carrying no quote, comment opener, or dollar sign is
-      returned unchanged, which keeps the scan off a large generated
-      statement that has nothing to mask.
     """
     if not sql:
         return sql
@@ -327,14 +381,15 @@ def mask_protected_text(sql: str, dialect: str = 'postgresql') -> str | None:
         char = sql[i]
 
         if char in {"'", '"'}:
-            escaped = (dialect == 'postgresql' and char == "'"
-                       and i and sql[i - 1] in 'Ee'
-                       and not (i > 1 and (sql[i - 2].isalnum()
-                                           or sql[i - 2] in _IDENT_CHARS)))
+            is_escape_string = (
+                dialect == 'postgresql' and char == "'"
+                and i and sql[i - 1] in 'Ee'
+                and not (i > 1 and (sql[i - 2].isalnum()
+                                    or sql[i - 2] in _IDENT_CHARS)))
             j = i + 1
             closed = False
             while j < n:
-                if escaped and sql[j] == '\\':
+                if is_escape_string and sql[j] == '\\':
                     j += 2
                     continue
                 if sql[j] == char:
@@ -395,7 +450,7 @@ def mask_protected_text(sql: str, dialect: str = 'postgresql') -> str | None:
 
 
 def split_statements(sql: str, dialect: str = 'postgresql') -> list[str]:
-    """Split SQL on the semicolons that are not inside a literal.
+    """Statements of sql, split on semicolons outside a literal or comment.
 
     Parameters
     ----------
@@ -407,23 +462,10 @@ def split_statements(sql: str, dialect: str = 'postgresql') -> list[str]:
     Returns
     -------
     list[str]
-        The statements, stripped, with blank ones dropped. A single
-        element when there is nothing to split, and the whole text as
-        one element when it cannot be scanned.
-
-    Notes
-    -----
-    - A semicolon inside a string or a comment does not split.
-      Splitting on the raw text executes a statement hidden behind
-      '--' and breaks a query holding a semicolon in a literal.
-    - Text with no semicolon at all skips the scan, which keeps the
-      cost off the single-statement path every query takes.
+        The statements, stripped, with blank ones dropped. The whole text
+        as one element when mask_protected_text cannot scan it.
     """
-    if ';' not in sql:
-        stripped = sql.strip()
-        return [stripped] if stripped else []
-
-    masked = mask_protected_text(sql, dialect)
+    masked = mask_protected_text(sql, dialect) if ';' in sql else None
     if masked is None or ';' not in masked:
         stripped = sql.strip()
         return [stripped] if stripped else []
@@ -449,27 +491,19 @@ def raise_on_readonly_disarm(cn: Any, sql: str) -> None:
     Parameters
     ----------
     cn : Any
-        Connection-like object; read-only when its 'readonly' attribute
-        is true, and its 'dialect' names the dialect to scan under.
+        Connection-like object, read-only when its 'readonly' attribute
+        is true. A missing attribute counts as a writer. Its 'dialect'
+        attribute, default 'postgresql', picks the scan rules.
     sql : str
         Statement text about to be executed.
 
     Raises
     ------
     ReadOnlyError
-        When cn is read-only and sql assigns the dialect's read-only
-        session setting.
-
-    Notes
-    -----
-    - Not a write classifier. The server refuses the writes; this only
-      stops a caller turning that refusal off, which both dialects
-      otherwise allow in one statement.
-    - Runs only for a read-only connection, and only once a plain
-      substring scan has found one of the setting names, so an
-      ordinary statement never reaches the mask.
-    - Text the mask cannot scan is refused, because an offset after an
-      unterminated literal cannot place the match.
+        When cn is read-only and sql sets or resets the dialect's
+        read-only session setting. Also when sql mentions 'query_only',
+        'default_transaction_read_only' or 'reset' and holds a literal,
+        comment or dollar body that never closes.
     """
     if not getattr(cn, 'readonly', False) or not sql:
         return
@@ -486,47 +520,53 @@ def raise_on_readonly_disarm(cn: Any, sql: str) -> None:
         f'setting: {statement}')
 
 
-def _find_contexts(sql: str, dialect: str = 'postgresql') -> list[PH]:
-    """Find placeholders with their contexts in one pass."""
+def _find_contexts(sql: str, dialect: str) -> list[PH]:
+    """Placeholders the args must fill, in text order, with their context.
+
+    Parameters
+    ----------
+    sql : str
+        Statement text.
+    dialect : str
+        Picks the protected-text rules. On 'postgresql' a JSONB '?'
+        operator is not a placeholder.
+
+    Returns
+    -------
+    list[PH]
+        One entry per placeholder outside protected text.
+    """
     protected = _protected_ranges(sql, dialect)
 
     phs = []
     for m in _PH_RE.finditer(sql):
         if m.start() in protected:
             continue
-
         if (dialect == 'postgresql' and m.group(0) == '?'
                 and _is_jsonb_op(sql, m.start())):
             continue
-
-        # Determine context from SQL prefix
         prefix = sql[:m.start()].upper().rstrip()
         ctx, in_parens = _parse_ctx(prefix)
-
         phs.append(PH(m.start(), m.end(), m.group(1), ctx, in_parens))
 
     return phs
 
 
-def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
-    """Return character positions that are inside protected SQL contexts.
+def _protected_ranges(sql: str, dialect: str) -> set[int]:
+    """Offsets inside a literal, comment, dollar body or regexp_replace call.
 
-    Protected contexts:
-    - String literals ('...' and "...") - handled in lexical order with
-      precedence over comments and dollar quotes.
-    - Single-line comments (--) and block comments (/* */).
-    - Dollar-quoted bodies ($$...$$ and $tag$...$tag$) - PostgreSQL only.
-    - Backtick and bracket identifiers (`...` and [...]) - sqlite only.
-    - regexp_replace(...) calls.
+    Parameters
+    ----------
+    sql : str
+        Statement text.
+    dialect : str
+        'postgresql' adds dollar-quoted bodies. 'sqlite' adds backtick
+        and bracket identifiers.
 
-    Notes
-    -----
-    - A block comment closes at the first '*/' here, so a nested
-      PostgreSQL comment leaves its tail unprotected. Placeholder
-      processing wants that: it keeps going on text it cannot parse
-      rather than refusing the query. mask_protected_text nests
-      instead, because a permission check has to fail closed. Do not
-      make one match the other.
+    Returns
+    -------
+    set[int]
+        Protected offsets.
     """
     protected: set[int] = set()
     n = len(sql)
@@ -554,14 +594,13 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
             protected.update(range(i, j))
             i = j
             continue
-        if c == '-' and i + 1 < n and sql[i + 1] == '-':
+        if c == '-' and sql.startswith('--', i):
             j = sql.find('\n', i + 2)
-            if j == -1:
-                j = n
+            j = n if j == -1 else j
             protected.update(range(i, j))
             i = j
             continue
-        if c == '/' and i + 1 < n and sql[i + 1] == '*':
+        if c == '/' and sql.startswith('/*', i):
             j = sql.find('*/', i + 2)
             j = n if j == -1 else j + 2
             protected.update(range(i, j))
@@ -584,12 +623,20 @@ def _protected_ranges(sql: str, dialect: str = 'postgresql') -> set[int]:
 
 
 def _is_jsonb_op(sql: str, pos: int) -> bool:
-    """Detect PostgreSQL JSONB '?' operator at pos.
+    """True when the '?' at pos is a PostgreSQL JSONB key-exists operator.
 
-    Returns True for the JSONB key-exists family - '?' followed (after
-    optional whitespace) by a quoted literal, or paired into multi-char
-    operators '?|' / '?&'. The caller must already know the dialect is
-    'postgresql'.
+    Parameters
+    ----------
+    sql : str
+        PostgreSQL statement text.
+    pos : int
+        Offset of a '?'.
+
+    Returns
+    -------
+    bool
+        True for '?|', '?&', or a '?' whose next non-space character is a
+        quote.
     """
     n = len(sql)
     if pos + 1 < n and sql[pos + 1] in '|&':
@@ -601,7 +648,18 @@ def _is_jsonb_op(sql: str, pos: int) -> bool:
 
 
 def _parse_ctx(prefix: str) -> tuple[str, bool]:
-    """Parse context from SQL prefix. Returns (context, in_parens)."""
+    """Context of the placeholder that follows prefix.
+
+    Parameters
+    ----------
+    prefix : str
+        The SQL before the placeholder, upper-cased and right-stripped.
+
+    Returns
+    -------
+    tuple[str, bool]
+        The PH ctx, and whether the IN list's '(' is already written.
+    """
     if prefix.endswith('('):
         inner = prefix[:-1].rstrip()
         if inner.endswith('IN'):
@@ -616,20 +674,29 @@ def _parse_ctx(prefix: str) -> tuple[str, bool]:
 
 
 def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict | None:
-    """Normalize args."""
+    """Args reshaped to bind against phs, by name or in order.
+
+    Parameters
+    ----------
+    args : tuple | list | dict | None
+        Args as the caller passed them.
+    phs : list[PH]
+        Placeholders the args must fill.
+
+    Returns
+    -------
+    tuple | dict | None
+        A dict to bind by name, or a tuple to bind in order. Empty args
+        come back as given, except against a lone IN placeholder, which
+        gets ((),).
+    """
     if not args:
         if len(phs) == 1 and phs[0].ctx == 'in':
             return ((),)
         return args
 
-    # Notes:
-    # - A dict is a name->value binding map only when the SQL actually
-    #   names a placeholder. Against '?' or '%s' it is an ordinary
-    #   value (a JSON column, say), and binding it by name would emit
-    #   ':None' from _proc_named, since a positional PH carries no name.
     has_named = any(p.name for p in phs)
 
-    # Rule 1: Dict passthrough
     if isinstance(args, dict):
         return args if has_named else (args,)
     if len(args) == 1 and isinstance(args[0], dict) and has_named:
@@ -637,25 +704,17 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
 
     in_count = sum(1 for p in phs if p.ctx == 'in')
 
-    # Rule 2: Single IN with flat values -> wrap
-    if in_count == 1 and len(phs) == 1 and _is_flat(args):
+    if (in_count == 1 and len(phs) == 1
+            and _isseq(args) and not any(_isseq(arg) for arg in args)):
         return (tuple(args),)
 
-    # Rule 3: Nested list/tuple handling
     if len(args) == 1 and _isseq(args[0]):
         inner = args[0]
-        # [(a,b,c)] -> (a,b,c) when there are multiple placeholders to fill.
-        # With a single placeholder, never unpack: the inner sequence is the
-        # value (e.g. ANY(%s) or = %s with an array). Unpacking a one-element
-        # list under a single placeholder silently turns array params into
-        # scalar binds and breaks `ANY(%s)`.
         if len(inner) == len(phs) and len(phs) > 1:
             return tuple(inner)
-        # [[1,2,3]] -> ((1,2,3),) for single nested IN
         if len(inner) == 1 and _isseq(inner[0]):
             return (tuple(inner[0]),)
 
-    # Rule 4: Multiple IN with lists -> convert inner lists to tuples
     if isinstance(args, list) and in_count > 1:
         result = []
         for i, arg in enumerate(args):
@@ -669,7 +728,11 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
     return tuple(args) if isinstance(args, list) else args
 
 
-def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str) -> tuple[str, Any]:
+def _transform(
+        sql: str,
+        phs: list[PH],
+        args: tuple | dict | None,
+        dialect: str) -> tuple[str, Any]:
     """Rewrite each placeholder for the dialect and rebuild the args to match.
 
     Parameters
@@ -693,16 +756,14 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
     ------
     QueryError
         When the positional arg count differs from the placeholder count.
-
-    Notes
-    -----
-    - A dict key no pyformat placeholder names is kept, because a native
-      sqlite '$name', '@name' or '?NNN' binds it after this rewrite.
     """
     parts = []
     if isinstance(args, dict):
         pyformat_names = {ph.name for ph in phs}
-        new_args = {name: val for name, val in args.items() if name not in pyformat_names}
+        new_args = {
+            name: val for name, val in args.items()
+            if name not in pyformat_names
+            }
     else:
         if len(args or ()) != len(phs):
             raise QueryError(
@@ -714,26 +775,22 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
     marker = '?' if dialect == 'sqlite' else '%s'
 
     for i, ph in enumerate(phs):
-        # Text segment before placeholder
         seg = sql[pos:ph.pos]
         if is_pg:
             seg = _escape_percents(seg)
         parts.append(seg)
 
-        # Process placeholder
         if isinstance(args, dict):
             sql_part, arg_upd = _proc_named(ph, args, dialect)
             parts.append(sql_part)
             new_args.update(arg_upd)
         else:
-            val = args[i]
-            sql_part, arg_list = _proc_pos(ph, val, marker)
+            sql_part, arg_list = _proc_pos(ph, args[i], marker)
             parts.append(sql_part)
             new_args.extend(arg_list)
 
         pos = ph.end
 
-    # Final segment
     seg = sql[pos:]
     if is_pg:
         seg = _escape_percents(seg)
@@ -744,41 +801,62 @@ def _transform(sql: str, phs: list[PH], args: tuple | dict | None, dialect: str)
 
 
 def _proc_pos(ph: PH, val: Any, marker: str) -> tuple[str, list]:
-    """Process positional placeholder. Returns (sql, args)."""
-    # IS NULL / IS NOT NULL
-    if ph.ctx in {'is', 'is_not'} and val is None:
-        return 'NULL', []
+    """SQL and args for one placeholder when the args bind in order.
 
-    # IN clause
+    Parameters
+    ----------
+    ph : PH
+        The placeholder.
+    val : Any
+        The arg for ph.
+    marker : str
+        '%s' or '?'.
+
+    Returns
+    -------
+    tuple[str, list]
+        The replacement SQL, and the args it binds in order.
+    """
+    if ph.ctx in {'is', 'is_not'} and val is None:
+        return 'null', []
     if ph.ctx == 'in':
         return _expand_in(val, marker, ph.in_parens)
-
     return marker, [val]
 
 
 def _expand_in(val: Any, marker: str, in_parens: bool) -> tuple[str, list]:
-    """Expand IN clause. Returns (sql, args)."""
-    # Unwrap single nested sequence
+    """IN-list SQL and args for one positional value.
+
+    Parameters
+    ----------
+    val : Any
+        A sequence spreads to one marker per item, after a sequence
+        holding one sequence unwraps. Any other value is one item.
+    marker : str
+        '%s' or '?'.
+    in_parens : bool
+        True when the SQL already holds the list's parentheses.
+
+    Returns
+    -------
+    tuple[str, list]
+        The list SQL and its args. An empty sequence gives null and no
+        args, so the list matches no row.
+    """
     if _isseq(val) and len(val) == 1 and _isseq(val[0]):
         val = val[0]
 
     if _isseq(val):
-        if not val:  # Empty -> NULL
-            return 'NULL' if in_parens else '(NULL)', []
-
+        if not val:
+            return 'null' if in_parens else '(null)', []
         phs = ', '.join([marker] * len(val))
         return phs if in_parens else f'({phs})', list(val)
 
-    # Single value
     return marker if in_parens else f'({marker})', [val]
 
 
 def _named_ph(name: str, dialect: str) -> str:
-    """Return the named-placeholder syntax for the dialect.
-
-    psycopg accepts pyformat '%(name)s'; sqlite3 only accepts the named
-    style ':name'. Emitting the right shape here keeps the args dict
-    untouched - both drivers look up by `name` as the dict key.
+    """Named placeholder for the dialect: ':name' for sqlite, else '%(name)s'.
     """
     return f':{name}' if dialect == 'sqlite' else f'%({name})s'
 
@@ -802,34 +880,49 @@ def _proc_named(ph: PH, args: dict, dialect: str) -> tuple[str, dict]:
     """
     name = ph.name
     if name is None:
-        # The '?' of a sqlite '?NNN' binds the key 'NNN' with the digits
-        # left in place after it.
         return '?' if dialect == 'sqlite' else '%s', {}
     if name not in args:
         return _named_ph(name, dialect), {}
 
     val = args[name]
-
-    # IS NULL / IS NOT NULL
     if ph.ctx in {'is', 'is_not'} and val is None:
-        return 'NULL', {}
-
-    # IN clause
+        return 'null', {}
     if ph.ctx == 'in':
         return _expand_named_in(name, val, ph.in_parens, dialect)
-
     return _named_ph(name, dialect), {name: val}
 
 
-def _expand_named_in(name: str, val: Any, in_parens: bool, dialect: str) -> tuple[str, dict]:
-    """Expand named IN clause."""
-    # Unwrap single nested sequence
+def _expand_named_in(
+        name: str,
+        val: Any,
+        in_parens: bool,
+        dialect: str) -> tuple[str, dict]:
+    """IN-list SQL and args for one named value.
+
+    Parameters
+    ----------
+    name : str
+        Placeholder name. Item i binds under the key f'{name}_{i}'.
+    val : Any
+        A sequence spreads to one placeholder per item, after a sequence
+        holding one sequence unwraps. Any other value is item 0.
+    in_parens : bool
+        True when the SQL already holds the list's parentheses.
+    dialect : str
+        'postgresql' or 'sqlite'.
+
+    Returns
+    -------
+    tuple[str, dict]
+        The list SQL and its args. An empty sequence gives null and no
+        args, so the list matches no row.
+    """
     if _isseq(val) and len(val) == 1 and _isseq(val[0]):
         val = val[0]
 
     if _isseq(val):
         if not val:
-            return ('NULL', {}) if in_parens else ('(NULL)', {})
+            return ('null', {}) if in_parens else ('(null)', {})
 
         new_args = {}
         phs = []
@@ -841,42 +934,31 @@ def _expand_named_in(name: str, val: Any, in_parens: bool, dialect: str) -> tupl
         sql = ', '.join(phs)
         return (sql, new_args) if in_parens else (f'({sql})', new_args)
 
-    # Single value
     key = f'{name}_0'
     sql = _named_ph(key, dialect)
     return (sql, {key: val}) if in_parens else (f'({sql})', {key: val})
 
 
 def _escape_percents(segment: str) -> str:
-    """Escape unescaped % in string literals, preserving regexp_replace."""
-    # Protect regexp_replace calls
+    """Segment with lone '%' in literals doubled, except in regexp_replace.
+    """
     regexps = []
 
-    def save_regexp(m):
+    def save_regexp(m: re.Match[str]) -> str:
         regexps.append(m.group(0))
-        return f'\x00R{len(regexps)-1}\x00'
+        return f'\x00R{len(regexps) - 1}\x00'
+
+    def double_percents(m: re.Match[str]) -> str:
+        return _UNESCAPED_PCT_RE.sub('%%', m.group(0))
 
     segment = _REGEXP_RE.sub(save_regexp, segment)
-
-    # Escape % in string literals
-    def esc_str(m):
-        return _UNESCAPE_PCT.sub('%%', m.group(0))
-
-    segment = _STR_RE.sub(esc_str, segment)
-
-    # Restore regexp calls
-    for i, r in enumerate(regexps):
-        segment = segment.replace(f'\x00R{i}\x00', r)
-
+    segment = _STR_RE.sub(double_percents, segment)
+    for i, regexp in enumerate(regexps):
+        segment = segment.replace(f'\x00R{i}\x00', regexp)
     return segment
 
 
-# Helpers
 def _isseq(v: Any) -> bool:
-    """Check if sequence (not string/dict)."""
+    """True for a Sequence other than a str or dict.
+    """
     return issequence(v) and not isinstance(v, (str, dict))
-
-
-def _is_flat(args: Any) -> bool:
-    """Check if args is flat (no nested sequences)."""
-    return _isseq(args) and all(not _isseq(a) for a in args)

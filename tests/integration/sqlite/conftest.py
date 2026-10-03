@@ -1,7 +1,5 @@
+"""Fixtures for SQLite-specific integration tests.
 """
-Fixtures for SQLite-specific integration tests.
-"""
-import pathlib
 import time
 
 import database as db
@@ -10,41 +8,33 @@ import pytest
 
 @pytest.fixture
 def test_table_prefix():
-    """Generate a unique test table prefix for isolation."""
+    """Table name prefix carrying the current second.
+    """
     return f'test_autocommit_{int(time.time())}'
 
 
 @pytest.fixture
-def sqlite_file_conn():
-    """File-based SQLite connection fixture for testing persistence across connections."""
-    db_file = f'./test_sqlite_{int(time.time())}.db'
-
+def sqlite_file_conn(tmp_path):
+    """Connection to a file database under tmp_path, test_table, three rows.
+    """
     conn = db.connect({
         'drivername': 'sqlite',
-        'database': db_file
-    })
-
-    # Create test schema
-    create_table = """
-    CREATE TABLE test_table (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        value INTEGER NOT NULL
-    )
-    """
-    db.execute(conn, create_table)
-
-    # Insert test data
-    insert_data = """
-    INSERT INTO test_table (name, value) VALUES
-    ('Alice', 10),
-    ('Bob', 20),
-    ('Charlie', 30)
-    """
-    db.execute(conn, insert_data)
+        'database': str(tmp_path / 'test_sqlite.db'),
+        })
+    db.execute(conn, """
+create table test_table (
+    id integer primary key,
+    name text not null unique,
+    value integer not null
+)
+""")
+    db.execute(conn, """
+insert into test_table (name, value) values
+('Alice', 10),
+('Bob', 20),
+('Charlie', 30)
+""")
 
     yield conn
 
     conn.close()
-    if pathlib.Path(db_file).exists():
-        pathlib.Path(db_file).unlink()

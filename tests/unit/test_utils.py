@@ -1,10 +1,3 @@
-"""Unit tests for database.utils.
-
-Covers get_dialect_name branch precedence, get_raw_connection unwrapping,
-and ensure_commit error handling.
-"""
-
-import logging
 import sqlite3
 
 import psycopg
@@ -12,14 +5,9 @@ import pytest
 import sqlalchemy as sa
 from database.utils import ensure_commit, get_dialect_name, get_raw_connection
 
-logger = logging.getLogger(__name__)
-
 
 class _Obj:
-    """Object exposing exactly the attributes it is built with.
-
-    A MagicMock answers every hasattr() with True, so it cannot tell the
-    branches of get_dialect_name apart.
+    """Exact-attribute stub; a MagicMock would pass every hasattr() check.
     """
 
     def __init__(self, **attrs):
@@ -54,10 +42,8 @@ class TestGetDialectName:
     def test_dialect_attribute_beats_engine(self):
         """Verify a direct dialect attribute wins over engine.dialect.
 
-        Mutation: guarding the `hasattr(obj, 'dialect')` branch on
-            `not hasattr(obj, 'engine')` so the engine branch runs first.
-        Oracle: the two branches carry disagreeing names; only the first
-            yields 'sqlite'.
+        Mutation: the engine branch checked before the dialect attribute.
+        Oracle: disagreeing names; only the dialect branch gives 'sqlite'.
         """
         obj = _Obj(
             dialect=_Dialect('sqlite'),
@@ -67,9 +53,7 @@ class TestGetDialectName:
     def test_string_dialect_is_lowercased(self):
         """Verify a plain string dialect attribute is returned lowercased.
 
-        Mutation: `return dialect` in place of `return dialect.lower()`,
-            or dropping the `isinstance(dialect, str)` branch so a string
-            is read through `.name`.
+        Mutation: `.lower()` dropped, or a string read through `.name`.
         Oracle: hand-cased 'PostgreSQL' -> 'postgresql'.
         """
         assert get_dialect_name(_Obj(dialect='PostgreSQL')) == 'postgresql'
@@ -86,10 +70,8 @@ class TestGetDialectName:
     def test_engine_branch_beats_sa_connection(self):
         """Verify engine.dialect is read before sa_connection.engine.
 
-        Mutation: guarding the engine branch on `not hasattr(obj,
-            'sa_connection')` so the sa_connection branch runs first.
-        Oracle: the two branches carry disagreeing names; only the engine
-            branch yields 'postgresql'.
+        Mutation: the sa_connection branch checked before the engine branch.
+        Oracle: disagreeing names; only the engine branch gives 'postgresql'.
         """
         obj = _Obj(
             engine=_Obj(dialect=_Dialect('postgresql')),
@@ -102,10 +84,8 @@ class TestGetDialectName:
             self, create_simple_mock_connection):
         """Verify sa_connection.engine.dialect is read before dbapi_connection.
 
-        Mutation: guarding the sa_connection branch on `not hasattr(obj,
-            'dbapi_connection')` so the recursive branch runs first.
-        Oracle: the wrapped DBAPI connection is a psycopg type, so only
-            the sa_connection branch yields 'sqlite'.
+        Mutation: the dbapi_connection branch checked before sa_connection.
+        Oracle: psycopg-typed dbapi_connection; sa_connection gives 'sqlite'.
         """
         obj = _Obj(
             sa_connection=_Obj(engine=_Obj(dialect=_Dialect('SQLite'))),
@@ -115,10 +95,8 @@ class TestGetDialectName:
     def test_dbapi_connection_resolves_recursively(self, create_simple_mock_connection):
         """Verify dbapi_connection is re-resolved through the full ladder.
 
-        Mutation: returning a fixed 'postgresql' instead of recursing on
-            `obj.dbapi_connection`.
-        Oracle: the inner object answers only through a later branch than
-            the outer one - a dialect string, then a nested psycopg type.
+        Mutation: a fixed 'postgresql' returned in place of the recursion.
+        Oracle: inner objects that resolve only through later branches.
         """
         wrapped = _Obj(dbapi_connection=_Obj(dialect='SQLite'))
         assert get_dialect_name(wrapped) == 'sqlite'
@@ -137,10 +115,8 @@ class TestGetDialectName:
             self, create_simple_mock_connection, conn_type, expected):
         """Verify a bare DBAPI connection is typed by its driver module.
 
-        Mutation: dropping `type(obj).__module__` from `type_name`, or
-            swapping the 'postgresql' and 'sqlite' returns.
-        Oracle: both drivers name their class 'Connection', so only the
-            module half separates them.
+        Mutation: __module__ dropped from type_name, or the returns swapped.
+        Oracle: both classes are named 'Connection'; only the module differs.
         """
         conn = create_simple_mock_connection(conn_type)
         assert get_dialect_name(conn) == expected
@@ -148,11 +124,8 @@ class TestGetDialectName:
     def test_sqlite3_real_connection_resolves(self):
         """Verify a real sqlite3 connection resolves through its driver module.
 
-        Mutation: dropping 'sqlite3' from the module check in
-            get_dialect_name, or returning 'postgresql' for that branch.
-        Oracle: sqlite3.connect(':memory:') has type_name
-            'sqlite3.Connection'; the module check is the only path that
-            returns 'sqlite'.
+        Mutation: 'sqlite3' dropped from the module check.
+        Oracle: a real sqlite3.connect(':memory:') connection.
         """
         conn = sqlite3.connect(':memory:')
         try:
@@ -164,11 +137,8 @@ class TestGetDialectName:
             self, create_simple_mock_connection):
         """Verify a None engine and sa_connection do not short-circuit.
 
-        Mutation: dropping `hasattr(obj.engine, 'dialect')` (or
-            `hasattr(obj.sa_connection, 'engine')`) from its guard, which
-            raises on a ConnectionWrapper whose engine is None.
-        Oracle: the sqlite-typed dbapi_connection, reachable only by
-            falling through both None guards.
+        Mutation: a hasattr guard on obj.engine or obj.sa_connection dropped.
+        Oracle: a sqlite-typed dbapi_connection behind both None attributes.
         """
         obj = _Obj(
             engine=None,
@@ -179,10 +149,8 @@ class TestGetDialectName:
     def test_unknown_object_raises(self, create_simple_mock_connection):
         """Verify an unrecognized object raises instead of guessing.
 
-        Mutation: replacing the final `raise AttributeError` with a
-            default return of 'postgresql'.
-        Oracle: an object from an unknown driver module and a bare
-            object(); neither can be typed.
+        Mutation: the final raise replaced by a default 'postgresql'.
+        Oracle: an unknown driver module and a bare object().
         """
         with pytest.raises(AttributeError, match='Cannot determine dialect'):
             get_dialect_name(create_simple_mock_connection('unknown'))
@@ -193,20 +161,10 @@ class TestGetDialectName:
 class TestGetRawConnection:
     """Tests for get_raw_connection unwrapping."""
 
-    def test_unwraps_driver_connection(self):
-        """Verify the driver_connection is returned, not the wrapper.
-
-        Mutation: `raw_conn = connection` inside the hasattr branch.
-        Oracle: identity of the sentinel the wrapper holds.
-        """
-        raw = object()
-        assert get_raw_connection(_Obj(driver_connection=raw)) is raw
-
     def test_passes_through_plain_connection(self):
         """Verify a connection with no driver_connection is returned as is.
 
-        Mutation: `raw_conn = None` as the default, or accessing
-            `connection.driver_connection` unconditionally.
+        Mutation: None as the getattr default.
         Oracle: identity of the object passed in.
         """
         conn = _Obj()
@@ -215,10 +173,8 @@ class TestGetRawConnection:
     def test_unwraps_a_real_sqlalchemy_proxy(self):
         """Verify a live SQLAlchemy pool proxy unwraps to the DBAPI object.
 
-        Mutation: `raw_conn = connection` inside the hasattr branch, which
-            hands back the pool proxy instead of the driver connection.
-        Oracle: isinstance against sqlite3.Connection - the proxy is not
-            one, the object behind driver_connection is.
+        Mutation: connection returned as is, so the pool proxy comes back.
+        Oracle: isinstance against sqlite3.Connection.
         """
         engine = sa.create_engine('sqlite://')
         try:
@@ -232,10 +188,8 @@ class TestGetRawConnection:
     def test_unwraps_exactly_one_level(self):
         """Verify unwrapping stops after one hop.
 
-        Mutation: turning the `if` into a `while` loop that unwraps until
-            no driver_connection remains.
-        Oracle: a two-deep chain whose middle and inner links differ by
-            identity.
+        Mutation: unwrapping in a loop until no driver_connection is left.
+        Oracle: a two-deep chain; the middle link comes back.
         """
         inner = object()
         middle = _Obj(driver_connection=inner)
@@ -248,9 +202,8 @@ class TestEnsureCommit:
     def test_commits_once_and_skips_fallback(self):
         """Verify a successful commit stops before the driver fallback.
 
-        Mutation: dropping the `return` after `connection.commit()`, which
-            commits the driver connection a second time.
-        Oracle: spy counts - one commit on the wrapper, none on the driver.
+        Mutation: the `return` after `connection.commit()` dropped.
+        Oracle: spy counts, one wrapper commit and no driver commit.
         """
         conn = _Connection(driver_connection=_Connection())
         ensure_commit(conn)
@@ -258,12 +211,10 @@ class TestEnsureCommit:
         assert conn.driver_connection.commit_count == 0
 
     def test_commit_reaches_the_database(self, tmp_path):
-        """Verify ensure_commit flushes a pending write, not just logs.
+        """Verify ensure_commit makes a pending write visible to a reader.
 
-        Mutation: dropping the `connection.commit()` call from the first
-            branch so the pending transaction is never flushed.
-        Oracle: a second sqlite3 connection to the same file, which sees
-            the row only after a real commit.
+        Mutation: the `connection.commit()` call dropped.
+        Oracle: a second sqlite3 connection to the file sees the row.
         """
         db_path = tmp_path / 'commit.db'
         writer = sqlite3.connect(db_path)
@@ -289,12 +240,10 @@ class TestEnsureCommit:
             sqlite3.OperationalError,
             ])
     def test_falls_back_to_driver_after_expected_error(self, error):
-        """Verify each _CommitError member routes the commit to the driver.
+        """Verify each _COMMIT_ERRORS member routes the commit to the driver.
 
-        Mutation: dropping an entry from the `_CommitError` tuple, which
-            lets that error escape instead of reaching the fallback.
-        Oracle: spy counts - one commit attempt on each connection, and no
-            exception out of ensure_commit.
+        Mutation: an entry dropped from _COMMIT_ERRORS.
+        Oracle: spy counts, one commit on each connection and no raise.
         """
         conn = _Connection(error=error('boom'), driver_connection=_Connection())
         ensure_commit(conn)
@@ -302,11 +251,10 @@ class TestEnsureCommit:
         assert conn.driver_connection.commit_count == 1
 
     def test_unexpected_error_propagates(self):
-        """Verify an error outside _CommitError is not swallowed.
+        """Verify an error outside _COMMIT_ERRORS propagates.
 
-        Mutation: widening `except _CommitError` to `except Exception`.
-        Oracle: RuntimeError sits outside the tuple, so it must surface
-            and leave the driver connection untouched.
+        Mutation: `except _COMMIT_ERRORS` widened to `except Exception`.
+        Oracle: RuntimeError escapes and the driver is untouched.
         """
         conn = _Connection(error=RuntimeError('boom'), driver_connection=_Connection())
         with pytest.raises(RuntimeError, match='boom'):
@@ -314,12 +262,10 @@ class TestEnsureCommit:
         assert conn.driver_connection.commit_count == 0
 
     def test_driver_commit_error_is_swallowed(self):
-        """Verify a failing driver commit is logged, not raised.
+        """Verify a failing driver commit is swallowed.
 
-        Mutation: narrowing the fallback `except _CommitError` to a single
-            driver exception, so an InterfaceError escapes.
-        Oracle: spy count proves the fallback ran; the absence of an
-            exception proves it was caught.
+        Mutation: the fallback except narrowed so InterfaceError escapes.
+        Oracle: spy count 1 and no exception.
         """
         driver = _Connection(error=psycopg.InterfaceError('closed'))
         assert ensure_commit(_Obj(driver_connection=driver)) is None
@@ -328,10 +274,8 @@ class TestEnsureCommit:
     def test_no_commit_anywhere_is_a_noop(self):
         """Verify an object graph with no commit() is left alone.
 
-        Mutation: dropping `hasattr(connection.driver_connection,
-            'commit')` from the fallback guard, which raises AttributeError.
-        Oracle: neither object exposes commit, so returning None is the
-            only correct outcome.
+        Mutation: the hasattr commit guard dropped from the fallback.
+        Oracle: neither object has commit; None is the only outcome.
         """
         assert ensure_commit(_Obj()) is None
         assert ensure_commit(_Obj(driver_connection=_Obj())) is None

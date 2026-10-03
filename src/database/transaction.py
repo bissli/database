@@ -1,5 +1,4 @@
-"""
-Transaction handling and auto-commit management for database operations.
+"""Transaction context manager and auto-commit switching.
 """
 import logging
 import threading
@@ -19,8 +18,24 @@ logger = logging.getLogger(__name__)
 _local = threading.local()
 
 
-def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
-    """Try to use strategy for autocommit. Returns True if successful."""
+def _set_autocommit(connection: Any, enable: bool) -> None:
+    """Switch auto-commit on or off by every means the connection offers.
+
+    Parameters
+    ----------
+    connection : Any
+        ConnectionWrapper, SQLAlchemy connection, or raw DBAPI connection.
+    enable : bool
+        True turns auto-commit on.
+    """
+    if (hasattr(connection, 'execution_options')
+        and callable(connection.execution_options)):
+        isolation = 'AUTOCOMMIT' if enable else 'READ COMMITTED'
+        try:
+            connection.execution_options(isolation_level=isolation)
+        except Exception as e:
+            logger.debug(f'Could not set SQLAlchemy execution_options: {e}')
+
     try:
         if hasattr(connection, 'dialect'):
             strategy = get_db_strategy(connection)
@@ -29,32 +44,12 @@ def _try_strategy_autocommit(connection: Any, enable: bool) -> bool:
                 strategy.enable_autocommit(raw_conn)
             else:
                 strategy.disable_autocommit(raw_conn)
-            return True
+            return
     except Exception as e:
         logger.debug(f'Could not use strategy for autocommit: {e}')
-    return False
-
-
-def _set_autocommit(connection: Any, enable: bool) -> None:
-    """Set auto-commit mode for any database connection.
-
-    Works with SQLAlchemy connections, psycopg, sqlite3, and raw DBAPI connections.
-    """
-    # SQLAlchemy execution_options
-    if hasattr(connection, 'execution_options') and callable(connection.execution_options):
-        isolation = 'AUTOCOMMIT' if enable else 'READ COMMITTED'
-        try:
-            connection.execution_options(isolation_level=isolation)
-        except Exception as e:
-            logger.debug(f'Could not set SQLAlchemy execution_options: {e}')
-
-    # Strategy-based autocommit
-    if _try_strategy_autocommit(connection, enable=enable):
-        return
 
     raw_conn = get_raw_connection(connection)
 
-    # Direct autocommit property
     if hasattr(raw_conn, 'autocommit'):
         try:
             raw_conn.autocommit = enable
@@ -62,7 +57,6 @@ def _set_autocommit(connection: Any, enable: bool) -> None:
         except Exception as e:
             logger.debug(f'Could not set autocommit: {e}')
 
-    # SQLite isolation_level
     if hasattr(raw_conn, 'isolation_level'):
         level = None if enable else 'DEFERRED'
         try:
@@ -72,24 +66,41 @@ def _set_autocommit(connection: Any, enable: bool) -> None:
 
 
 def enable_auto_commit(connection: Any) -> None:
-    """Enable auto-commit mode for any database connection."""
+    """Turn auto-commit on; a failure is logged at DEBUG and swallowed.
+    """
     _set_autocommit(connection, enable=True)
 
 
 def disable_auto_commit(connection: Any) -> None:
-    """Disable auto-commit mode for any database connection."""
+    """Turn auto-commit off; a failure is logged at DEBUG and swallowed.
+    """
     _set_autocommit(connection, enable=False)
 
 
 def diagnose_connection(conn: Any) -> dict[str, Any]:
-    """Diagnose connection state for debugging.
+    """Report a connection's transaction state, for debugging.
+
+    Parameters
+    ----------
+    conn : Any
+        ConnectionWrapper or raw DBAPI connection.
+
+    Returns
+    -------
+    dict[str, Any]
+        type : dialect name, or 'unknown'.
+        is_sqlalchemy : whether conn carries an sa_connection.
+        closed : conn.closed, or False.
+        auto_commit : the raw connection's autocommit; failing that,
+        whether its isolation_level is None (sqlite3); else None.
+        in_transaction : conn.in_transaction, or False.
     """
     info: dict[str, Any] = {
         'type': 'unknown',
         'auto_commit': None,
         'in_transaction': False,
         'closed': False,
-    }
+        }
 
     if hasattr(conn, 'dialect'):
         info['type'] = conn.dialect
@@ -111,20 +122,39 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
 
 
 class Transaction:
-    """Context manager for running multiple commands in a transaction.
+    """Run several statements as one commit, rolled back on an exception.
 
-    This implementation uses thread-local storage to track transaction state,
-    making it safe to use in multi-threaded environments. Each thread can have
-    its own transaction for the same connection, but nested transactions within
-    the same thread are not supported.
+    Parameters
+    ----------
+    cn : Any
+        Connection to run on, usually a ConnectionWrapper.
+
+    Attributes
+    ----------
+    cn : Any
+        The connection as passed; strategy code unwraps a Transaction by it.
+    connection : Any
+        The same connection; every method runs on it.
+
+    Raises
+    ------
+    RuntimeError
+        When this thread already holds an open Transaction on cn.
+
+    Notes
+    -----
+    - Auto-commit is on after the block, even where it was off before it.
 
     Examples
-        with Transaction(cn) as tx:
-            tx.execute('delete from ...', args)
-            tx.execute('update from ...', args)
+    --------
+    >>> with Transaction(cn) as tx:
+    ...     tx.execute('delete from ...', args)
+    ...     tx.execute('update ...', args)
     """
 
     def __init__(self, cn: Any) -> None:
+        """Refuse a second open Transaction on cn in this thread.
+        """
         self.cn = cn
         self.connection = cn
 
@@ -137,29 +167,25 @@ class Transaction:
 
     @property
     def cursor(self) -> Any:
-        """Lazy cursor wrapped with timing and error handling.
+        """A new dict cursor on the connection at each access.
         """
         return get_dict_cursor(self.connection)
 
     @property
     def readonly(self) -> bool:
-        """Whether the underlying connection rejects writes.
-
-        Notes
-        -----
-        - The wrapper's write methods read this attribute off
-          whatever they are handed, and a Transaction reaches them
-          (see strategy/postgres.py's reset sequence). Without it a
-          transaction would read as a writer.
+        """The connection's readonly flag, for guards handed a Transaction.
         """
         return getattr(self.connection, 'readonly', False)
 
     @property
     def dialect(self) -> str:
-        """Dialect of the underlying connection."""
+        """Dialect of the underlying connection.
+        """
         return self.connection.dialect
 
-    def __enter__(self):
+    def __enter__(self) -> 'Transaction':
+        """Mark the connection in a transaction and turn auto-commit off.
+        """
         _local.active_transactions[id(self.connection)] = True
 
         if hasattr(self.connection, 'in_transaction'):
@@ -170,16 +196,20 @@ class Transaction:
 
         return self
 
-    def __exit__(self, exc_type: type | None, value: Exception | None, traceback: Any | None) -> None:
+    def __exit__(self, exc_type: type | None, value: Exception | None,
+                 traceback: Any | None) -> None:
+        """Commit, or roll back on an exception, then restore auto-commit.
+        """
         try:
-            cn = getattr(self.connection, 'connection', self.connection)
+            dbapi_conn = getattr(self.connection, 'connection', self.connection)
 
             if exc_type is not None:
-                cn.rollback()
+                dbapi_conn.rollback()
                 logger.warning('Rolling back the current transaction')
             else:
-                cn.commit()
-                logger.debug(f'Committed transaction for connection {id(self.connection)}')
+                dbapi_conn.commit()
+                logger.debug(
+                    f'Committed transaction for connection {id(self.connection)}')
         finally:
             _local.active_transactions.pop(id(self.connection), None)
             enable_auto_commit(self.connection)
@@ -187,16 +217,39 @@ class Transaction:
             if hasattr(self.connection, 'in_transaction'):
                 self.connection.in_transaction = False
 
-            logger.debug(f'Transaction cleanup complete for connection {id(self.connection)}')
+            logger.debug(
+                'Transaction cleanup complete for connection '
+                f'{id(self.connection)}')
 
-    def execute(self, sql: str, *args, returnid: str | list[str] | None = None) -> Any:
-        """Execute SQL within transaction context.
+    def execute(self, sql: str, *args: Any,
+                returnid: str | list[str] | None = None) -> Any:
+        """Run SQL inside the transaction.
+
+        Parameters
+        ----------
+        sql : str
+            Statement text, with placeholders as connection.execute
+            takes them.
+        *args : Any
+            Parameter values.
+        returnid : str | list[str] | None, default None
+            Column name, or names, to read from the rows the statement
+            returns, as with a returning clause.
+
+        Returns
+        -------
+        Any
+            Without returnid, the rowcount from connection.execute. With
+            it, for one row: the named value, or a list of values for a
+            list of names; for several rows, a list of those per row;
+            None when the statement returns no rows.
         """
         if not returnid:
             return self.connection.execute(sql, *args)
 
         cursor = self.cursor
-        processed_sql, processed_args = prepare_query(sql, args, self.connection.dialect)
+        processed_sql, processed_args = prepare_query(
+            sql, args, self.connection.dialect)
         cursor.execute(processed_sql, processed_args)
 
         results = None
@@ -218,27 +271,27 @@ class Transaction:
             return [[row[r] for r in returnid] for row in results]
         return [row[returnid] for row in results]
 
-    def select(self, sql: str, *args, **kwargs) -> pd.DataFrame:
-        """Execute SELECT query within transaction context.
+    def select(self, sql: str, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        """Result of connection.select, run inside the transaction.
         """
         return self.connection.select(sql, *args, **kwargs)
 
-    def select_column(self, sql: str, *args) -> list[Any]:
-        """Execute a query and return a single column as a list.
+    def select_column(self, sql: str, *args: Any) -> list[Any]:
+        """Result of connection.select_column, run inside the transaction.
         """
         return self.connection.select_column(sql, *args)
 
-    def select_row(self, sql: str, *args) -> attrdict:
-        """Execute a query and return a single row.
+    def select_row(self, sql: str, *args: Any) -> attrdict:
+        """Result of connection.select_row, run inside the transaction.
         """
         return self.connection.select_row(sql, *args)
 
-    def select_row_or_none(self, sql: str, *args) -> attrdict | None:
-        """Execute a query and return a single row or None if no rows found.
+    def select_row_or_none(self, sql: str, *args: Any) -> attrdict | None:
+        """Result of connection.select_row_or_none, run in the transaction.
         """
         return self.connection.select_row_or_none(sql, *args)
 
-    def select_scalar(self, sql: str, *args) -> Any:
-        """Execute a query and return a single scalar value.
+    def select_scalar(self, sql: str, *args: Any) -> Any:
+        """Result of connection.select_scalar, run inside the transaction.
         """
         return self.connection.select_scalar(sql, *args)

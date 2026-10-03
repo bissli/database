@@ -11,6 +11,8 @@ pytestmark = [pytest.mark.sqlite, pytest.mark.integration]
 
 
 def _delete_mode_file(tmp_path):
+    """Path of a new delete-mode database holding table t with one row.
+    """
     db_file = tmp_path / 'journal.db'
     setup = sqlite3.connect(db_file)
     setup.execute('create table t (a int)')
@@ -21,6 +23,8 @@ def _delete_mode_file(tmp_path):
 
 
 def _journal_mode_on_disk(db_file):
+    """Journal mode a fresh sqlite3 connection reports for db_file.
+    """
     check = sqlite3.connect(db_file)
     mode = check.execute('pragma journal_mode').fetchone()[0]
     check.close()
@@ -30,12 +34,8 @@ def _journal_mode_on_disk(db_file):
 def test_delete_mode_writer_connects_while_another_connection_reads(tmp_path):
     """Verify journal_mode='delete' keeps a delete-mode file in delete mode.
 
-    Mutation: configure_writer_connection ignoring options.journal_mode
-        and setting WAL, which needs an exclusive lock and raises
-        'database is locked' while the other connection reads.
-    Oracle: sqlite3's report of journal_mode on a separate connection,
-        and a second sqlite3 connection holding a read
-        transaction open across the connect.
+    Mutation: configure_writer_connection ignoring journal_mode, setting WAL.
+    Oracle: journal_mode on a separate connection, with a read held open.
     """
     db_file = _delete_mode_file(tmp_path)
     holder = sqlite3.connect(db_file, isolation_level=None)
@@ -55,21 +55,17 @@ def test_delete_mode_writer_connects_while_another_connection_reads(tmp_path):
 def test_synchronous_follows_the_journal_mode(tmp_path):
     """Verify each mode sets its own synchronous level over a stale one.
 
-    Mutation: the non-WAL branch leaving synchronous as it found it, so
-        a pooled connection keeps the NORMAL an earlier WAL checkout set,
-        the two levels swapped, or truncate and persist treated as WAL.
-    Oracle: SQLite's documented levels, NORMAL = 1 and FULL = 2, read
-        back from a raw connection whose level was set to the other one
-        first.
+    Mutation: the non-WAL branch keeping a stale level, or levels swapped.
+    Oracle: SQLite's documented levels, normal = 1 and full = 2.
     """
     db_file = _delete_mode_file(tmp_path)
     strategy = SQLiteStrategy()
 
     cases = (
-        ('delete', 'NORMAL', 2),
-        ('truncate', 'NORMAL', 2),
-        ('persist', 'NORMAL', 2),
-        ('wal', 'FULL', 1),
+        ('delete', 'normal', 2),
+        ('truncate', 'normal', 2),
+        ('persist', 'normal', 2),
+        ('wal', 'full', 1),
         )
     for mode, stale, expected in cases:
         raw = sqlite3.connect(db_file, isolation_level=None)
@@ -85,11 +81,8 @@ def test_synchronous_follows_the_journal_mode(tmp_path):
 def test_writer_keeps_its_journal_mode_across_a_rebuild(tmp_path):
     """Verify a reconnect applies the caller's journal_mode again.
 
-    Mutation: ConnectionWrapper._ensure_connection not passing options
-        to configure_connection, so the first reconnect after a dropped
-        connection raises or falls back to WAL.
-    Oracle: sqlite3's report of journal_mode on a separate connection,
-        and the rebuilt connection's own synchronous level, FULL = 2.
+    Mutation: _ensure_connection not passing options to configure_connection.
+    Oracle: journal_mode on a separate connection, and synchronous full = 2.
     """
     db_file = _delete_mode_file(tmp_path)
     cn = db.connect({'drivername': 'sqlite', 'database': str(db_file),
@@ -104,6 +97,8 @@ def test_writer_keeps_its_journal_mode_across_a_rebuild(tmp_path):
 
 
 def _switch_to_wal_and_hold_open(db_file):
+    """Open sqlite3 connection that switched db_file to WAL and read it.
+    """
     other = sqlite3.connect(db_file, isolation_level=None)
     other.execute('pragma journal_mode = wal')
     other.execute('select * from t').fetchall()
@@ -113,12 +108,8 @@ def _switch_to_wal_and_hold_open(db_file):
 def test_failed_rebuild_is_retried_rather_than_kept(tmp_path):
     """Verify a reconnect whose setup raises leaves no connection behind.
 
-    Mutation: _ensure_connection keeping the rebuilt connection before
-        configure_connection succeeds, so the next statement runs on a
-        connection that never left WAL.
-    Oracle: SQLite's own refusal to switch a WAL file out of WAL while
-        another connection has read it, and sqlite3's report of
-        journal_mode once that connection closes.
+    Mutation: _ensure_connection keeping the rebuilt connection on failure.
+    Oracle: SQLite refusing to leave WAL while another connection reads.
     """
     db_file = _delete_mode_file(tmp_path)
     cn = db.connect({'drivername': 'sqlite', 'database': str(db_file),
@@ -141,12 +132,8 @@ def test_failed_rebuild_is_retried_rather_than_kept(tmp_path):
 def test_failed_connect_releases_its_connection(tmp_path):
     """Verify a connect whose setup raises does not hold the file open.
 
-    Mutation: connect() leaving the half-configured connection open, so
-        a retry made while the first exception is still referenced fails
-        to switch the file out of WAL.
-    Oracle: SQLite's refusal to switch out of WAL while another
-        connection has read the file, which the leaked connection would
-        be.
+    Mutation: connect() leaving the half-configured connection open.
+    Oracle: SQLite refusing to leave WAL while another connection reads.
     """
     db_file = _delete_mode_file(tmp_path)
     options = {'drivername': 'sqlite', 'database': str(db_file),
@@ -156,8 +143,7 @@ def test_failed_connect_releases_its_connection(tmp_path):
         db.connect(dict(options))
     other.close()
 
-    # excinfo keeps the failed connect's frames alive, and with them any
-    # connection it failed to release, until the retry has run.
+    # excinfo keeps any leaked connection alive until the retry runs.
     cn = db.connect(dict(options))
     cn.close()
     del excinfo

@@ -1,259 +1,173 @@
-"""
-Integration tests for PostgreSQL type handling.
+"""Type round trips and null binding against a live PostgreSQL server.
 """
 import datetime
-import decimal
 
 import database as db
 import numpy as np
 import pandas as pd
 from database.cursor import get_dict_cursor
 
+NULL_BINDING_VALUES = [
+    ('Python float NaN', float('nan')),
+    ('NumPy float32 NaN', np.float32('nan')),
+    ('NumPy float64 NaN', np.float64('nan')),
+    ('NumPy datetime64 NaT', np.datetime64('NaT')),
+    ('Pandas NaT', pd.NaT),
+    ('Python None', None),
+    ('Pandas NA', pd.NA),
+    ('Empty string', ''),
+    ('Regular integer', 42),
+    ]
+EXPECTED_INT_COL = {
+    label: 42 if label == 'Regular integer' else None
+    for label, _ in NULL_BINDING_VALUES
+    }
+
 
 def test_postgres_type_consistency(psql_docker, pg_conn, value_dict):
-    """Test type consistency with PostgreSQL"""
+    """Verify each column type comes back as its Python type and value.
 
-    # Create a test table with various types
+    Mutation: numeric read as Decimal, date as datetime, or jsonb as text.
+    Oracle: value_dict, the hand-written values that were inserted.
+    """
     with db.transaction(pg_conn) as tx:
-        # Drop table if it exists
-        tx.execute('DROP TABLE IF EXISTS type_test')
-
-        # Create table with various types
+        tx.execute('drop table if exists type_test')
         tx.execute("""
-        CREATE TABLE type_test (
-            int_col INTEGER,
-            bigint_col BIGINT,
-            smallint_col SMALLINT,
-            bool_true_col BOOLEAN,
-            bool_false_col BOOLEAN,
-            float_col FLOAT,
-            decimal_col DECIMAL(18,6),
-            money_col MONEY,
-            char_col CHAR(1),
-            varchar_col VARCHAR(100),
-            text_col TEXT,
-            date_col DATE,
-            time_col TIME,
-            datetime_col TIMESTAMP,
-            bytea_col BYTEA,
-            null_col VARCHAR(100),
-            json_col JSONB
-        )
-        """)
+create table type_test (
+    int_col integer,
+    bigint_col bigint,
+    smallint_col smallint,
+    bool_true_col boolean,
+    bool_false_col boolean,
+    float_col float,
+    decimal_col decimal(18,6),
+    money_col money,
+    char_col char(1),
+    varchar_col varchar(100),
+    text_col text,
+    date_col date,
+    time_col time,
+    datetime_col timestamp,
+    bytea_col bytea,
+    null_col varchar(100),
+    json_col jsonb
+)
+""")
+        tx.execute(
+            f"insert into type_test values ({', '.join(['%s'] * 17)})",
+            value_dict['int_value'],
+            value_dict['big_int'],
+            value_dict['small_int'],
+            value_dict['bool_true'],
+            value_dict['bool_false'],
+            value_dict['float_value'],
+            value_dict['decimal_value'],
+            value_dict['money_value'],
+            value_dict['char_value'],
+            value_dict['varchar_value'],
+            value_dict['text_value'],
+            value_dict['date_value'],
+            value_dict['time_value'],
+            value_dict['datetime_value'],
+            value_dict['binary_value'],
+            value_dict['null_value'],
+            value_dict['json_value'])
 
-        # Insert test values
-        tx.execute("""
-        INSERT INTO type_test VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-                   value_dict['int_value'],
-                   value_dict['big_int'],
-                   value_dict['small_int'],
-                   value_dict['bool_true'],
-                   value_dict['bool_false'],
-                   value_dict['float_value'],
-                   value_dict['decimal_value'],
-                   value_dict['money_value'],
-                   value_dict['char_value'],
-                   value_dict['varchar_value'],
-                   value_dict['text_value'],
-                   value_dict['date_value'],
-                   value_dict['time_value'],
-                   value_dict['datetime_value'],
-                   value_dict['binary_value'],
-                   value_dict['null_value'],
-                   value_dict['json_value']
-                   )
-
-        # Query the data
-        rows = tx.select('SELECT * FROM type_test')
+        rows = tx.select('select * from type_test')
         assert len(rows) == 1
         row = rows[0]
 
-        # Verify integer types
-        assert isinstance(row['int_col'], int)
+        assert type(row['int_col']) is int
         assert row['int_col'] == value_dict['int_value']
-
-        assert isinstance(row['bigint_col'], int)
+        assert type(row['bigint_col']) is int
         assert row['bigint_col'] == value_dict['big_int']
-
-        assert isinstance(row['smallint_col'], int)
+        assert type(row['smallint_col']) is int
         assert row['smallint_col'] == value_dict['small_int']
 
-        # Verify boolean values
-        assert isinstance(row['bool_true_col'], bool)
         assert row['bool_true_col'] is True
-
-        assert isinstance(row['bool_false_col'], bool)
         assert row['bool_false_col'] is False
 
-        # Verify floating point values
-        assert isinstance(row['float_col'], float)
+        assert type(row['float_col']) is float
         assert abs(row['float_col'] - value_dict['float_value']) < 0.00001
+        assert type(row['decimal_col']) is float
+        assert abs(row['decimal_col'] - float(value_dict['decimal_value'])) < 0.000001
 
-        # Decimal could be returned as Decimal or float
-        if isinstance(row['decimal_col'], decimal.Decimal):
-            assert abs(row['decimal_col'] - value_dict['decimal_value']) < decimal.Decimal('0.000001')
-        else:
-            assert abs(row['decimal_col'] - float(value_dict['decimal_value'])) < 0.000001
-
-        # Verify string values
-        assert isinstance(row['char_col'], str)
         assert row['char_col'] == value_dict['char_value']
-
-        assert isinstance(row['varchar_col'], str)
         assert row['varchar_col'] == value_dict['varchar_value']
-
-        assert isinstance(row['text_col'], str)
         assert row['text_col'] == value_dict['text_value']
 
-        # Verify date/time values
-        # Date could be date or datetime
-        if isinstance(row['date_col'], datetime.date):
-            assert row['date_col'] == value_dict['date_value']
-        else:  # datetime
-            assert row['date_col'].date() == value_dict['date_value']
+        assert type(row['date_col']) is datetime.date
+        assert row['date_col'] == value_dict['date_value']
+        assert type(row['time_col']) is datetime.time
+        assert row['time_col'] == value_dict['time_value']
+        assert type(row['datetime_col']) is datetime.datetime
+        assert row['datetime_col'] == value_dict['datetime_value']
 
-        # Time could be time or datetime
-        if isinstance(row['time_col'], datetime.time):
-            assert row['time_col'].hour == value_dict['time_value'].hour
-            assert row['time_col'].minute == value_dict['time_value'].minute
-            assert row['time_col'].second == value_dict['time_value'].second
-        else:  # datetime
-            assert row['time_col'].time().hour == value_dict['time_value'].hour
-            assert row['time_col'].time().minute == value_dict['time_value'].minute
-            assert row['time_col'].time().second == value_dict['time_value'].second
+        assert bytes(row['bytea_col']) == value_dict['binary_value']
 
-        # Datetime should be datetime
-        assert isinstance(row['datetime_col'], datetime.datetime)
-        assert row['datetime_col'].year == value_dict['datetime_value'].year
-        assert row['datetime_col'].month == value_dict['datetime_value'].month
-        assert row['datetime_col'].day == value_dict['datetime_value'].day
-        assert row['datetime_col'].hour == value_dict['datetime_value'].hour
+        assert row['json_col'] == {'key': 'value', 'numbers': [1, 2, 3]}
 
-        # Verify binary data
-        assert isinstance(row['bytea_col'], bytes | memoryview | bytearray)
-        if isinstance(row['bytea_col'], memoryview | bytearray):
-            assert bytes(row['bytea_col']) == value_dict['binary_value']
-        else:
-            assert row['bytea_col'] == value_dict['binary_value']
-
-        # psycopg3 returns JSONB columns as Python dict.
-        assert isinstance(row['json_col'], dict)
-        assert row['json_col']['key'] == 'value'
-        assert isinstance(row['json_col']['numbers'], list)
-
-        # Verify NULL value
         assert row['null_col'] is None
 
-        # Test different query methods
-        scalar = tx.select_scalar('SELECT int_col FROM type_test')
-        assert scalar == value_dict['int_value']
-
-        date_scalar = tx.select_scalar('SELECT date_col FROM type_test')
-        if isinstance(date_scalar, datetime.date):
-            assert date_scalar == value_dict['date_value']
-        else:  # datetime
-            assert date_scalar.date() == value_dict['date_value']
+        int_scalar = tx.select_scalar('select int_col from type_test')
+        assert int_scalar == value_dict['int_value']
+        date_scalar = tx.select_scalar('select date_col from type_test')
+        assert type(date_scalar) is datetime.date
+        assert date_scalar == value_dict['date_value']
 
 
 def test_postgres_nan_nat_handling(psql_docker, pg_conn):
-    """Verify NaN, NaT, NA, None and '' bind as NULL through execute.
+    """Verify NaN, NaT, NA, None and '' bind as null through execute.
 
-    Mutation: dropping the NaN guard on the builtin-float fast path, or
-        the '' arm of the str fast path, in TypeConverter.convert_value.
-    Oracle: hand-labeled values, each of which an integer column
-        rejects unless it binds as NULL, against the integer 42.
+    Mutation: dropping the float NaN guard or the str '' arm in
+        TypeConverter.convert_value.
+    Oracle: hand-labeled values an integer column rejects unless null.
     """
-    # Create a test table with integer column (to ensure NaN/NaT gets converted to NULL)
     with db.transaction(pg_conn) as tx:
-        # Drop table if it exists
-        tx.execute('DROP TABLE IF EXISTS nan_test')
+        tx.execute('drop table if exists nan_test')
+        tx.execute('create table nan_test (id serial primary key, int_col integer)')
 
-        # Create a simple table with integer column
-        tx.execute("""
-        CREATE TABLE nan_test (
-            id SERIAL PRIMARY KEY,
-            int_col INTEGER
-        )
-        """)
+        for _, value in NULL_BINDING_VALUES:
+            tx.execute('insert into nan_test (int_col) values (%s)', value)
 
-        # Create a list of special values to test
-        test_values = [
-            ('Python float NaN', float('nan')),
-            ('NumPy float32 NaN', np.float32('nan')),
-            ('NumPy float64 NaN', np.float64('nan')),
-            ('NumPy datetime64 NaT', np.datetime64('NaT')),
-            ('Pandas NaT', pd.NaT),
-            ('Python None', None),
-            ('Pandas NA', pd.NA),
-            ('Empty string', ''),
-            ('Regular integer', 42)  # This one should work
-        ]
+        rows = tx.select('select * from nan_test order by id')
+        assert len(rows) == len(NULL_BINDING_VALUES)
+        stored = {label: row['int_col']
+                  for (label, _), row in zip(NULL_BINDING_VALUES, rows)}
+        assert stored == EXPECTED_INT_COL
 
-        # Insert each test value
-        for label, value in test_values:
-            tx.execute('INSERT INTO nan_test (int_col) VALUES (%s)', value)
-
-        # Query all rows
-        rows = tx.select('SELECT * FROM nan_test ORDER BY id')
-
-        # All special values should be NULL except the last one (regular integer)
-        assert len(rows) == len(test_values)
-
-        # Check that all special values were converted to NULL
-        for i, (label, value) in enumerate(test_values):
-            if label == 'Regular integer':
-                assert rows[i]['int_col'] == 42, f"Expected 42 for {label}, got {rows[i]['int_col']}"
-            else:
-                assert rows[i]['int_col'] is None, f"Expected NULL for {label}, got {rows[i]['int_col']}"
-
-        # Extra validation: test with explicit casting to ensure handler works
-        tx.execute('INSERT INTO nan_test (int_col) VALUES (%s::integer)', float('nan'))
-
-        # This should also be NULL
-        result = tx.select_scalar('SELECT int_col FROM nan_test WHERE id = %s', len(test_values) + 1)
+        tx.execute('insert into nan_test (int_col) values (%s::integer)', float('nan'))
+        result = tx.select_scalar('select int_col from nan_test where id = %s',
+                                  len(NULL_BINDING_VALUES) + 1)
         assert result is None, 'Explicitly cast NaN should be NULL'
 
 
 def test_postgres_cursor_executemany(psql_docker, pg_conn):
-    """Test using connection cursor directly to call executemany with special values.
+    """Verify executemany on a dict cursor binds the same values as null.
 
-    Tests how multiple insertions of NaN, NaT and similar special values are handled
-    when using the low-level cursor directly instead of the transaction interface.
+    Mutation: Cursor.executemany skipping TypeConverter.
+    Oracle: hand-labeled values, all null but the integer 42.
     """
-    with db.transaction(pg_conn) as tx:
-        tx.execute('DROP TABLE IF EXISTS executemany_test')
-
-        tx.execute("""
-        CREATE TABLE executemany_test (
-            id SERIAL PRIMARY KEY,
-            int_col INTEGER,
-            label VARCHAR(100)
-        )
-        """)
-
-    test_values = [
-        ('Python float NaN', float('nan')),
-        ('NumPy float32 NaN', np.float32('nan')),
-        ('NumPy float64 NaN', np.float64('nan')),
-        ('NumPy datetime64 NaT', np.datetime64('NaT')),
-        ('Pandas NaT', pd.NaT),
-        ('Python None', None),
-        ('Pandas NA', pd.NA),
-        ('Empty string', ''),
-        ('Regular integer', 42)
-    ]
+    db.execute(pg_conn, 'drop table if exists executemany_test')
+    db.execute(pg_conn, """
+create table executemany_test (
+    id serial primary key,
+    int_col integer,
+    label varchar(100)
+)
+""")
 
     cursor = get_dict_cursor(pg_conn)
     try:
-        params = [(value, label) for label, value in test_values]
         cursor.executemany(
-            'INSERT INTO executemany_test (int_col, label) VALUES (%s, %s)',
-            params
-        )
+            'insert into executemany_test (int_col, label) values (%s, %s)',
+            [(value, label) for label, value in NULL_BINDING_VALUES])
         pg_conn.commit()
     finally:
         cursor.close()
+
+    rows = db.select(pg_conn, 'select label, int_col from executemany_test')
+    assert {row['label']: row['int_col'] for row in rows} == EXPECTED_INT_COL
 
 
 if __name__ == '__main__':

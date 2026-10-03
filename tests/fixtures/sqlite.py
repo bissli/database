@@ -4,30 +4,24 @@ import pytest
 
 @pytest.fixture
 def sl_conn():
-    """SQLite in-memory connection fixture for testing."""
-    conn = db.connect({
-        'drivername': 'sqlite',
-        'database': ':memory:'
-    })
-
-    # Create test schema
+    """In-memory SQLite connection with test_table seeded with three rows.
+    """
     create_table = """
-    CREATE TABLE test_table (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        value INTEGER NOT NULL
-    )
-    """
+create table test_table (
+    id integer primary key,
+    name text not null unique,
+    value integer not null
+)
+"""
+    insert_rows = """
+insert into test_table (name, value) values
+('Alice', 10),
+('Bob', 20),
+('Charlie', 30)
+"""
+    conn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
     db.execute(conn, create_table)
-
-    # Insert test data
-    insert_data = """
-    INSERT INTO test_table (name, value) VALUES
-    ('Alice', 10),
-    ('Bob', 20),
-    ('Charlie', 30)
-    """
-    db.execute(conn, insert_data)
+    db.execute(conn, insert_rows)
 
     yield conn
     conn.close()

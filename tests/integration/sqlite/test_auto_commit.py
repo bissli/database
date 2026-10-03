@@ -1,118 +1,81 @@
+"""Auto-commit and Transaction commits as a reopened SQLite file sees them.
 """
-Integration tests for auto-commit functionality with SQLite.
-
-Note: Common auto-commit tests are in tests/integration/common/test_auto_commit.py
-This file contains only SQLite-specific tests (e.g., connection reopening with file-based DB).
-"""
-import logging
-
 import database as db
+import pytest
 from database.transaction import diagnose_connection
 
-logger = logging.getLogger(__name__)
+
+def rows_after_reopen(conn, table):
+    """Close conn, reopen its file, and read table's data column by rowid.
+    """
+    path = conn.options.database
+    conn.close()
+    reopened = db.connect({'drivername': 'sqlite', 'database': path})
+    try:
+        return db.select_column(reopened, f'select data from {table} order by rowid')
+    finally:
+        reopened.close()
+
+
+def create_scratch_table(conn, name):
+    """Create an empty table with an integer id and a data column.
+    """
+    db.execute(conn, f'create table {name} (id integer primary key, data text)')
 
 
 class TestSQLiteAutoCommit:
-    """Test auto-commit functionality with SQLite connections.
+    """Commit visibility across reopened connections on a SQLite file."""
 
-    Uses sqlite_file_conn (file-based SQLite) for tests that need to close and reopen connections.
-    """
+    def test_statement_outside_a_transaction_commits(
+            self, sqlite_file_conn, test_table_prefix):
+        """Verify a bare execute commits before returning.
 
-    def test_changes_persist_with_auto_commit(self, sqlite_file_conn, test_table_prefix):
-        """Test that changes persist without explicit commit when auto-commit is enabled."""
-        test_table_name = f'{test_table_prefix}_persist'
-        db.execute(sqlite_file_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id INTEGER PRIMARY KEY,
-            data TEXT
-        )
-        """)
+        Mutation: the strategy leaving the driver's auto-commit off.
+        Oracle: a fresh connection to the file, which sees only committed rows.
+        """
+        table = f'{test_table_prefix}_persist'
+        create_scratch_table(sqlite_file_conn, table)
+        db.execute(sqlite_file_conn, f"insert into {table} (data) values ('test1')")
 
-        db.execute(sqlite_file_conn, f"INSERT INTO {test_table_name} (data) VALUES ('test1')")
+        assert rows_after_reopen(sqlite_file_conn, table) == ['test1']
 
-        db_path = sqlite_file_conn.options.database
-        sqlite_file_conn.close()
+    def test_transaction_turns_auto_commit_off_then_back_on(
+            self, sqlite_file_conn, test_table_prefix):
+        """Verify auto-commit is off inside a block and on after it commits.
 
-        new_conn = db.connect({
-            'drivername': 'sqlite',
-            'database': db_path
-        })
-
-        try:
-            count = db.select_scalar(new_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-            assert count == 1, 'Data should be committed automatically'
-
-            data = db.select_scalar(new_conn,
-                                    f'SELECT data FROM {test_table_name} WHERE rowid = 1')
-            assert data == 'test1', 'Correct data should be committed'
-        finally:
-            new_conn.close()
-
-    def test_transaction_commits_on_exit(self, sqlite_file_conn, test_table_prefix):
-        """Test that Transaction commits changes when exiting normally."""
-        test_table_name = f'{test_table_prefix}_commit'
-        db.execute(sqlite_file_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id INTEGER PRIMARY KEY,
-            data TEXT
-        )
-        """)
+        Mutation: auto-commit left on in the block, or left off after it.
+        Oracle: sqlite3's isolation_level, and a fresh connection's rows.
+        """
+        table = f'{test_table_prefix}_commit'
+        create_scratch_table(sqlite_file_conn, table)
 
         with db.transaction(sqlite_file_conn) as tx:
-            tx.execute(f"INSERT INTO {test_table_name} (data) VALUES ('test_tx')")
-
+            tx.execute(f"insert into {table} (data) values ('test_tx')")
             assert sqlite_file_conn.in_transaction is True
-
-            info = diagnose_connection(sqlite_file_conn)
-            assert info['auto_commit'] is False, 'Auto-commit should be disabled in transaction'
+            assert diagnose_connection(sqlite_file_conn)['auto_commit'] is False
 
         assert sqlite_file_conn.in_transaction is False
+        assert diagnose_connection(sqlite_file_conn)['auto_commit'] is True
+        assert rows_after_reopen(sqlite_file_conn, table) == ['test_tx']
 
-        info = diagnose_connection(sqlite_file_conn)
-        assert info['auto_commit'] is True, 'Auto-commit should be re-enabled after transaction'
+    def test_exception_rolls_back_and_restores_auto_commit(
+            self, sl_conn, test_table_prefix):
+        """Verify a failed block leaves no row and auto-commit on.
 
-        db_path = sqlite_file_conn.options.database
-        sqlite_file_conn.close()
+        Mutation: __exit__ committing on an exception, or skipping the restore.
+        Oracle: an empty table, and sqlite3's isolation_level after the block.
+        """
+        table = f'{test_table_prefix}_rollback'
+        create_scratch_table(sl_conn, table)
 
-        new_conn = db.connect({
-            'drivername': 'sqlite',
-            'database': db_path
-        })
-
-        try:
-            count = db.select_scalar(new_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-            assert count == 1, 'Transaction should commit data on exit'
-
-            data = db.select_scalar(new_conn,
-                                    f'SELECT data FROM {test_table_name} WHERE rowid = 1')
-            assert data == 'test_tx', 'Correct data should be committed'
-        finally:
-            new_conn.close()
-
-    def test_transaction_rollback_on_exception(self, sl_conn, test_table_prefix):
-        """Test that Transaction rolls back changes on exception."""
-        test_table_name = f'{test_table_prefix}_rollback'
-        db.execute(sl_conn, f"""
-        CREATE TABLE {test_table_name} (
-            id INTEGER PRIMARY KEY,
-            data TEXT
-        )
-        """)
-
-        try:
+        with pytest.raises(ValueError, match='rollback'):
             with db.transaction(sl_conn) as tx:
-                tx.execute(f"INSERT INTO {test_table_name} (data) VALUES ('should_rollback')")
-                raise ValueError('Test exception to trigger rollback')
-        except ValueError:
-            pass  # Expected exception
+                tx.execute(f"insert into {table} (data) values ('should_rollback')")
+                raise ValueError('rollback')
 
         assert sl_conn.in_transaction is False
-
-        info = diagnose_connection(sl_conn)
-        assert info['auto_commit'] is True, 'Auto-commit should be re-enabled after exception'
-
-        count = db.select_scalar(sl_conn, f'SELECT COUNT(*) FROM {test_table_name}')
-        assert count == 0, 'Transaction should rollback data on exception'
+        assert diagnose_connection(sl_conn)['auto_commit'] is True
+        assert db.select_scalar(sl_conn, f'select count(*) from {table}') == 0
 
 
 if __name__ == '__main__':

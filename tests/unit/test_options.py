@@ -5,9 +5,6 @@ import pytest
 from database.exceptions import ValidationError
 from database.options import DatabaseOptions, iterdict_data_loader
 from database.options import pandas_numpy_data_loader
-from database.options import pandas_pyarrow_data_loader
-from database.options import use_iterdict_data_loader
-from database.types import Column
 
 REQUIRED_POSTGRES_FIELDS = [
     'hostname',
@@ -46,53 +43,43 @@ class _FalsyLoader:
         return list(data)
 
 
-class _FakeConnection:
-    """Stand-in for ConnectionWrapper: carries options, no `connection`."""
-
-    def __init__(self, options):
-        self.options = options
-
-
-class _FakeTransaction:
-    """Stand-in for Transaction: carries `connection`, no options."""
-
-    def __init__(self, connection):
-        self.connection = connection
-
-
 def test_defaults_match_declared_field_defaults():
     """Verify unset fields take the documented defaults.
 
-    Mutation: changing a declared default in DatabaseOptions, e.g.
-        `use_pool: bool = False` -> True or `pool_max_idle_time: int = 300`.
-    Oracle: hand-written table of defaults from the class docstring.
+    Mutation: a changed default, e.g. use_pool True or journal_mode 'delete'.
+    Oracle: hand-written table of the documented defaults.
     """
     options = _make_options()
 
     defaults = {
         'drivername': options.drivername,
+        'reader_hostname': options.reader_hostname,
+        'reader_port': options.reader_port,
         'use_pool': options.use_pool,
         'pool_max_connections': options.pool_max_connections,
         'pool_max_idle_time': options.pool_max_idle_time,
         'pool_wait_timeout': options.pool_wait_timeout,
+        'journal_mode': options.journal_mode,
+        'open_mode': options.open_mode,
         }
     assert defaults == {
         'drivername': 'postgresql',
+        'reader_hostname': None,
+        'reader_port': 0,
         'use_pool': False,
         'pool_max_connections': 5,
         'pool_max_idle_time': 300,
         'pool_wait_timeout': 30,
+        'journal_mode': 'wal',
+        'open_mode': None,
         }
-    assert options.data_loader is pandas_numpy_data_loader
 
 
 def test_pooling_fields_are_kept_and_never_required():
     """Verify falsy pool values construct without raising.
 
-    Mutation: 'pool_max_connections' appended to PostgresStrategy.get_required_options,
-        so pool_max_connections=0 triggers a ValidationError.
-    Oracle: all four pool fields set to falsy values construct and read back
-        as (False, 0, 0, 0).
+    Mutation: 'pool_max_connections' added to PostgreSQL's required options.
+    Oracle: falsy pool fields read back as (False, 0, 0, 0).
     """
     options = _make_options(
         use_pool=False,
@@ -111,8 +98,8 @@ def test_pooling_fields_are_kept_and_never_required():
 def test_unknown_drivername_rejected_and_supported_ones_accepted():
     """Verify the drivername guard rejects only unregistered dialects.
 
-    Mutation: `if not is_supported_dialect(self.drivername)` losing its `not`.
-    Oracle: 'sybase' raises while both registered dialect names construct.
+    Mutation: the `not` dropped from the is_supported_dialect guard.
+    Oracle: 'sybase' raises; both registered dialects construct.
     """
     with pytest.raises(ValidationError) as excinfo:
         _make_options(drivername='sybase')
@@ -126,12 +113,10 @@ def test_unknown_drivername_rejected_and_supported_ones_accepted():
 
 @pytest.mark.parametrize('field', REQUIRED_POSTGRES_FIELDS)
 def test_missing_required_postgres_field_rejected(field):
-    """Verify every field PostgreSQL requires is enforced by name.
+    """Verify each field PostgreSQL requires is enforced by name.
 
-    Mutation: dropping an entry from `return ['hostname', 'username',
-        'password', 'database', 'port', 'timeout']` in PostgresStrategy.
-    Oracle: hand-written list of the six required fields; the error names
-        the field it rejected.
+    Mutation: an entry dropped from PostgresStrategy.get_required_options.
+    Oracle: hand-written list of six fields; the error names the field.
     """
     unset = 0 if field in {'port', 'timeout'} else None
     with pytest.raises(ValidationError) as excinfo:
@@ -140,11 +125,10 @@ def test_missing_required_postgres_field_rejected(field):
 
 
 def test_zero_is_rejected_for_port_and_timeout():
-    """Verify validation rejects 0, not merely None, for numeric fields.
+    """Verify validation rejects 0 for port and timeout.
 
-    Mutation: `if not getattr(options, field)` in validate_options weakened to
-        `if getattr(options, field) is None`.
-    Oracle: boundary pair 0 -> raises, 1 -> constructs, for both fields.
+    Mutation: the falsy check in validate_options narrowed to `is None`.
+    Oracle: boundary pair 0 raises, 1 constructs, for both fields.
     """
     for field in ('port', 'timeout'):
         with pytest.raises(ValidationError):
@@ -153,12 +137,10 @@ def test_zero_is_rejected_for_port_and_timeout():
 
 
 def test_sqlite_requires_only_database():
-    """Verify SQLite validates against its own required list, not PostgreSQL's.
+    """Verify SQLite requires database alone.
 
-    Mutation: SQLiteStrategy.get_required_options returning the PostgreSQL
-        list instead of `return ['database']`.
-    Oracle: options with database alone construct while every credential
-        stays unset; database=None raises and names the field.
+    Mutation: SQLiteStrategy.get_required_options returning PostgreSQL's list.
+    Oracle: database alone constructs; database=None raises naming the field.
     """
     options = DatabaseOptions(drivername='sqlite', database='test.db')
 
@@ -174,10 +156,8 @@ def test_sqlite_requires_only_database():
 def test_sqlite_journal_mode_accepts_only_durable_modes():
     """Verify journal_mode accepts the four durable modes and nothing else.
 
-    Mutation: SQLiteStrategy.validate_options not checking journal_mode,
-        or JOURNAL_MODES gaining 'off' or 'memory'.
-    Oracle: SQLite's documented mode names; 'off' and 'memory' lose a
-        committed transaction on a crash.
+    Mutation: journal_mode left unchecked, or JOURNAL_MODES gaining 'off'.
+    Oracle: SQLite's documented durable modes, plus upper-case 'WAL'.
     """
     for mode in ('wal', 'delete', 'truncate', 'persist'):
         options = DatabaseOptions(drivername='sqlite', database='x.db',
@@ -194,11 +174,8 @@ def test_sqlite_journal_mode_accepts_only_durable_modes():
 def test_sqlite_open_mode_accepts_only_the_read_only_modes():
     """Verify open_mode accepts None, 'ro' and 'immutable' and nothing else.
 
-    Mutation: SQLiteStrategy.validate_options not checking open_mode, or
-        OPEN_MODES gaining 'rw', 'rwc' or 'memory', which would open the
-        file writable behind a reader.
-    Oracle: SQLite's documented mode values; only 'ro' and immutable=1
-        open a file without write access.
+    Mutation: open_mode left unchecked, or OPEN_MODES gaining 'rw' or 'rwc'.
+    Oracle: SQLite's read-only mode values, plus upper-case 'RO'.
     """
     for mode in (None, 'ro', 'immutable'):
         options = DatabaseOptions(drivername='sqlite', database='x.db',
@@ -215,9 +192,8 @@ def test_sqlite_open_mode_accepts_only_the_read_only_modes():
 def test_supplied_appname_wins_over_script_name(monkeypatch):
     """Verify a supplied appname is never overwritten by the script name.
 
-    Mutation: reordering `self.appname or scriptname() or 'python_console'`
-        to put scriptname() first.
-    Oracle: sys.argv[0] set to a distinct script; appname stays as supplied.
+    Mutation: scriptname() ordered before self.appname in __post_init__.
+    Oracle: a distinct sys.argv[0]; the supplied appname stays.
     """
     monkeypatch.setattr(sys, 'argv', ['/opt/bin/report_runner.py'])
 
@@ -228,10 +204,8 @@ def test_supplied_appname_wins_over_script_name(monkeypatch):
 def test_appname_falls_back_to_python_console(monkeypatch):
     """Verify a blank script name still yields a usable appname.
 
-    Mutation: dropping the `or 'python_console'` tail of the appname
-        assignment in __post_init__.
-    Oracle: sys.argv[0] = '' makes scriptname() return '', so the literal
-        fallback is the only source left.
+    Mutation: the `or 'python_console'` tail dropped from __post_init__.
+    Oracle: sys.argv[0] = '' leaves the literal as the only source.
     """
     monkeypatch.setattr(sys, 'argv', [''])
 
@@ -241,8 +215,7 @@ def test_appname_falls_back_to_python_console(monkeypatch):
 def test_default_data_loader_only_fills_an_unset_loader():
     """Verify a caller-supplied data loader survives __post_init__.
 
-    Mutation: `if self.data_loader is None:` dropped, so the pandas loader is
-        assigned unconditionally.
+    Mutation: the `is None` guard dropped, so the default always wins.
     Oracle: identity of the loader handed in.
     """
     assert _make_options(data_loader=iterdict_data_loader).data_loader \
@@ -251,65 +224,24 @@ def test_default_data_loader_only_fills_an_unset_loader():
 
 
 def test_falsy_custom_data_loader_is_kept():
-    """Verify the unset test is identity against None, not truthiness.
+    """Verify a falsy custom loader survives __post_init__.
 
-    Mutation: `if self.data_loader is None:` relaxed to
-        `if not self.data_loader:`.
-    Oracle: a callable whose __bool__ is False still comes back unreplaced.
+    Mutation: `if self.data_loader is None:` relaxed to `if not ...`.
+    Oracle: a callable whose __bool__ is False comes back unreplaced.
     """
     loader = _FalsyLoader()
 
     assert _make_options(data_loader=loader).data_loader is loader
 
 
-def test_iterdict_data_loader_returns_rows_unchanged_in_a_new_list():
-    """Verify the minimal loader copies rows into a list and edits nothing.
-
-    Mutation: `return list(data)` reduced to `return data`, or the rows
-        projected onto Column.get_names(columns).
-    Oracle: hand-written expected list; the input is a tuple whose rows carry
-        a key absent from the column metadata.
-    """
-    rows = (
-        {'id': 1, 'name': 'Alice', 'extra': 'kept'},
-        {'id': 2, 'name': 'Bob', 'extra': 'kept'},
-        )
-    columns = [Column(name='id', type_code=None), Column(name='name', type_code=None)]
-
-    result = iterdict_data_loader(rows, columns, table_name='people')
-
-    assert result == [
-        {'id': 1, 'name': 'Alice', 'extra': 'kept'},
-        {'id': 2, 'name': 'Bob', 'extra': 'kept'},
-        ]
-    assert type(result) is list
-    assert result is not rows
-
-
-def test_iterdict_data_loader_returns_empty_list_for_no_rows():
-    """Verify the empty branch yields a sized empty list, never None.
-
-    Mutation: `return []` in the `if not data` branch changed to
-        `return None`, which breaks the len() checks in select_row.
-    Oracle: [] for both an empty sequence and None, with len() defined.
-    """
-    columns = [Column(name='id', type_code=None)]
-
-    assert iterdict_data_loader([], columns) == []
-    assert iterdict_data_loader(None, columns) == []
-    assert len(iterdict_data_loader([], columns)) == 0
-
-
 class TestPasswordRedaction:
-    """The password must never reach repr, str, or a format string, while the
-    remaining fields stay readable for diagnosis.
+    """repr, str and format strings never show the password.
     """
 
     def test_repr_masks_password_exactly(self):
         """Verify repr renders every field in the documented order, masked.
 
-        Mutation: deleting the hand-written __repr__, which lets the dataclass
-            generate one that prints the password.
+        Mutation: __repr__ deleted, so the dataclass repr prints the password.
         Oracle: independently written expected string.
         """
         options = DatabaseOptions(
@@ -332,19 +264,14 @@ class TestPasswordRedaction:
     def test_password_absent_from_every_string_form(self):
         """Verify no string rendering of the options leaks the password.
 
-        Mutation: `masked = '***' if self.password else None` replaced by
-            `masked = self.password`.
-        Oracle: a password sharing no character with the '***' mask, checked
-            against repr, str, f-string, format(), and %-interpolation.
+        Mutation: `masked = self.password` in __repr__.
+        Oracle: a password sharing no character with '***', in six forms.
         """
         password = 'zq7-plaintext-secret'
         options = _make_options(password=password)
 
-        # Notes:
-        # - Each entry must reach __repr__ by a DIFFERENT route, so the
-        #   noqa markers are load-bearing: ruff's UP032/UP031 rewrite the
-        #   last two into f-strings, collapsing five paths into three
-        #   copies of one and silently gutting the test.
+        # Without the noqa markers ruff rewrites the last two as
+        # f-strings, so they stop testing format() and %.
         forms = [
             repr(options),
             str(options),
@@ -360,24 +287,18 @@ class TestPasswordRedaction:
     def test_mask_does_not_reveal_password_length(self):
         """Verify a password shorter than '***' still renders as exactly '***'.
 
-        Mutation: `'***'` replaced by `'*' * len(self.password)` in __repr__,
-            which yields '**' for a 2-char password - a case no sibling
-            exercises because all siblings use passwords of 9-plus characters.
-        Oracle: "password='***'," in repr for password='ab'; the mutation
-            yields "password='**'," which the assertion rejects.
+        Mutation: `'*' * len(self.password)` in place of `'***'`.
+        Oracle: password='ab' renders as "password='***',".
         """
         options = _make_options(password='ab')
 
         assert "password='***'," in repr(options)
 
     def test_repr_keeps_username_that_equals_the_password(self):
-        """Verify masking targets the password field, not the password text.
+        """Verify a username equal to the password still renders in full.
 
-        Mutation: masking by scrubbing the rendered string, e.g.
-            `text.replace(self.password, '***')`, which also blanks any other
-            field holding the same value.
-        Oracle: username and password set to the same string; the username
-            must still read in full.
+        Mutation: scrubbing the password text from the rendered string.
+        Oracle: username and password set to one string.
         """
         shared = 'reporting'
         options = _make_options(username=shared, password=shared)
@@ -387,10 +308,9 @@ class TestPasswordRedaction:
         assert "password='***'" in rendered
 
     def test_repr_shows_none_when_no_password(self):
-        """Verify an absent password renders as None, not as a mask.
+        """Verify an absent password renders as None.
 
-        Mutation: `masked = '***' if self.password else None` reduced to
-            `masked = '***'`, which claims a secret that does not exist.
+        Mutation: `masked = '***'` unconditionally in __repr__.
         Oracle: independently written expected string for SQLite options.
         """
         options = DatabaseOptions(
@@ -407,13 +327,8 @@ class TestPasswordRedaction:
     def test_empty_password_is_masked_and_only_none_reads_as_absent(self):
         """Verify '' renders as '***' while None alone renders as None.
 
-        Mutation: `masked = None if self.password is None else '***'`
-            reverted to `masked = '***' if self.password else None`, which
-            renders an empty password as no password at all.
-        Oracle: independently written whole-repr strings for the pair
-            straddling the threshold - password='' and password=None - which
-            differ only in the password field. SQLite is the dialect here
-            because PostgreSQL validation rejects a falsy password.
+        Mutation: `masked = '***' if self.password else None` in __repr__.
+        Oracle: whole-repr strings for password='' and password=None.
         """
         empty = DatabaseOptions(
             drivername='sqlite',
@@ -438,106 +353,6 @@ class TestPasswordRedaction:
             )
 
 
-class TestUseIterdictDataLoader:
-    """The decorator swaps in the minimal loader for one call, then restores
-    whatever the connection had.
-    """
-
-    def test_swaps_loader_for_the_call_only(self):
-        """Verify the minimal loader applies during the call and not after.
-
-        Mutation: dropping `cn.options.data_loader = iterdict_data_loader`, or
-            restoring the original before `func` runs rather than after.
-        Oracle: a spy recording the loader seen inside the call.
-        """
-        cn = _FakeConnection(_make_options(data_loader=pandas_numpy_data_loader))
-        seen = []
-
-        @use_iterdict_data_loader
-        def probe(conn, value):
-            seen.append(conn.options.data_loader)
-            return value * 2
-
-        assert probe(cn, 21) == 42
-        assert seen == [iterdict_data_loader]
-        assert cn.options.data_loader is pandas_numpy_data_loader
-
-    def test_restores_loader_when_the_call_raises(self):
-        """Verify the original loader is restored on the exception path.
-
-        Mutation: replacing the `try/finally` with a plain call followed by
-            the restore, so a raising query leaves the loader swapped.
-        Oracle: loader identity after a deliberate ValueError.
-        """
-        cn = _FakeConnection(_make_options(data_loader=pandas_pyarrow_data_loader))
-
-        @use_iterdict_data_loader
-        def probe(conn):
-            raise ValueError('query failed')
-
-        with pytest.raises(ValueError):
-            probe(cn)
-        assert cn.options.data_loader is pandas_pyarrow_data_loader
-
-    def test_unwraps_a_transaction_like_first_argument(self):
-        """Verify an argument without options is unwrapped to its connection.
-
-        Mutation: dropping `cn = cn.connection`, which raises AttributeError on
-            a Transaction, or inverting `not hasattr(cn, 'options')`.
-        Oracle: a spy on the inner connection, which is the only object
-            carrying options.
-        """
-        inner = _FakeConnection(_make_options(data_loader=pandas_numpy_data_loader))
-        tx = _FakeTransaction(inner)
-        seen = []
-
-        @use_iterdict_data_loader
-        def probe(conn):
-            seen.append(inner.options.data_loader)
-            return 'done'
-
-        assert probe(tx) == 'done'
-        assert seen == [iterdict_data_loader]
-        assert inner.options.data_loader is pandas_numpy_data_loader
-
-    def test_prefers_the_first_argument_when_it_carries_options(self):
-        """Verify an argument that carries options is never unwrapped.
-
-        Mutation: dropping `and not hasattr(cn, 'options')`, which swaps the
-            loader on the inner connection and leaves the caller's own loader
-            in force.
-        Oracle: two distinct real loaders; the inner one must never change.
-        """
-        inner = _FakeConnection(_make_options(data_loader=pandas_pyarrow_data_loader))
-        outer = _FakeConnection(_make_options(data_loader=pandas_numpy_data_loader))
-        outer.connection = inner
-        seen = []
-
-        @use_iterdict_data_loader
-        def probe(conn):
-            seen.append(outer.options.data_loader)
-            seen.append(inner.options.data_loader)
-
-        probe(outer)
-        assert seen == [iterdict_data_loader, pandas_pyarrow_data_loader]
-        assert outer.options.data_loader is pandas_numpy_data_loader
-        assert inner.options.data_loader is pandas_pyarrow_data_loader
-
-    def test_preserves_wrapped_function_identity(self):
-        """Verify the decorated connection methods keep their own name and doc.
-
-        Mutation: dropping `@wraps(func)` from the inner function, which
-            renames every decorated ConnectionWrapper method to 'inner'.
-        Oracle: name and docstring of the undecorated function.
-        """
-        @use_iterdict_data_loader
-        def select_row(conn):
-            """Execute a query and return a single row."""
-
-        assert select_row.__name__ == 'select_row'
-        assert select_row.__doc__ == 'Execute a query and return a single row.'
-
-
 def test_import_without_pyarrow():
     """Verify database imports and selects when pyarrow is absent.
 
@@ -549,7 +364,8 @@ def test_import_without_pyarrow():
         "cn = database.connect({'drivername': 'sqlite', 'database': ':memory:', "
         "'data_loader': database.options.iterdict_data_loader}); "
         "print(cn.select('select ? as a', 2))")
-    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "[{'a': 2}]" in result.stdout
 

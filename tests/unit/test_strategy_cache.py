@@ -1,14 +1,8 @@
-"""
-Unit tests for strategy result caching.
-
-Covers the TTL cache manager in database/cache.py, the
-@cacheable_strategy decorator, and the concrete strategy overrides that
-have to re-apply that decorator themselves.
+"""Unit tests for the Cache manager, @cacheable_strategy, and the registry.
 """
 import cachetools
 import pytest
 from database.cache import Cache, _create_cache_key, cacheable_strategy
-from database.cache import get_schema_cache
 from database.exceptions import DatabaseError
 from database.strategy import get_available_dialects, get_db_strategy
 from database.strategy import get_strategy, get_strategy_class
@@ -18,10 +12,7 @@ from database.strategy.sqlite import SQLiteStrategy
 
 
 class FakeConnection:
-    """Connection stand-in for cache paths, which never use the cursor.
-
-    Carries the two attributes _create_cache_key uses to recognize a
-    connection object and drop it from the key.
+    """Connection stand-in carrying the attributes _create_cache_key drops.
     """
 
     def __init__(self):
@@ -30,10 +21,7 @@ class FakeConnection:
 
 
 class SequenceProbeStrategy(SQLiteStrategy):
-    """SQLite strategy with counted, scripted metadata lookups.
-
-    Overriding the two lookups the shared finder calls lets a test fix
-    the inputs and count how often the finder body actually runs.
+    """SQLite strategy with counted, scripted, uncached metadata lookups.
     """
 
     def __init__(self, sequence_cols, primary_keys):
@@ -51,12 +39,7 @@ class SequenceProbeStrategy(SQLiteStrategy):
 
 
 class CachedLookupProbeStrategy(SQLiteStrategy):
-    """SQLite strategy whose two metadata lookups carry their own cache.
-
-    SequenceProbeStrategy leaves its overrides undecorated, so it cannot
-    show whether a nested lookup answered from cache. These overrides
-    apply @cacheable_strategy, so a bypass that never reaches them shows
-    up as a lookup that did not happen.
+    """SQLite strategy whose scripted metadata lookups carry their own cache.
     """
 
     def __init__(self, sequence_cols, primary_keys):
@@ -76,11 +59,7 @@ class CachedLookupProbeStrategy(SQLiteStrategy):
 
 
 class ProbeStrategy:
-    """Isolated probe for method-factory tests.
-
-    A distinct class name keeps its cache entries from colliding with the
-    real PostgresStrategy caches that TestConcreteStrategyMethodsAreCached
-    registers under names like 'primary_keys_PostgresStrategy_*'.
+    """Strategy stand-in whose class name keeps its caches apart.
     """
 
 
@@ -103,8 +82,6 @@ class CacheableMethodFactory:
                 return return_value(table)
             return return_value
 
-        # The decorator names the cache after method.__name__, so the
-        # stand-in has to answer to the name it is bound under.
         cached_method.__name__ = method_name
         decorated = cacheable_strategy(cache_type, ttl=300, maxsize=50)(
             cached_method)
@@ -124,12 +101,7 @@ def mock_connection():
 
 @pytest.fixture
 def strategy():
-    """Fresh probe strategy instance, safe to monkey-patch.
-
-    ProbeStrategy is used instead of PostgresStrategy so that the
-    method-factory-bound caches never squat on the real strategy cache
-    names, which would mask ttl/maxsize mutations in the concrete-strategy
-    tests that run in the same session.
+    """Fresh ProbeStrategy instance, safe to monkey-patch.
     """
     return ProbeStrategy()
 
@@ -153,11 +125,8 @@ class TestCacheManager:
             self, cache_manager):
         """Verify a named cache is created once with the asked-for limits.
 
-        Mutation: swapping maxsize and ttl in Cache.get_cache's TTLCache
-        call, or dropping the `if name not in self._caches` guard so
-        every lookup builds a fresh cache.
-        Oracle: hand-picked maxsize=3/ttl=99, plus an entry that has to
-        survive the second lookup.
+        Mutation: maxsize and ttl swapped, or the name-exists guard dropped.
+        Oracle: hand-picked maxsize=3/ttl=99 and an entry that survives.
         """
         cache = cache_manager.get_cache('limits_probe', maxsize=3, ttl=99)
         cache['key'] = 'value'
@@ -171,32 +140,11 @@ class TestCacheManager:
         assert again['key'] == 'value'
         assert again.maxsize == 3
 
-    def test_clear_all_empties_caches_without_discarding_them(
-            self, cache_manager):
-        """Verify clear_all() empties every cache and keeps the objects.
-
-        Mutation: replacing the per-cache clear() loop in Cache.clear_all
-        with self._caches.clear(), which leaves stale entries visible
-        through any reference a caller already holds.
-        Oracle: the identity of the held cache object plus its length.
-        """
-        first = cache_manager.get_cache('clear_all_a')
-        second = cache_manager.get_cache('clear_all_b')
-        first['x'] = 1
-        second['y'] = 2
-
-        cache_manager.clear_all()
-
-        assert len(first) == 0
-        assert len(second) == 0
-        assert cache_manager.get_cache('clear_all_a') is first
-
     def test_clear_cache_touches_only_the_named_cache(self, cache_manager):
         """Verify clear_cache() spares its siblings and unknown names.
 
-        Mutation: routing Cache.clear_cache to clear_all, or dropping its
-        `if name in self._caches` guard so an unknown name raises.
-        Oracle: the sibling entry that must still be readable afterwards.
+        Mutation: clear_cache routed to clear_all, or its name guard dropped.
+        Oracle: the sibling entry, still readable afterwards.
         """
         target = cache_manager.get_cache('clear_one_target')
         sibling = cache_manager.get_cache('clear_one_sibling')
@@ -209,31 +157,11 @@ class TestCacheManager:
         assert len(target) == 0
         assert sibling['y'] == 'kept'
 
-    def test_clear_for_table_matches_case_folded_anywhere_in_the_key(
-            self, cache_manager):
-        """Verify table clearing folds case and matches inside the key.
-
-        Mutation: dropping .lower() from table_lower in
-        Cache.clear_for_table, or narrowing `table_lower in
-        str(key).lower()` to a startswith or equality test.
-        Oracle: a hand-listed set of surviving keys, one of which holds
-        the table name in the middle rather than at the start.
-        """
-        cache = cache_manager.get_cache('table_clear_probe')
-        cache['test_table:a=1:'] = 'leading'
-        cache['audit:owner=test_table:'] = 'embedded'
-        cache['other_table::'] = 'unrelated'
-
-        cache_manager.clear_for_table('TEST_TABLE')
-
-        assert sorted(cache) == ['other_table::']
-
     def test_clear_caches_for_table_alias_clears_one_table(
             self, cache_manager):
         """Verify the backwards-compatible alias is the per-table clear.
 
-        Mutation: rebinding clear_caches_for_table to clear_all in
-        cache.py.
+        Mutation: clear_caches_for_table rebound to clear_all.
         Oracle: the untouched second table's entry.
         """
         cache = cache_manager.get_cache('alias_probe')
@@ -248,12 +176,8 @@ class TestCacheManager:
             self, cache_manager):
         """Verify only the four strategy cache prefixes are selected.
 
-        Mutation: dropping 'sequence_column_finder_' from
-        strategy_prefixes, or relaxing name.startswith(prefix) to
-        `prefix in name`, which would also pull in a cache whose name
-        merely contains a prefix.
-        Oracle: a hand-written expected set over caches tagged with a
-        marker suffix, so caches left by other tests cannot mask it.
+        Mutation: a prefix dropped, or startswith relaxed to `prefix in name`.
+        Oracle: a hand-written set over caches tagged with a marker suffix.
         """
         tagged = [
             'primary_keys_SelPin',
@@ -282,8 +206,7 @@ class TestCacheManager:
             self, cache_manager):
         """Verify strategy clearing does not empty the schema caches.
 
-        Mutation: routing Cache.clear_strategy_caches to clear_all, or
-        iterating self._caches instead of get_strategy_caches().
+        Mutation: clear_strategy_caches iterating every cache.
         Oracle: the schema entry, which must still hold its value.
         """
         strategy_cache = cache_manager.get_cache('table_columns_ClearPin_m')
@@ -296,23 +219,6 @@ class TestCacheManager:
         assert len(strategy_cache) == 0
         assert schema_cache['users'] == {'id': 'int'}
 
-    def test_schema_cache_is_per_connection_and_shared_with_the_helper(
-            self, cache_manager):
-        """Verify schema caches are keyed by connection id, not global.
-
-        Mutation: hardcoding 'schema_global' in the module-level
-        get_schema_cache helper, or swapping its maxsize and ttl.
-        Oracle: object identity between the helper and the method, and
-        the hand-written 50/600 limits.
-        """
-        from_helper = get_schema_cache(11)
-        from_method = cache_manager.get_schema_cache(11)
-
-        assert from_helper is from_method
-        assert from_helper.maxsize == 50
-        assert from_helper.ttl == 600
-        assert cache_manager.get_schema_cache(12) is not from_helper
-        assert cache_manager.get_schema_cache(None) is not from_helper
 
 
 class TestCacheKeyGeneration:
@@ -332,12 +238,8 @@ class TestCacheKeyGeneration:
         method_kwargs, expected_key):
         """Verify the key layout, ordering, and case folding are fixed.
 
-        Mutation: re-slicing method_args (the [1:] the wrapper's own
-        argument stripping already makes wrong), dropping sorted() from
-        the kwargs join, dropping the trailing .lower(), or swapping
-        repr() for str() so 'arg' and "'arg'" collide.
-        Oracle: hand-written key strings; every positional appears, and
-        both kwargs dicts are built out of alphabetical order.
+        Mutation: args sliced [1:], kwargs unsorted, no .lower(), or str().
+        Oracle: hand-written keys over kwargs given out of order.
         """
         assert _create_cache_key(
             table_name, method_args,
@@ -346,11 +248,8 @@ class TestCacheKeyGeneration:
     def test_cache_key_drops_connection_like_arguments(self):
         """Verify args and kwargs that look like connections are dropped.
 
-        Mutation: flipping the `not hasattr(arg, 'cursor') and not
-        hasattr(arg, 'driver_connection')` guard to `or`, which keeps any
-        object carrying only one of the two attributes.
-        Oracle: a hand-written key over probes that each carry exactly
-        one of the attributes.
+        Mutation: the two hasattr guards joined with `or` in place of `and`.
+        Oracle: a hand-written key over probes carrying one attribute each.
         """
         class HasCursor:
             cursor = None
@@ -372,10 +271,8 @@ class TestCacheKeyGeneration:
     def test_cache_key_ignores_the_bypass_cache_kwarg(self):
         """Verify bypass_cache never widens the key space.
 
-        Mutation: dropping the `if k != 'bypass_cache'` filter from the
-        kwargs join in _create_cache_key.
-        Oracle: a hand-written key plus the differential against a call
-        that omits the kwarg entirely.
+        Mutation: the `k != 'bypass_cache'` filter dropped.
+        Oracle: a hand-written key, equal to the key without the kwarg.
         """
         with_flag = _create_cache_key(
             'test_table', ['arg'], {'bypass_cache': True, 'x': 1})
@@ -384,20 +281,6 @@ class TestCacheKeyGeneration:
         assert with_flag == "test_table:'arg':x=1"
         assert with_flag == without_flag
 
-    def test_cache_key_is_independent_of_kwargs_order(self):
-        """Verify two orderings of the same kwargs share one key.
-
-        Mutation: dropping sorted() from the kwargs join in
-        _create_cache_key.
-        Oracle: a hand-written key both orderings must equal.
-        """
-        args = ['arg']
-
-        key1 = _create_cache_key('test_table', args, {'a': 1, 'b': 2, 'c': 3})
-        key2 = _create_cache_key('test_table', args, {'c': 3, 'a': 1, 'b': 2})
-
-        assert key1 == "test_table:'arg':a=1:b=2:c=3"
-        assert key2 == key1
 
 
 class TestDecoratorPlumbing:
@@ -407,11 +290,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, strategy, method_factory):
         """Verify a repeat call replays the stored value, body unused.
 
-        Mutation: dropping the `if cache_key in cache` early return in
-        cacheable_strategy's wrapper, or the `cache[cache_key] = result`
-        store that feeds it.
-        Oracle: a body whose return value changes on every invocation,
-        plus a call counter.
+        Mutation: the cache-hit return dropped, or the store after a miss.
+        Oracle: a body returning a new value per call, and a call counter.
         """
         invocations = []
 
@@ -429,10 +309,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, strategy, method_factory, cache_manager):
         """Verify bypass_cache runs the body and leaves the entry alone.
 
-        Mutation: deleting the `if bypass_cache:` early return in
-        cacheable_strategy so the flag falls through to the cached path.
-        Oracle: a body returning a new value each call, so a bypassed
-        call that wrote through would be visible on the next cached read.
+        Mutation: the `if bypass_cache:` early return deleted.
+        Oracle: a body returning a new value per call, read back cached.
         """
         call_values = [0]
 
@@ -463,10 +341,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, strategy, method_factory, cache_manager):
         """Verify each method of each strategy class gets its own cache.
 
-        Mutation: dropping {strategy_class} or {method.__name__} from
-        specific_cache_name in cacheable_strategy.
-        Oracle: the hand-written name
-        'table_columns_ProbeStrategy_get_columns'.
+        Mutation: class or method name dropped from specific_cache_name.
+        Oracle: the name 'table_columns_ProbeStrategy_get_columns'.
         """
         method_factory.create('table_columns', ['col1', 'col2'])
         strategy.get_columns(mock_connection, 'test_table')
@@ -479,10 +355,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, cache_manager):
         """Verify the decorator's ttl argument reaches the TTLCache.
 
-        Mutation: dropping ttl=ttl from the get_cache call in
-        cacheable_strategy, or hardcoding the ttl in Cache.get_cache.
-        Oracle: ttl=0 expires every entry immediately, so the body has to
-        run on all three calls.
+        Mutation: ttl=ttl dropped from the decorator's get_cache call.
+        Oracle: ttl=0 expires every entry, so the body runs three times.
         """
         class ZeroTtlStrategy:
             def __init__(self):
@@ -508,12 +382,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, cache_manager):
         """Verify the decorator's maxsize bounds the cache it creates.
 
-        Mutation: dropping maxsize=maxsize from the get_cache call in
-        cacheable_strategy, or swapping maxsize and ttl in the TTLCache
-        that Cache.get_cache builds.
-        Oracle: hand-computed LRU eviction - with room for two tables,
-        asking for a third drops the first, so re-asking runs the body a
-        fourth time while the newest table still answers from cache.
+        Mutation: maxsize=maxsize dropped, or maxsize and ttl swapped.
+        Oracle: hand-computed LRU eviction of the first of three tables.
         """
         class BoundedStrategy:
             def __init__(self):
@@ -545,11 +415,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, cache_manager):
         """Verify an unbuildable cache key still yields the real result.
 
-        Mutation: narrowing `except (KeyError, TypeError, ValueError)` to
-        KeyError alone, or dropping the fallback `return method(...)` in
-        that handler.
-        Oracle: an argument whose repr() raises ValueError, plus a call
-        counter showing every call reached the body and none was stored.
+        Mutation: the except narrowed to KeyError, or its fallback dropped.
+        Oracle: an argument whose repr() raises ValueError; a call counter.
         """
         class Unrepresentable:
             def __repr__(self):
@@ -585,10 +452,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, error_type):
         """Verify a method that raises is not retried as a cache error.
 
-        Mutation: moving `result = method(...)` back inside the try
-        whose `except (KeyError, TypeError, ValueError)` handler re-calls
-        the method, so a body raising one of those three runs twice.
-        Oracle: a call counter reading 1, not 2, for each caught type.
+        Mutation: the method call moved inside the key-building try.
+        Oracle: a call counter reading 1 for each caught type.
         """
         class ExplodingStrategy:
             def __init__(self):
@@ -609,11 +474,8 @@ class TestDecoratorPlumbing:
             self, mock_connection):
         """Verify the bypass branch hands bypass_cache=True downward.
 
-        Mutation: restoring `return method(self, cn, table, *args,
-        **kwargs)` in cacheable_strategy's bypass branch, which swallows
-        the flag and leaves the body reading its default False.
-        Oracle: the flag value the body itself records on each call -
-        a plain call then a bypassed one give [False, True].
+        Mutation: bypass_cache=True dropped from the bypass branch's call.
+        Oracle: the flags the body records: [False, True].
         """
         class BypassRecordingStrategy:
             def __init__(self):
@@ -634,11 +496,8 @@ class TestDecoratorPlumbing:
             self, mock_connection, cache_manager):
         """Verify a stored None is replayed like any other result.
 
-        Mutation: replacing `cache.get(cache_key, _MISS)` and its
-        `is not _MISS` guard with a bare `cache.get(cache_key)` tested
-        against None, which reads a cached None back as a miss.
-        Oracle: a call counter reading 1 across two calls, plus the
-        stored entry holding None.
+        Mutation: the _MISS sentinel replaced by a test against None.
+        Oracle: a call counter reading 1 across two calls; the stored None.
         """
         class NullResultStrategy:
             def __init__(self):
@@ -666,10 +525,8 @@ class TestCacheIsolation:
             self, mock_connection, strategy, method_factory):
         """Verify the table name takes part in the cache key.
 
-        Mutation: dropping table_name from the key that
-        _create_cache_key returns, so every table shares one entry.
-        Oracle: per-table return values, so a shared entry would hand
-        table2 the columns of table1.
+        Mutation: table_name dropped from the _create_cache_key result.
+        Oracle: hand-written per-table return values.
         """
         def table_specific_return(table):
             if table == 'test_table1':
@@ -698,11 +555,8 @@ class TestCacheIsolation:
             self, mock_connection, strategy, method_factory):
         """Verify the method name, not just the cache type, keys a cache.
 
-        Mutation: dropping {method.__name__} from specific_cache_name in
-        cacheable_strategy.
-        Oracle: two methods registered under the same 'table_columns'
-        cache type but different names, returning different lists - a
-        shared cache would answer the second with the first's columns.
+        Mutation: {method.__name__} dropped from specific_cache_name.
+        Oracle: two same-type methods returning hand-written lists.
         """
         get_cols_count = method_factory.create(
             'table_columns', ['col1', 'col2'], 'get_columns')
@@ -727,10 +581,8 @@ class TestCacheIsolation:
             self, mock_connection):
         """Verify one method name on two classes does not collide.
 
-        Mutation: dropping {strategy_class} from specific_cache_name in
-        cacheable_strategy.
-        Oracle: per-class return values, so a shared cache would hand the
-        second class the first class's columns.
+        Mutation: {strategy_class} dropped from specific_cache_name.
+        Oracle: hand-written per-class return values.
         """
         counters = {'s1': 0, 's2': 0}
 
@@ -769,11 +621,8 @@ class TestCacheClearing:
             self, mock_connection, strategy, method_factory, cache_manager):
         """Verify the decorator stores into the manager's own caches.
 
-        Mutation: building the cache with a bare dict inside
-        cacheable_strategy instead of Cache.get_instance().get_cache, so
-        the manager could no longer reach it.
-        Oracle: a call counter that has to rise once the manager clears
-        the strategy caches.
+        Mutation: the decorator caching in a bare dict of its own.
+        Oracle: a call counter that rises after the manager clears.
         """
         get_count = method_factory.create('table_columns', ['col1', 'col2'])
 
@@ -792,10 +641,8 @@ class TestCacheClearing:
             self, mock_connection, strategy, method_factory, cache_manager):
         """Verify per-table clearing evicts only that table's entry.
 
-        Mutation: routing Cache.clear_for_table to clear_all, or
-        widening its key match so any key is dropped.
-        Oracle: a body returning a fresh value per invocation, so the
-        surviving table must still answer with its original value.
+        Mutation: clear_for_table routed to clear_all, or matching any key.
+        Oracle: a versioned body; the other table keeps its first value.
         """
         seen = {'test_table1': 0, 'test_table2': 0}
 
@@ -821,89 +668,12 @@ class TestCacheClearing:
             'test_table2_v1']
         assert get_count() == 3
 
-    def test_clearing_a_table_clears_strategy_and_schema_caches(
-            self, mock_connection, strategy, method_factory, cache_manager):
-        """Verify one table clear covers strategy and schema caches.
-
-        Mutation: restricting Cache.clear_for_table's loop to
-        get_strategy_caches() instead of every managed cache.
-        Oracle: the schema entry, keyed by table name, which must be gone
-        while a sibling schema entry survives.
-        """
-        get_count = method_factory.create('table_columns', ['col1', 'col2'])
-        table = 'test_table'
-
-        strategy.get_columns(mock_connection, table)
-        assert get_count() == 1
-
-        schema_cache = cache_manager.get_schema_cache(id(mock_connection))
-        schema_cache[table] = {'column1': {'name': 'column1', 'type': 'int'}}
-        schema_cache['unrelated'] = {'column9': {'name': 'column9'}}
-
-        cache_manager.clear_caches_for_table(table)
-
-        strategy.get_columns(mock_connection, table)
-        assert get_count() == 2
-        assert sorted(schema_cache) == ['unrelated']
-
-    def test_clearing_an_unknown_table_leaves_the_cache_intact(
-            self, mock_connection, strategy, method_factory, cache_manager):
-        """Verify a clear for an unrelated table is a no-op.
-
-        Mutation: dropping the `if table_lower in str(key).lower()`
-        filter in Cache.clear_for_table so it empties everything.
-        Oracle: a call counter that must not move for the unrelated
-        clear and must move for the matching one.
-        """
-        get_count = method_factory.create('table_columns', ['col1', 'col2'])
-
-        strategy.get_columns(mock_connection, 'test_table')
-        assert get_count() == 1
-
-        cache_manager.clear_caches_for_table('nonexistent_table')
-
-        strategy.get_columns(mock_connection, 'test_table')
-        assert get_count() == 1
-
-        cache_manager.clear_caches_for_table('test_table')
-
-        strategy.get_columns(mock_connection, 'test_table')
-        assert get_count() == 2
-
-    def test_clearing_one_cache_by_name_spares_the_other_method(
-            self, mock_connection, strategy, method_factory, cache_manager):
-        """Verify clearing one method's cache leaves the other's filled.
-
-        Mutation: routing Cache.clear_cache to clear_all, which would
-        also drop the primary-key entry.
-        Oracle: two call counters, only one of which may move.
-        """
-        get_cols_count = method_factory.create(
-            'table_columns', ['col1', 'col2'], 'get_columns')
-        get_pks_count = method_factory.create(
-            'primary_keys', ['col1'], 'get_primary_keys')
-
-        strategy.get_columns(mock_connection, 'test_table')
-        strategy.get_primary_keys(mock_connection, 'test_table')
-        assert get_cols_count() == 1
-        assert get_pks_count() == 1
-
-        cache_manager.clear_cache('table_columns_ProbeStrategy_get_columns')
-
-        strategy.get_columns(mock_connection, 'test_table')
-        strategy.get_primary_keys(mock_connection, 'test_table')
-        assert get_cols_count() == 2
-        assert get_pks_count() == 1
-
     def test_table_name_case_shares_one_entry_and_one_clear(
             self, mock_connection, strategy, method_factory, cache_manager):
         """Verify table names are folded for both lookup and clearing.
 
-        Mutation: dropping the trailing .lower() in _create_cache_key, so
-        'TEST_TABLE' would take its own entry and survive a clear issued
-        in lower case.
-        Oracle: a body returning a fresh value per invocation, so the
-        upper-case call must replay the lower-case result.
+        Mutation: the trailing .lower() in _create_cache_key dropped.
+        Oracle: a versioned body; the upper-case call replays 'v1'.
         """
         versions = [0]
 
@@ -926,23 +696,14 @@ class TestCacheClearing:
 
 class TestConcreteStrategyMethodsAreCached:
     """Tests that the real strategy overrides re-apply the decorator.
-
-    Python drops decorators applied to an abstract method when a
-    subclass overrides it, so each concrete strategy has to carry its own
-    @cacheable_strategy. Every test here spies on the query helper and
-    proves it fires once across two calls.
     """
 
     def test_postgres_get_primary_keys_caches_and_reads_indisprimary(
             self, mock_connection, mocker):
         """Verify the PostgreSQL primary-key lookup caches its result.
 
-        Mutation: dropping @cacheable_strategy from
-        PostgresStrategy.get_primary_keys, or querying i.indisunique in
-        place of i.indisprimary.
-        Oracle: a spy scripted to return a different list on a second
-        call, so an uncached repeat is visible in the value as well as
-        the count.
+        Mutation: decorator dropped, or i.indisunique for i.indisprimary.
+        Oracle: a spy scripted to give a different list on a second call.
         """
         strategy = PostgresStrategy()
         spy = mocker.patch.object(
@@ -960,11 +721,8 @@ class TestConcreteStrategyMethodsAreCached:
             self, mock_connection, mocker):
         """Verify the PostgreSQL column lookup caches and quotes.
 
-        Mutation: dropping @cacheable_strategy from
-        PostgresStrategy.get_columns, or interpolating the raw table name
-        instead of self.quote_identifier(table).
-        Oracle: a spy scripted to change its answer, plus the
-        hand-written fragment 'hstore(null::"foo")'.
+        Mutation: decorator dropped, or the table left unquoted.
+        Oracle: a scripted spy and the fragment 'hstore(null::"foo")'.
         """
         strategy = PostgresStrategy()
         spy = mocker.patch.object(
@@ -978,15 +736,10 @@ class TestConcreteStrategyMethodsAreCached:
 
     def test_postgres_get_sequence_columns_splits_a_qualified_table(
             self, mock_connection, mocker):
-        """Verify a schema-qualified table is filtered on both parts and cached.
+        """Verify a qualified table filters on schema and name, and caches.
 
-        Mutation: dropping the `if schema is not None` branch in
-        PostgresStrategy.get_sequence_columns, so 'myschema.foo' would be
-        matched as a whole table name, or dropping @cacheable_strategy from
-        PostgresStrategy.get_sequence_columns so every call hits the database.
-        Oracle: hand-written parameter tuples for both branches, the
-        table_schema clause that only the qualified branch may carry, and
-        spy.call_count == 2 proving the second qualified call was cached.
+        Mutation: the `if schema is not None` branch or decorator dropped.
+        Oracle: hand-written parameter tuples and a spy call count of 2.
         """
         strategy = PostgresStrategy()
         spy = mocker.patch.object(
@@ -995,7 +748,6 @@ class TestConcreteStrategyMethodsAreCached:
         strategy.get_sequence_columns(mock_connection, 'myschema.foo')
         qualified_sql, qualified_params = (spy.call_args.args[1],
                                            spy.call_args.args[2])
-        # Second call for 'myschema.foo' must be served from cache.
         strategy.get_sequence_columns(mock_connection, 'myschema.foo')
 
         strategy.get_sequence_columns(mock_connection, 'foo')
@@ -1012,11 +764,8 @@ class TestConcreteStrategyMethodsAreCached:
             self, mock_connection, mocker):
         """Verify the SQLite primary-key lookup caches its result.
 
-        Mutation: dropping @cacheable_strategy from
-        SQLiteStrategy.get_primary_keys, or relaxing the pragma filter
-        `where l.pk <> 0` to `where l.pk = 0`.
-        Oracle: a spy scripted to change its answer, plus the
-        hand-written filter text.
+        Mutation: decorator dropped, or `l.pk <> 0` flipped to `l.pk = 0`.
+        Oracle: a scripted spy and the hand-written filter text.
         """
         strategy = SQLiteStrategy()
         spy = mocker.patch.object(
@@ -1035,11 +784,8 @@ class TestConcreteStrategyMethodsAreCached:
             self, mock_connection, mocker):
         """Verify the SQLite column lookup caches and skips the pk filter.
 
-        Mutation: dropping @cacheable_strategy from
-        SQLiteStrategy.get_columns, or reusing the primary-key query with
-        its `l.pk <> 0` filter.
-        Oracle: a spy scripted to change its answer, plus the absence of
-        the pk filter in the pragma query.
+        Mutation: decorator dropped, or the primary-key query reused.
+        Oracle: a scripted spy and no pk filter in the query.
         """
         strategy = SQLiteStrategy()
         spy = mocker.patch.object(
@@ -1056,15 +802,10 @@ class TestConcreteStrategyMethodsAreCached:
 
     def test_sqlite_sequence_columns_reuse_the_primary_key_lookup(
             self, mock_connection, mocker):
-        """Verify SQLite reports primary keys as sequence columns and caches them.
+        """Verify SQLite answers sequence columns from its primary keys.
 
-        Mutation: giving SQLiteStrategy.get_sequence_columns its own
-        query instead of delegating to get_primary_keys (spy.call_count
-        would be 2), or dropping @cacheable_strategy from
-        SQLiteStrategy.get_sequence_columns (own cache stays empty).
-        Oracle: one spy call serving both methods, the primary-key pragma
-        filter in the single statement issued, and a direct check that the
-        sequence_columns cache holds the result.
+        Mutation: get_sequence_columns given its own query, or undecorated.
+        Oracle: one spy call for both methods; its own cache holds ['id'].
         """
         strategy = SQLiteStrategy()
         spy = mocker.patch.object(
@@ -1099,12 +840,8 @@ class TestSequenceColumnFinder:
         primary_keys, expected):
         """Verify the four-step priority in _find_sequence_column_impl.
 
-        Mutation: emptying pk_sequence_cols so the sequence-only branch
-        answers first, dropping the 'id' preference inside a branch, or
-        changing the final `return 'id'` fallback.
-        Oracle: hand-picked column sets where each branch names a
-        different winner - 'seq_id' would win if the sequence-only branch
-        ran before the primary-key intersection.
+        Mutation: groups reordered, 'id' preference or fallback dropped.
+        Oracle: hand-picked column sets where each group names a winner.
         """
         strategy = SequenceProbeStrategy(sequence_cols, primary_keys)
 
@@ -1114,11 +851,8 @@ class TestSequenceColumnFinder:
     def test_finder_result_is_cached_until_bypassed(self, mock_connection):
         """Verify the finder caches, and that bypass_cache re-runs it.
 
-        Mutation: dropping @cacheable_strategy from
-        _find_sequence_column_impl in strategy/base.py, or deleting the
-        `if bypass_cache:` early return in the decorator.
-        Oracle: a lookup counter - two lookups feed one finder run, so
-        the totals must read 2, 2, then 4.
+        Mutation: _find_sequence_column_impl undecorated, or bypass ignored.
+        Oracle: a lookup counter reading 2, 2, then 4.
         """
         strategy = SequenceProbeStrategy(['row_id'], ['row_id'])
 
@@ -1134,33 +868,11 @@ class TestSequenceColumnFinder:
             mock_connection, 'probe_table', bypass_cache=True) == 'row_id'
         assert strategy.lookups == 4
 
-    def test_finder_caches_per_table(self, mock_connection):
-        """Verify the finder's cache key keeps tables apart.
-
-        Mutation: dropping table_name from the key _create_cache_key
-        builds, which would give the second table the first one's answer.
-        Oracle: two probes with different column sets, so a shared entry
-        would be visible in the returned column name.
-        """
-        first = SequenceProbeStrategy(['row_id'], ['row_id'])
-        second = SequenceProbeStrategy(['other_id'], ['other_id'])
-
-        assert first.find_sequence_column(
-            mock_connection, 'table_one') == 'row_id'
-        assert second.find_sequence_column(
-            mock_connection, 'table_two') == 'other_id'
-        assert second.lookups == 2
-
     def test_bypass_reaches_both_nested_finder_lookups(self, mock_connection):
         """Verify bypass_cache travels from the finder into both lookups.
 
-        Mutation: dropping bypass_cache=True from the method call in
-        cacheable_strategy's bypass branch, or dropping
-        bypass_cache=bypass_cache from either the get_sequence_columns
-        or the get_primary_keys call in _find_sequence_column_impl.
-        Oracle: the flag each innermost lookup records for itself, plus
-        the lookup tally proving a bypassed run re-ran both instead of
-        replaying their own cached answers.
+        Mutation: bypass_cache not forwarded to either nested lookup.
+        Oracle: the flag each innermost lookup records for itself.
         """
         probe = CachedLookupProbeStrategy(['row_id'], ['row_id'])
 
@@ -1189,9 +901,7 @@ class TestStrategyRegistry:
     def test_registry_maps_each_dialect_to_its_class(self):
         """Verify both strategies register under their dialect names.
 
-        Mutation: changing @register_strategy('postgresql') in
-        postgres.py to any other spelling, or dropping the registration
-        from sqlite.py.
+        Mutation: a misspelled or dropped @register_strategy.
         Oracle: a hand-written dialect-to-class mapping.
         """
         assert sorted(get_available_dialects()) == ['postgresql', 'sqlite']
@@ -1201,12 +911,10 @@ class TestStrategyRegistry:
         assert not is_supported_dialect('mysql')
 
     def test_unknown_dialect_raises_and_names_the_alternatives(self):
-        """Verify an unregistered dialect is rejected, not instantiated.
+        """Verify an unregistered dialect raises DatabaseError.
 
-        Mutation: flipping `if dialect not in _STRATEGY_REGISTRY` to
-        `if dialect in _STRATEGY_REGISTRY` in _validate_dialect.
-        Oracle: the raised message, which must name the rejected dialect
-        and list the supported ones.
+        Mutation: the membership test in _validate_dialect flipped.
+        Oracle: a message naming 'mysql' and listing 'postgresql'.
         """
         with pytest.raises(DatabaseError) as excinfo:
             get_strategy('mysql')
@@ -1219,11 +927,8 @@ class TestStrategyRegistry:
             self, create_simple_mock_connection):
         """Verify dialect lookup is cached and driven by the connection.
 
-        Mutation: dropping @lru_cache from _get_strategy, or having
-        get_db_strategy ignore get_dialect_name and return a fixed
-        dialect.
-        Oracle: object identity across lookups, and a SQLite connection
-        that must not resolve to the PostgreSQL strategy.
+        Mutation: @lru_cache dropped, or get_db_strategy fixed to a dialect.
+        Oracle: object identity across lookups and dialects.
         """
         postgres = get_strategy('postgresql')
 

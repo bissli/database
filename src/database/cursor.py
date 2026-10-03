@@ -1,12 +1,9 @@
-"""
-Database cursor implementations for PostgreSQL and SQLite.
-
-Implements Python DB-API 2.0 specification (PEP-249).
+"""DB-API 2.0 (PEP 249) cursor wrapper shared by PostgreSQL and SQLite.
 """
 import logging
 import re
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from functools import wraps
 from typing import Any
 
@@ -23,7 +20,7 @@ from libb import collapse
 logger = logging.getLogger(__name__)
 
 
-def dumpsql(is_many: bool = False):
+def dumpsql(is_many: bool = False) -> Callable[[Callable], Callable]:
     """Decorator factory that logs a cursor call's SQL, parameters and time.
 
     Parameters
@@ -36,17 +33,13 @@ def dumpsql(is_many: bool = False):
     Callable
         Decorator for a Cursor method that takes the operation first. A
         failed call logs at ERROR with its traceback, then re-raises.
-
-    Notes
-    -----
-    - Every record uses lazy %-format, so a parameter's __repr__ runs only
-      when a handler emits the record.
     """
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
         label = 'Executemany' if is_many else 'Query'
 
         @wraps(func)
-        def wrapper(self, operation: str, *args: Any, **kwargs: Any):
+        def wrapper(self: 'Cursor', operation: str, *args: Any,
+                    **kwargs: Any) -> Any:
             start = time.perf_counter()
             if is_many:
                 params = args[0] if args else kwargs.get('seq_of_parameters')
@@ -82,19 +75,22 @@ def dumpsql(is_many: bool = False):
 
 
 class Cursor:
-    """Unified cursor class implementing DB-API 2.0 for all database types.
+    """DB-API 2.0 cursor that adapts SQL and parameters to the dialect.
 
-    Uses the strategy pattern to handle dialect-specific behaviors like
-    placeholder conversion (%s vs ?) automatically.
+    Parameters
+    ----------
+    cursor : Any
+        Driver cursor every call reaches in the end.
+    connection_wrapper : Any
+        ConnectionWrapper that created the cursor.
+    strategy : Any, default None
+        Dialect strategy. None looks it up from connection_wrapper on
+        first use.
     """
 
-    def __init__(self, cursor: Any, connection_wrapper: Any, strategy: Any = None) -> None:
-        """Initialize cursor wrapper.
-
-        Args:
-            cursor: The underlying database cursor
-            connection_wrapper: The connection wrapper that created this cursor
-            strategy: Optional database strategy (auto-detected from connection if not provided)
+    def __init__(self, cursor: Any, connection_wrapper: Any,
+                 strategy: Any = None) -> None:
+        """Store the driver cursor, its wrapper, and the strategy.
         """
         self.dbapi_cursor = cursor
         self.connwrapper = connection_wrapper
@@ -103,32 +99,38 @@ class Cursor:
 
     @property
     def strategy(self) -> Any:
-        """Get the database strategy, lazily initializing if needed."""
+        """Dialect strategy, looked up from the connection on first use.
+        """
         if self._strategy is None:
             self._strategy = get_db_strategy(self.connwrapper)
         return self._strategy
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate members to underlying cursor."""
+        """Any other member, read from the driver cursor.
+        """
         return getattr(self.dbapi_cursor, name)
 
     def __iter__(self) -> Iterator:
-        """Return iterator for cursor results."""
+        """Remaining rows, fetched in chunks; see iter_chunk.
+        """
         return iter_chunk(self.dbapi_cursor)
 
     @property
     def description(self) -> list[tuple] | None:
-        """Column descriptions for last query."""
+        """Driver description of the last result set; None for none.
+        """
         return self.dbapi_cursor.description
 
     @property
     def rowcount(self) -> int:
-        """Number of rows produced/affected by last operation."""
+        """Driver rowcount of the last operation.
+        """
         return self.dbapi_cursor.rowcount
 
     @property
     def arraysize(self) -> int:
-        """Number of rows fetched by fetchmany()."""
+        """Rows fetchmany() returns when called without a size.
+        """
         return self._arraysize
 
     @arraysize.setter
@@ -136,33 +138,37 @@ class Cursor:
         self._arraysize = value
 
     def close(self) -> None:
-        """Close cursor."""
+        """Close the driver cursor.
+        """
         self.dbapi_cursor.close()
 
     def fetchone(self) -> tuple | None:
-        """Fetch next row."""
+        """Next row, or None when no rows remain.
+        """
         return self.dbapi_cursor.fetchone()
 
     def fetchmany(self, size: int | None = None) -> list[tuple]:
-        """Fetch next set of rows."""
+        """Up to size rows; size None means arraysize.
+        """
         if size is None:
             size = self.arraysize
         return self.dbapi_cursor.fetchmany(size)
 
     def fetchall(self) -> list[tuple]:
-        """Fetch all remaining rows."""
+        """Every remaining row.
+        """
         return self.dbapi_cursor.fetchall()
 
     def setinputsizes(self, sizes: Sequence) -> None:
-        """Predefine memory areas for parameters."""
+        """Do nothing, as DB-API 2.0 allows.
+        """
 
     def setoutputsize(self, size: int, column: int | None = None) -> None:
-        """Set column buffer size for large columns."""
+        """Do nothing, as DB-API 2.0 allows.
+        """
 
     def nextset(self) -> bool | None:
-        """Move to next result set.
-
-        Returns None for databases that don't support multiple result sets.
+        """Move to the next result set; None where the driver has none.
         """
         if hasattr(self.dbapi_cursor, 'nextset'):
             return self.dbapi_cursor.nextset()
@@ -170,7 +176,32 @@ class Cursor:
 
     @dumpsql()
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> int:
-        """Execute a database operation."""
+        """Run one operation, which may hold several statements.
+
+        Parameters
+        ----------
+        operation : str
+            SQL in either placeholder style; the strategy converts it.
+        *args : Any
+            Positional values, one sequence of them, or a dict of named
+            values. Values are ignored when operation has no placeholder.
+        auto_commit : bool, default True
+            Keyword only. Commit afterwards unless the connection is
+            inside a transaction.
+
+        Returns
+        -------
+        int
+            Driver rowcount after the last statement.
+
+        Raises
+        ------
+        ReadOnlyError
+            When operation would turn off a reader's read-only setting.
+        QueryError
+            When positional values across several statements do not
+            match the placeholder count.
+        """
         raise_on_readonly_disarm(self.connwrapper, operation)
         auto_commit = kwargs.pop('auto_commit', True)
 
@@ -187,39 +218,38 @@ class Cursor:
         return self.dbapi_cursor.rowcount
 
     def _execute_query(self, sql: str, args: tuple) -> None:
-        """Execute query with parameter handling."""
-        # has_placeholders misses sqlite '$name' and '@name', which only
-        # the dialect-aware named check sees.
-        dict_params = self._find_dict_params(args)
+        """Send standardized SQL to the driver with the parameters it uses.
+
+        Parameters
+        ----------
+        sql : str
+            SQL already in the dialect's placeholder style.
+        args : tuple
+            Converted values as Cursor.execute received them. The first
+            dict found anywhere in them is the named-parameter set.
+        """
+        dict_params = next(
+            (arg for arg in collapse(args) if isinstance(arg, dict)), None)
         if dict_params is not None and has_named_placeholders(
                 sql, getattr(self.connwrapper, 'dialect', 'postgresql')):
             self._execute_with_dict_params(sql, dict_params)
             return
 
-        # No placeholders - execute without parameters
         if args and not has_placeholders(sql):
             self.dbapi_cursor.execute(sql)
             logger.debug('Executed query without placeholders (ignoring args)')
             return
 
-        # Multi-statement SQL with positional params
         statements = self._statements(sql)
         if len(statements) > 1 and args:
             self._execute_multi_statement(statements, args)
             return
 
-        # Standard execution
         self._execute_simple(sql, args)
 
-    def _find_dict_params(self, args: tuple) -> dict | None:
-        """Find first dict in args, or None if no dict found."""
-        for arg in collapse(args):
-            if isinstance(arg, dict):
-                return arg
-        return None
-
     def _execute_with_dict_params(self, sql: str, params: dict) -> None:
-        """Execute SQL with named (dict) parameters."""
+        """Run SQL with named parameters, one statement at a time.
+        """
         statements = self._statements(sql)
         if len(statements) > 1:
             self._execute_multi_statement_named(statements, params)
@@ -227,7 +257,8 @@ class Cursor:
             self.dbapi_cursor.execute(sql, params)
 
     def _execute_simple(self, sql: str, args: tuple) -> None:
-        """Execute simple single-statement SQL."""
+        """Run SQL in one driver call; a lone list or tuple arg is unwrapped.
+        """
         if not args:
             self.dbapi_cursor.execute(sql)
         elif len(args) == 1 and isinstance(args[0], (list, tuple)):
@@ -236,28 +267,13 @@ class Cursor:
             self.dbapi_cursor.execute(sql, args)
 
     def _statements(self, sql: str) -> list[str]:
-        """Split SQL into the statements that will actually be sent.
-
-        Parameters
-        ----------
-        sql : str
-            Statement text.
-
-        Returns
-        -------
-        list[str]
-            One entry per statement, splitting only on a semicolon that
-            sits outside every literal and comment.
-
-        Notes
-        -----
-        - Splitting the raw text executes a statement hidden behind a
-          trailing '--', and breaks a query carrying a semicolon inside
-          a string literal.
+        """Statements in sql, cut at semicolons outside literals and comments.
         """
-        return split_statements(sql, getattr(self.connwrapper, 'dialect', 'postgresql'))
+        return split_statements(
+            sql, getattr(self.connwrapper, 'dialect', 'postgresql'))
 
-    def _execute_multi_statement(self, statements: list[str], args: tuple) -> None:
+    def _execute_multi_statement(self, statements: list[str],
+                                 args: tuple) -> None:
         """Execute each statement, splitting the positional parameters.
 
         Parameters
@@ -272,15 +288,17 @@ class Cursor:
         QueryError
             When the parameter count differs from the placeholder count.
         """
-        params = args[0] if len(args) == 1 and isinstance(args[0], (list, tuple)) else args
+        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+            params = args[0]
+        else:
+            params = args
 
         placeholder = self.strategy.get_placeholder_style()
         placeholder_count = sum(stmt.count(placeholder) for stmt in statements)
         if len(params) != placeholder_count:
             raise QueryError(
                 f'Parameter count mismatch: SQL needs {placeholder_count} '
-                f'but {len(params)} were provided'
-            )
+                f'but {len(params)} were provided')
 
         param_index = 0
         for stmt in statements:
@@ -304,35 +322,29 @@ class Cursor:
             Named parameters for all statements.
         """
         if getattr(self.connwrapper, 'dialect', 'postgresql') == 'sqlite':
-            # sqlite3 ignores a key the statement does not name, and
-            # binds the ':name', '$name', '@name' and '?NNN' forms alike.
             for stmt in statements:
                 self.dbapi_cursor.execute(stmt, params_dict)
             return
         for stmt in statements:
             param_names = re.findall(r'%\(([^)]+)\)s', stmt)
             if param_names:
-                stmt_params = {name: params_dict[name] for name in param_names if name in params_dict}
+                stmt_params = {
+                    name: params_dict[name]
+                    for name in param_names
+                    if name in params_dict
+                    }
                 self.dbapi_cursor.execute(stmt, stmt_params)
             else:
                 self._execute_without_params(stmt)
 
     def _execute_without_params(self, stmt: str) -> None:
-        """Execute one statement of a parameterized multi-statement call.
+        """Run one statement of a parameterized multi-statement call.
 
         Parameters
         ----------
         stmt : str
             Statement holding no placeholder.
-
-        Notes
-        -----
-        - On PostgreSQL each '%%' becomes '%', as psycopg reads it in a
-          statement given parameters, which is how prepare_query and the
-          caller wrote it.
         """
-        # Passing empty parameters instead would make psycopg read a
-        # bare modulo '%' as an incomplete placeholder.
         if getattr(self.connwrapper, 'dialect', 'postgresql') == 'postgresql':
             stmt = stmt.replace('%%', '%')
         self.dbapi_cursor.execute(stmt)
@@ -340,7 +352,30 @@ class Cursor:
     @dumpsql(is_many=True)
     def executemany(self, operation: str, seq_of_parameters: Sequence,
                     batch_size: int = 500, **kwargs: Any) -> int:
-        """Execute against all parameter sequences."""
+        """Run one statement once per parameter set, in driver batches.
+
+        Parameters
+        ----------
+        operation : str
+            One SQL statement in either placeholder style.
+        seq_of_parameters : Sequence
+            Parameter sets. Empty logs a warning and runs nothing.
+        batch_size : int, default 500
+            Most parameter sets per driver executemany call.
+        auto_commit : bool, default True
+            Keyword only. Commit afterwards unless the connection is
+            inside a transaction.
+
+        Returns
+        -------
+        int
+            Rowcount summed across batches; 0 for no parameter sets.
+
+        Raises
+        ------
+        ReadOnlyError
+            When operation would turn off a reader's read-only setting.
+        """
         if not seq_of_parameters:
             logger.warning('executemany called with no parameter sequences')
             return 0
@@ -350,7 +385,8 @@ class Cursor:
 
         operation = self.strategy.standardize_sql(operation)
 
-        seq_of_parameters = [TypeConverter.convert_params(p) for p in seq_of_parameters]
+        seq_of_parameters = [
+            TypeConverter.convert_params(p) for p in seq_of_parameters]
 
         total_rowcount = 0
         if len(seq_of_parameters) <= batch_size:
@@ -371,7 +407,21 @@ class Cursor:
 
 
 def iter_chunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
-    """Iterate through cursor results in chunks."""
+    """Yield a cursor's remaining rows, fetched size rows at a time.
+
+    Parameters
+    ----------
+    cursor : Any
+        Driver cursor.
+    size : int, default 5000
+        Rows per fetchmany call.
+
+    Returns
+    -------
+    Iterator[tuple]
+        Rows in fetch order. A fetchmany that raises, as on a statement
+        with no result set, ends the iteration without an error.
+    """
     while True:
         try:
             chunked = cursor.fetchmany(size)
@@ -383,10 +433,7 @@ def iter_chunk(cursor: Any, size: int = 5000) -> Iterator[tuple]:
 
 
 def get_dict_cursor(cn: Any) -> Cursor:
-    """Get cursor that returns rows as dictionaries.
-
-    Delegates cursor creation to the database strategy for dialect-specific
-    implementation.
+    """A new Cursor on cn whose rows read as dicts.
     """
     raw_conn = cn.connection if hasattr(cn, 'connection') else cn
     strategy = get_db_strategy(cn)
@@ -394,87 +441,115 @@ def get_dict_cursor(cn: Any) -> Cursor:
     return Cursor(cursor, cn, strategy)
 
 
-def extract_column_info(cursor: 'Any', table_name: str | None = None) -> list['Any']:
-    """Extract column information from cursor description based on database type."""
+def extract_column_info(cursor: Any, table_name: str | None = None) -> list[Any]:
+    """Column metadata for the cursor's current result set.
+
+    Parameters
+    ----------
+    cursor : Any
+        Cursor whose connwrapper names the dialect.
+    table_name : str | None, default None
+        Table the columns come from, where known.
+
+    Returns
+    -------
+    list[Any]
+        Column per description entry, also stored on cursor.columns.
+        [] when the statement returned no result set, and then
+        cursor.columns is left as it was.
+    """
     if cursor.description is None:
         return []
 
-    connection_type = cursor.connwrapper.dialect
-    connection = cursor.connwrapper
-
     columns = columns_from_cursor_description(
         cursor,
-        connection_type,
+        cursor.connwrapper.dialect,
         table_name,
-        connection
-    )
-
+        cursor.connwrapper)
     cursor.columns = columns
-
     return columns
 
 
-def load_data(cursor: 'Any', columns: list['Any'] | None = None,
+def load_data(cursor: Any, columns: list[Any] | None = None,
               **kwargs: Any) -> Any:
-    """Data loader callable that processes cursor results into the configured format."""
+    """The cursor's remaining rows, shaped by the connection's data loader.
+
+    Parameters
+    ----------
+    cursor : Any
+        Cursor positioned on a result set.
+    columns : list[Any] | None, default None
+        Column metadata. None reads it with extract_column_info.
+    **kwargs : Any
+        Passed through to options.data_loader.
+
+    Returns
+    -------
+    Any
+        Whatever options.data_loader builds from the rows as dicts and
+        the columns.
+    """
     if columns is None:
         columns = extract_column_info(cursor)
 
-    data = cursor.fetchall()
-
-    if not data:
-        data_loader = cursor.connwrapper.options.data_loader
-        return data_loader([], columns, **kwargs)
-
-    adapted_data = []
-    for row in data:
+    data = []
+    for row in cursor.fetchall() or []:
         adapter = RowAdapter.create(cursor.connwrapper, row)
         if hasattr(adapter, 'cursor'):
             adapter.cursor = cursor
-        adapted_data.append(adapter.to_dict())
-    data = adapted_data
+        data.append(adapter.to_dict())
 
     data_loader = cursor.connwrapper.options.data_loader
     return data_loader(data, columns, **kwargs)
 
 
-def process_multiple_result_sets(cursor: 'Any', return_all: bool = False,
-                                 prefer_first: bool = False, **kwargs: Any) -> list[Any] | Any:
-    """Process multiple result sets from a query or stored procedure."""
+def process_multiple_result_sets(cursor: Any, return_all: bool = False,
+                                 prefer_first: bool = False,
+                                 **kwargs: Any) -> list[Any] | Any:
+    """Load every result set of a statement and pick what to return.
+
+    Parameters
+    ----------
+    cursor : Any
+        Cursor positioned on the first result set.
+    return_all : bool, default False
+        Return every result set.
+    prefer_first : bool, default False
+        Return the first result set; ignored under return_all.
+    **kwargs : Any
+        Passed through to load_data.
+
+    Returns
+    -------
+    list[Any] | Any
+        Every result set the loader did not turn into None, in order,
+        under return_all; else the first under prefer_first; else the
+        one with the most rows, the earlier on a tie. [] when no result
+        set loads.
+    """
     result_sets: list[Any] = []
-    columns_sets: list[list[Any]] = []
     largest_result = None
     largest_size = 0
 
-    columns = extract_column_info(cursor)
-    columns_sets.append(columns)
-
-    result = load_data(cursor, columns=columns, **kwargs)
+    result = load_data(cursor, columns=extract_column_info(cursor), **kwargs)
     if result is not None:
         result_sets.append(result)
         largest_result = result
         largest_size = len(result)
 
     while cursor.nextset():
-        columns = extract_column_info(cursor)
-        columns_sets.append(columns)
-
-        result = load_data(cursor, columns=columns, **kwargs)
+        result = load_data(
+            cursor, columns=extract_column_info(cursor), **kwargs)
         if result is not None:
             result_sets.append(result)
             if len(result) > largest_size:
                 largest_result = result
                 largest_size = len(result)
 
-    if return_all:
-        if not result_sets:
-            return []
-        return result_sets
-
-    if prefer_first and result_sets:
-        return result_sets[0]
-
     if not result_sets:
         return []
-
+    if return_all:
+        return result_sets
+    if prefer_first:
+        return result_sets[0]
     return largest_result

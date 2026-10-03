@@ -1,41 +1,29 @@
 import logging
-import pathlib
-import sys
 
+import config
 import database as db
 import pytest
 from testcontainers.postgres import PostgresContainer
 
 from libb import Setting
 
-HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
-sys.path.insert(0, HERE)
-sys.path.append('..')
-import config
-
 logger = logging.getLogger(__name__)
 
 
 @pytest.fixture(scope='session')
 def psql_docker(request):
-    """Session-scoped PostgreSQL container using testcontainers.
-
-    Testcontainers automatically:
-    - Assigns a random available port
-    - Waits for the database to be ready
-    - Handles cleanup when the session ends
+    """postgres:12 container for the session; config.postgresql points at it.
     """
     container = PostgresContainer(
         image='postgres:12',
         username=config.postgresql.username,
         password=config.postgresql.password,
-        dbname=config.postgresql.database,
-    ).with_env('TZ', 'US/Eastern').with_env('PGTZ', 'US/Eastern')
+        dbname=config.postgresql.database)
+    container.with_env('TZ', 'US/Eastern').with_env('PGTZ', 'US/Eastern')
 
     try:
         container.start()
 
-        # Update config with dynamic host/port
         Setting.unlock()
         config.postgresql.hostname = container.get_container_host_ip()
         config.postgresql.port = int(container.get_exposed_port(5432))
@@ -43,10 +31,8 @@ def psql_docker(request):
 
         logger.info(
             f'PostgreSQL container started at '
-            f'{config.postgresql.hostname}:{config.postgresql.port}'
-        )
+            f'{config.postgresql.hostname}:{config.postgresql.port}')
 
-        # Verify connection works
         cn = db.connect('postgresql', config=config)
         cn.close()
 
@@ -70,10 +56,11 @@ def psql_docker(request):
 
 
 def stage_test_data(cn):
-    db.execute(cn, 'CREATE EXTENSION IF NOT EXISTS hstore')
+    """Recreate test_table with six rows keyed by name, and enable hstore.
+    """
+    db.execute(cn, 'create extension if not exists hstore')
 
-    drop_table_if_exists = 'drop table if exists test_table'
-    db.execute(cn, drop_table_if_exists)
+    db.execute(cn, 'drop table if exists test_table')
 
     create_and_insert_data = """
 create table test_table (
@@ -95,8 +82,10 @@ insert into test_table (name, value) values
 
 
 def terminate_postgres_connections(cn):
+    """End every other backend on the test database; log a failure.
+    """
     try:
-        cn.rollback()  # Reset any failed transaction state
+        cn.rollback()
         sql = """
 select
     pg_terminate_backend(pg_stat_activity.pid)
@@ -113,9 +102,7 @@ where
 
 @pytest.fixture
 def pg_conn(psql_docker):
-    """PostgreSQL connection fixture with function scope.
-
-    Each test gets a fresh connection with reset test data.
+    """Fresh PostgreSQL connection per test, over a restaged test_table.
     """
     cn = db.connect('postgresql', config=config)
 
@@ -134,27 +121,26 @@ def pg_conn(psql_docker):
 
 @pytest.fixture
 def pg_schema_conn(pg_conn):
-    """PostgreSQL connection with a non-default schema and a test table.
-
-    Yields the connection; cleans up the schema on exit. Use for tests
-    that exercise schema-qualified ('myschema.t') table-name handling.
+    """pg_conn with myschema.t rows 'alpha' and 'beta'; drops myschema after.
     """
-    db.execute(pg_conn, 'CREATE SCHEMA IF NOT EXISTS myschema')
-    db.execute(pg_conn, 'DROP TABLE IF EXISTS myschema.t')
-    db.execute(pg_conn, """
-        CREATE TABLE myschema.t (
-            id SERIAL NOT NULL,
-            name VARCHAR(255) NOT NULL,
-            value INTEGER NOT NULL,
-            PRIMARY KEY (name)
-        )
-    """)
-    db.execute(pg_conn,
-               "INSERT INTO myschema.t (name, value) VALUES ('alpha', 1), ('beta', 2)")
+    create_table = """
+create table myschema.t (
+    id serial not null,
+    name varchar(255) not null,
+    value integer not null,
+    primary key (name)
+)
+"""
+    db.execute(pg_conn, 'create schema if not exists myschema')
+    db.execute(pg_conn, 'drop table if exists myschema.t')
+    db.execute(pg_conn, create_table)
+    db.execute(
+        pg_conn,
+        "insert into myschema.t (name, value) values ('alpha', 1), ('beta', 2)")
     try:
         yield pg_conn
     finally:
         try:
-            db.execute(pg_conn, 'DROP SCHEMA myschema CASCADE')
+            db.execute(pg_conn, 'drop schema myschema cascade')
         except Exception as e:
             logger.warning(f'Error dropping myschema: {e}')

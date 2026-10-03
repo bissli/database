@@ -4,13 +4,13 @@ import site
 import pytest
 from database.cache import Cache
 
-HERE = pathlib.Path(pathlib.Path(__file__).resolve()).parent
-site.addsitedir(HERE)
+site.addsitedir(pathlib.Path(__file__).resolve().parent)
 
 
 @pytest.fixture(autouse=True)
 def clear_caches():
-    """Clear all caches before and after each test to ensure test isolation."""
+    """Empty the shared TTL cache before and after every test.
+    """
     Cache.get_instance().clear_all()
     yield
     Cache.get_instance().clear_all()
@@ -21,4 +21,4 @@ pytest_plugins = [
     'tests.fixtures.values',
     'tests.fixtures.sqlite',
     'tests.fixtures.postgres',
-]
+    ]

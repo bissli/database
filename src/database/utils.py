@@ -1,9 +1,4 @@
-"""Low-level connection utilities with no internal dependencies.
-
-These utilities work with any database connection type (ConnectionWrapper,
-SQLAlchemy connections, raw DBAPI connections) and have no imports from
-other database modules, making them safe to import without circular
-dependency concerns.
+"""Helpers taking a ConnectionWrapper, SQLAlchemy or raw DBAPI connection.
 """
 import logging
 import sqlite3
@@ -13,19 +8,33 @@ import psycopg
 
 logger = logging.getLogger(__name__)
 
-# Exceptions that indicate commit is not possible or not needed
-_CommitError = (
+_COMMIT_ERRORS = (
     psycopg.ProgrammingError,
     psycopg.InterfaceError,
     psycopg.OperationalError,
     sqlite3.ProgrammingError,
     sqlite3.InterfaceError,
     sqlite3.OperationalError,
-)
+    )
 
 
 def get_dialect_name(obj: Any) -> str:
-    """Get dialect name for a database connection or engine.
+    """Lower-case dialect name, such as 'postgresql' or 'sqlite', of obj.
+
+    Parameters
+    ----------
+    obj : Any
+        A wrapper, engine, SQLAlchemy or bare DBAPI connection.
+
+    Returns
+    -------
+    str
+        Dialect name.
+
+    Raises
+    ------
+    AttributeError
+        When no attribute or driver module names a dialect.
     """
     if hasattr(obj, 'dialect'):
         dialect = obj.dialect
@@ -52,29 +61,33 @@ def get_dialect_name(obj: Any) -> str:
 
 
 def get_raw_connection(connection: Any) -> Any:
-    """Extract the raw DBAPI connection from a wrapper."""
-    raw_conn = connection
-    if hasattr(connection, 'driver_connection'):
-        raw_conn = connection.driver_connection
-    return raw_conn
+    """connection.driver_connection when present, else connection.
+    """
+    return getattr(connection, 'driver_connection', connection)
 
 
 def ensure_commit(connection: Any) -> None:
-    """Force a commit on any database connection if it's not in auto-commit mode.
+    """Commit on connection, else on connection.driver_connection.
 
-    Works safely even if the connection is already in auto-commit mode.
-    Catches database-specific exceptions that indicate commit is not possible.
+    A psycopg or sqlite3 ProgrammingError, InterfaceError or
+    OperationalError from either commit is logged and swallowed, so a
+    failed commit returns normally.
+
+    Parameters
+    ----------
+    connection : Any
+        Any object; one with no commit() at either level is left alone.
     """
     if hasattr(connection, 'commit'):
         try:
             connection.commit()
             return
-        except _CommitError as e:
+        except _COMMIT_ERRORS as e:
             logger.debug(f'Could not commit transaction: {e}')
 
-    if hasattr(connection, 'driver_connection') and hasattr(connection.driver_connection, 'commit'):
+    if (hasattr(connection, 'driver_connection')
+        and hasattr(connection.driver_connection, 'commit')):
         try:
             connection.driver_connection.commit()
-            return
-        except _CommitError as e:
+        except _COMMIT_ERRORS as e:
             logger.debug(f'Could not commit driver_connection transaction: {e}')

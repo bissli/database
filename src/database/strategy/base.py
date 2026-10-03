@@ -1,15 +1,8 @@
-"""
-Base strategy interface for database operations.
-
-Defines the abstract base class that all database-specific strategy implementations
-must inherit from. The strategy pattern allows for encapsulating database-specific
-behaviors while presenting a consistent interface to the rest of the application.
-
-Each concrete strategy implements operations with database-specific SQL and techniques,
-but clients can work with any database through this consistent interface.
+"""Abstract base for the per-dialect database strategies, and their registry.
 """
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -25,18 +18,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Registry of dialect name -> strategy class
-# Defined here to avoid circular imports (concrete strategies import from base)
 _STRATEGY_REGISTRY: dict[str, type['DatabaseStrategy']] = {}
 
 
-def register_strategy(dialect: str):
-    """Decorator to register a strategy class for a dialect.
+def register_strategy(
+        dialect: str) -> Callable[[type['DatabaseStrategy']], type['DatabaseStrategy']]:
+    """Class decorator that registers a strategy class under a dialect.
 
-    Usage:
-        @register_strategy('postgresql')
-        class PostgresStrategy(DatabaseStrategy):
-            ...
+    Parameters
+    ----------
+    dialect : str
+        Name get_dialect_name reports, e.g. 'postgresql'. A later
+        registration under the same name replaces the earlier one.
+
+    Returns
+    -------
+    Callable
+        Decorator that records the class and returns it unchanged.
     """
     def decorator(cls: type['DatabaseStrategy']) -> type['DatabaseStrategy']:
         _STRATEGY_REGISTRY[dialect] = cls
@@ -45,17 +43,18 @@ def register_strategy(dialect: str):
 
 
 class DatabaseStrategy(ABC):
-    """Base class for database-specific operations.
+    """Dialect-specific SQL, connection setup, and schema lookups.
     """
 
     @contextmanager
-    def _cursor(self, cn: 'ConnectionWrapper', sql: str, params: tuple | None = None):
+    def _cursor(self, cn: 'ConnectionWrapper', sql: str,
+                params: tuple | None = None) -> Iterator[Any]:
         """Run sql on a raw DBAPI cursor, yield the cursor, then close it.
 
         Parameters
         ----------
         cn : ConnectionWrapper
-            Connection whose raw DBAPI connection runs the statement.
+            Connection to run on.
         sql : str
             Statement text, standardized for the dialect before it runs.
         params : tuple or None, default None
@@ -70,11 +69,6 @@ class DatabaseStrategy(ABC):
         ------
         ReadOnlyError
             sql would turn off a reader's read-only session setting.
-
-        Notes
-        -----
-        - A failed execute, or an error raised in the with-body, logs at
-          ERROR with the SQL and traceback, then re-raises.
         """
         raise_on_readonly_disarm(cn, sql)
         sql = self.standardize_sql(sql)
@@ -94,18 +88,20 @@ class DatabaseStrategy(ABC):
 
     def _execute_raw(self, cn: 'ConnectionWrapper', sql: str,
                      params: tuple | None = None) -> int:
-        """Execute SQL and return rowcount without importing query.py.
-
-        Used internally by strategy methods for DDL/DML operations.
+        """Run sql through _cursor and return the driver's rowcount.
         """
         with self._cursor(cn, sql, params) as cursor:
             return cursor.rowcount
 
     def _select_raw(self, cn: 'ConnectionWrapper', sql: str,
                     params: tuple | None = None) -> list[dict]:
-        """Execute SQL and return results as list of dicts without importing query.py.
+        """Run sql through _cursor and return its rows as dicts.
 
-        Used internally by strategy methods for queries returning multiple columns.
+        Returns
+        -------
+        list[dict]
+            One dict per row, keyed by column name. Empty when the
+            statement returns no result set.
         """
         with self._cursor(cn, sql, params) as cursor:
             if cursor.description is None:
@@ -115,109 +111,132 @@ class DatabaseStrategy(ABC):
 
     def _select_column_raw(self, cn: 'ConnectionWrapper', sql: str,
                            params: tuple | None = None) -> list:
-        """Execute SQL and return first column as list without importing query.py.
-
-        Used internally by strategy methods for single-column queries.
+        """Run sql through _cursor and return the first value of each row.
         """
         with self._cursor(cn, sql, params) as cursor:
             return [row[0] for row in cursor.fetchall()]
 
     @abstractmethod
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Optimize a table by reclaiming space
+        """Reclaim the space dead rows hold.
 
-        Args:
-            cn: Database connection object
-            table: Name of the table to vacuum
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to run on.
+        table : str
+            Table to vacuum. A dialect that can only vacuum the whole
+            database may ignore it.
         """
 
     @abstractmethod
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
-        """Rebuild indexes for a table.
+        """Rebuild every index on a table.
 
-        Args:
-            cn: Database connection object
-            table: Name of the table to reindex
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to run on.
+        table : str
+            Table whose indexes to rebuild.
         """
 
     @abstractmethod
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
-        """Order table data according to an index.
+        """Reorder a table's rows on disk to follow an index.
 
-        Args:
-            cn: Database connection object
-            table: Name of the table to cluster
-            index: Name of the index to cluster by, by default None
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to run on.
+        table : str
+            Table to reorder.
+        index : str or None, default None
+            Index to follow; None lets the dialect choose, e.g. the index
+            the table was last clustered on.
         """
 
     @abstractmethod
     def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
                        identity: str | None = None) -> None:
-        """Reset the sequence for a table.
+        """Set a table's sequence so the next value follows the column max.
 
-        Args:
-            cn: Database connection object
-            table: Name of the table with the sequence
-            identity: Name of the identity column, by default None
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to run on.
+        table : str
+            Table that owns the sequence.
+        identity : str or None, default None
+            Sequence-backed column; None picks one with
+            find_sequence_column.
         """
 
     @abstractmethod
     def copy_from(self, cn: 'ConnectionWrapper', table: str,
                   file: TextIO, columns: list[str] | None = None) -> int:
-        """Bulk load data from a file-like object using COPY.
+        """Bulk load CSV text from file into table; return rows loaded.
         """
 
     @abstractmethod
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
-        """Get primary key columns for a table
+        """Primary key column names of a table.
 
-        Concrete implementations must apply @cacheable_strategy
-        ('primary_keys') themselves - Python strips decorators on abstract
-        method overrides, so decorating here would be dead.
-
-        Args:
-            cn: Database connection object
-            table: Table name to get primary keys for
-            bypass_cache: If True, bypass cache and query database directly, by default False
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True queries the database and leaves the cached entry alone.
 
         Returns
-            list: List of primary key column names
+        -------
+        list[str]
+            Primary key columns; empty when the table has none.
         """
 
     @abstractmethod
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
-        """Get all columns for a table.
+        """Column names of a table.
 
-        Concrete implementations must apply @cacheable_strategy
-        ('table_columns') themselves.
-
-        Args:
-            cn: Database connection object
-            table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True queries the database and leaves the cached entry alone.
 
         Returns
-            list: List of column names for the specified table
+        -------
+        list[str]
+            Every column of the table.
         """
 
     @abstractmethod
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
-        """Get columns with sequences/identities.
+        """Names of a table's sequence or identity columns.
 
-        Concrete implementations must apply @cacheable_strategy
-        ('sequence_columns') themselves.
-
-        Args:
-            cn: Database connection object
-            table: Table name to get sequence columns for
-            bypass_cache: If True, bypass cache and query database directly
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True queries the database and leaves the cached entry alone.
 
         Returns
-            list: List of sequence/identity column names for the specified table
+        -------
+        list[str]
+            Sequence-backed columns; empty when the table has none.
         """
 
     @abstractmethod
@@ -228,12 +247,6 @@ class DatabaseStrategy(ABC):
         ----------
         conn : Any
             Pooled or raw DBAPI connection to configure.
-
-        Notes
-        -----
-        - Session settings only. Anything that writes to the database
-          itself belongs in configure_writer_connection, which a
-          reader skips.
         """
 
     def configure_writer_connection(self, conn: Any,
@@ -246,32 +259,16 @@ class DatabaseStrategy(ABC):
             Pooled or raw DBAPI connection to configure.
         options : DatabaseOptions
             Options the connection was opened with.
-
-        Notes
-        -----
-        - Runs after configure_connection, and only for a writer. A
-          dialect whose setup writes to the database - SQLite's WAL
-          mode lives in the database header - puts that here,
-          so a reader neither changes the database nor fails on one
-          whose file denies writing.
-        - No-op by default: most dialects configure a session and
-          nothing else.
         """
 
     @abstractmethod
     def enable_autocommit(self, raw_conn: Any) -> None:
-        """Enable auto-commit mode on a raw database connection.
-
-        Args:
-            raw_conn: The raw DBAPI connection (not wrapped)
+        """Turn auto-commit on for a raw DBAPI connection, never a wrapper.
         """
 
     @abstractmethod
     def disable_autocommit(self, raw_conn: Any) -> None:
-        """Disable auto-commit mode on a raw database connection.
-
-        Args:
-            raw_conn: The raw DBAPI connection (not wrapped)
+        """Turn auto-commit off for a raw DBAPI connection, never a wrapper.
         """
 
     def set_session_readonly(self, conn: Any) -> None:
@@ -285,20 +282,7 @@ class DatabaseStrategy(ABC):
         Raises
         ------
         NotImplementedError
-            Always, for a dialect that has not overridden this. The
-            base class refuses the reader rather than handing back a
-            connection whose writes nothing stops.
-
-        Notes
-        -----
-        - Concrete, not abstract, so a strategy for a dialect with no
-          reader endpoint keeps working untouched. Only a caller
-          asking for role='reader' on such a dialect reaches this.
-        - Runs after configure_connection, which PostgreSQL requires:
-          psycopg refuses an auto-commit change once a statement has
-          opened a transaction.
-        - PostgreSQL still permits VACUUM under this setting, and does
-          not stop a write reached through a function.
+            Always, for a dialect that has not overridden this.
         """
         raise NotImplementedError(
             f'{type(self).__name__} has no read-only session setting, so '
@@ -347,7 +331,7 @@ class DatabaseStrategy(ABC):
         raise NotImplementedError(f'{type(self).__name__} cannot list indexes')
 
     def table_ddl(self, cn: 'ConnectionWrapper', table: str) -> str:
-        """CREATE statement text of a table.
+        """create statement text of a table.
 
         Raises
         ------
@@ -359,149 +343,171 @@ class DatabaseStrategy(ABC):
     @property
     @abstractmethod
     def dialect_name(self) -> str:
-        """Return the dialect identifier (e.g., 'postgresql', 'sqlite')."""
+        """Name the strategy registers under, e.g. 'postgresql'.
+        """
 
     @abstractmethod
     def build_connection_url(self, options: 'DatabaseOptions') -> str:
-        """Build the database connection URL for this dialect.
-
-        Args:
-            options: DatabaseOptions containing connection parameters
-
-        Returns
-            Connection URL string suitable for SQLAlchemy
+        """SQLAlchemy connection URL built from options.
         """
 
     @abstractmethod
     def get_engine_kwargs(self, options: 'DatabaseOptions') -> dict[str, Any]:
-        """Return SQLAlchemy create_engine kwargs for this dialect.
-
-        Args:
-            options: DatabaseOptions containing connection parameters
-
-        Returns
-            Dictionary of keyword arguments for create_engine
+        """Keyword arguments for SQLAlchemy create_engine, built from options.
         """
 
     @abstractmethod
     def register_type_adapters(self, connection: Any) -> None:
-        """Register dialect-specific type adapters.
-
-        Args:
-            connection: Database connection to register adapters on
+        """Register the dialect's type adapters on a DBAPI connection.
         """
 
     @abstractmethod
     def create_dict_cursor(self, raw_conn: Any) -> Any:
-        """Create a cursor that returns rows as dictionaries.
-
-        Args:
-            raw_conn: Raw DBAPI connection
-
-        Returns
-            Cursor configured to return dict-like rows
+        """Cursor on a raw DBAPI connection that returns dict-like rows.
         """
 
     @abstractmethod
     def get_type_map(self) -> dict:
-        """Return mapping of database type codes to Python types.
+        """Python type for each driver type code.
 
         Returns
-            Dictionary mapping type codes (int for PostgreSQL, str for SQLite)
-            to Python types
+        -------
+        dict
+            Keyed by the driver's type code: an int OID for PostgreSQL, a
+            declared type name for SQLite.
         """
 
     @classmethod
     @abstractmethod
     def get_required_options(cls) -> list[str]:
-        """Return list of required option field names for this dialect.
+        """DatabaseOptions field names that validate_options requires.
 
         Returns
-            List of field names that must have non-None/non-zero values
+        -------
+        list[str]
+            Fields that must be truthy: None, 0, and '' all fail.
         """
 
     @classmethod
     def validate_options(cls, options: 'DatabaseOptions') -> None:
-        """Validate options for this dialect.
+        """Check that every get_required_options field is truthy.
 
-        Args:
-            options: DatabaseOptions to validate
+        Parameters
+        ----------
+        options : DatabaseOptions
+            Options to check.
 
         Raises
-            ValidationError: If any required field is None or 0
+        ------
+        ValidationError
+            A required field is falsy: None, 0, or ''.
         """
         for field in cls.get_required_options():
             if not getattr(options, field):
                 raise ValidationError(f'field {field} cannot be None or 0')
 
     def quote_identifier(self, identifier: str) -> str:
-        """Quote a database identifier.
+        """Double-quoted identifier, each part of a dotted name on its own.
 
-        Default implementation uses standard SQL double-quote escaping.
-        Override in subclasses if database requires different quoting.
-
-        Args:
-            identifier: Database identifier to be quoted
+        Parameters
+        ----------
+        identifier : str
+            Name to quote; 'schema.table' quotes as "schema"."table". A
+            dot inside an already quoted part stays in that part.
 
         Returns
-            str: Properly quoted identifier according to database-specific rules
+        -------
+        str
+            Quoted identifier, with an embedded double quote doubled.
+
+        Raises
+        ------
+        ValidationError
+            identifier holds a NUL byte.
         """
         return sql_quote_identifier(identifier)
 
     @abstractmethod
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
                                   constraint_name: str) -> dict[str, Any] | str:
-        """Get the definition of a constraint by name.
+        """Conflict target of a named constraint or unique index.
 
-        Args:
-            cn: Database connection object
-            table: The table containing the constraint
-            constraint_name: Name of the constraint
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table that owns the constraint.
+        constraint_name : str
+            Constraint or index name.
 
         Returns
-            Constraint information including columns and definition
+        -------
+        dict[str, Any] or str
+            Conflict target that upsert_rows hands to build_upsert_sql as
+            constraint_expr, in whatever shape the dialect reads there.
         """
 
     @abstractmethod
     def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get columns suitable for general data display.
+        """Columns of a table to select by default, in declaration order.
 
-        Args:
-            cn: Database connection object
-            table: Table name to get default columns for
-            bypass_cache: If True, bypass cache and query database directly
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True skips the cache, where an override keeps one.
 
         Returns
-            list: List of column names suitable for general data representation
+        -------
+        list[str]
+            The dialect's choice of columns; it may leave out types that
+            do not load as plain values.
         """
 
     @abstractmethod
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Get all column names for a table ordered by their position.
+        """Column names of a table in declaration order.
 
-        Args:
-            cn: Database connection object
-            table: Table name to get columns for
-            bypass_cache: If True, bypass cache and query database directly
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True skips the cache, where an override keeps one.
 
         Returns
-            list: List of column names ordered by position
+        -------
+        list[str]
+            Every column, ordered by position.
         """
 
     @abstractmethod
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
-        """Find the best column to reset sequence for.
+        """Column whose sequence reset_sequence should reset.
 
-        Args:
-            cn: Database connection object
-            table: Table name to analyze for sequence columns
-            bypass_cache: If True, bypass cache and query database directly
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True queries the database and leaves the cached entry alone.
 
         Returns
-            str: Column name best suited for sequence resetting
+        -------
+        str
+            The chosen column; _find_sequence_column_impl gives the
+            shared rule.
         """
 
     @abstractmethod
@@ -514,85 +520,73 @@ class DatabaseStrategy(ABC):
         update_cols_always: list[str] | None = None,
         update_cols_ifnull: list[str] | None = None,
     ) -> str:
-        """Generate dialect-specific upsert SQL.
+        """insert ... on conflict statement for one row of columns.
 
-        Args:
-            table: Target table name
-            columns: All columns to insert
-            key_columns: Columns for conflict detection
-            constraint_expr: Pre-resolved constraint expression (PostgreSQL only)
-            update_cols_always: Columns to always update on conflict
-            update_cols_ifnull: Columns to update only if target is NULL
+        Parameters
+        ----------
+        table : str
+            Target table.
+        columns : list[str]
+            Columns to insert, in placeholder order.
+        key_columns : list[str]
+            Conflict target columns, used when constraint_expr is empty.
+        constraint_expr : str or None, default None
+            Conflict target from get_constraint_definition. SQLite
+            ignores it.
+        update_cols_always : list[str] or None, default None
+            Columns overwritten from the new row on conflict.
+        update_cols_ifnull : list[str] or None, default None
+            Columns overwritten on conflict only where the stored value
+            is null.
 
         Returns
-            str: Complete upsert SQL statement
+        -------
+        str
+            Statement with one placeholder per column. With no update
+            columns, a conflicting row is left unchanged.
         """
 
     def get_placeholder_style(self) -> str:
-        """Return the placeholder marker for this database.
-
-        Returns
-            str: '%s' for PostgreSQL-style, '?' for SQLite-style
+        """Positional placeholder marker: '%s' here, '?' for SQLite.
         """
         return '%s'
 
     def standardize_sql(self, sql: str) -> str:
-        """Convert placeholders to this dialect's style.
-
-        Default implementation is a no-op. Override in strategies that need
-        placeholder conversion (e.g., SQLite converts %s to ?).
-
-        Args:
-            sql: SQL string potentially containing placeholders
-
-        Returns
-            str: SQL string with placeholders converted to this dialect's style
+        """sql with its placeholders rewritten to this dialect's style.
         """
         return sql
 
     @cacheable_strategy('sequence_column_finder', ttl=300, maxsize=50)
     def _find_sequence_column_impl(self, cn: 'ConnectionWrapper', table: str,
                                    bypass_cache: bool = False) -> str:
-        """Find the best column to reset sequence for.
+        """Column to reset a table's sequence on, shared by every dialect.
 
-        Common implementation shared by all database strategies that determines the
-        most appropriate column for sequence operations based on heuristic rules.
-
-        Args:
-            cn: Database connection object
-            table: Table name to analyze for sequence columns
-            bypass_cache: If True, bypass cache and query database directly, by default False
+        Parameters
+        ----------
+        cn : ConnectionWrapper
+            Connection to query.
+        table : str
+            Table to inspect.
+        bypass_cache : bool, default False
+            True skips this cache and the two lookups' caches.
 
         Returns
-            str: Column name best suited for sequence resetting based on priority:
-                1. Columns that are both primary key and sequence columns
-                2. Primary key or sequence columns with 'id' in their name
-                3. Any primary key or sequence column
-                4. Fallback to 'id' if no suitable column found
+        -------
+        str
+            From the first non-empty group, in order: sequence columns
+            that are also primary keys, sequence columns, primary keys.
+            Within the group, the first name holding 'id' in any case,
+            else the group's first column. 'id' when every group is empty.
         """
         sequence_cols = self.get_sequence_columns(cn, table, bypass_cache=bypass_cache)
         primary_keys = self.get_primary_keys(cn, table, bypass_cache=bypass_cache)
-
         pk_sequence_cols = [col for col in sequence_cols if col in primary_keys]
 
-        if pk_sequence_cols:
-            id_cols = [col for col in pk_sequence_cols if 'id' in col.lower()]
-            if id_cols:
-                return id_cols[0]
-            return pk_sequence_cols[0]
-
-        if sequence_cols:
-            id_cols = [col for col in sequence_cols if 'id' in col.lower()]
-            if id_cols:
-                return id_cols[0]
-            return sequence_cols[0]
-
-        if primary_keys:
-            id_cols = [col for col in primary_keys if 'id' in col.lower()]
-            if id_cols:
-                return id_cols[0]
-            return primary_keys[0]
-
+        for candidates in (pk_sequence_cols, sequence_cols, primary_keys):
+            if candidates:
+                return next(
+                    (col for col in candidates if 'id' in col.lower()),
+                    candidates[0])
         return 'id'
 
     def _build_update_exprs(
@@ -601,29 +595,34 @@ class DatabaseStrategy(ABC):
         update_cols_always: list[str] | None,
         update_cols_ifnull: list[str] | None,
     ) -> list[str]:
-        """Build UPDATE SET expressions for upsert operations.
+        """SET expressions for the conflict branch of an upsert.
 
-        Shared helper used by both PostgreSQL and SQLite strategies.
-
-        Args:
-            table: Target table name (for COALESCE expressions)
-            update_cols_always: Columns to always update
-            update_cols_ifnull: Columns to update only if target is NULL
+        Parameters
+        ----------
+        table : str
+            Target table, which qualifies the stored value.
+        update_cols_always : list[str] or None
+            Columns set to the new row's value.
+        update_cols_ifnull : list[str] or None
+            Columns set to the new row's value only where the stored value
+            is null.
 
         Returns
-            List of SET expressions like 'col = excluded.col'
+        -------
+        list[str]
+            The always columns first, then the if-null columns.
         """
         quoted_table = self.quote_identifier(table)
         update_exprs = []
 
-        if update_cols_always:
-            for col in update_cols_always:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = excluded.{qc}')
+        for col in update_cols_always or ():
+            quoted_col = self.quote_identifier(col)
+            update_exprs.append(f'{quoted_col} = excluded.{quoted_col}')
 
-        if update_cols_ifnull:
-            for col in update_cols_ifnull:
-                qc = self.quote_identifier(col)
-                update_exprs.append(f'{qc} = COALESCE({quoted_table}.{qc}, excluded.{qc})')
+        for col in update_cols_ifnull or ():
+            quoted_col = self.quote_identifier(col)
+            update_exprs.append(
+                f'{quoted_col} = coalesce({quoted_table}.{quoted_col}, '
+                f'excluded.{quoted_col})')
 
         return update_exprs

@@ -1,8 +1,4 @@
-"""
-Database-agnostic tests for how bound null-like strings reach a column.
-
-These tests run against both PostgreSQL and SQLite and hold both to one
-expected result.
+"""How bound null-like strings reach a column, on PostgreSQL and SQLite.
 """
 import database as db
 import numpy as np
@@ -22,15 +18,17 @@ create table null_probe (
 
 @pytest.fixture
 def probe_conn(db_conn):
-    """Connection holding an empty null_probe table."""
+    """Connection holding an empty null_probe table.
+    """
     db.execute(db_conn, 'drop table if exists null_probe')
     db.execute(db_conn, CREATE_PROBE_TABLE)
     yield db_conn
     db.execute(db_conn, 'drop table if exists null_probe')
 
 
-def stored_by_label(cn) -> dict:
-    """Map each stored label to its txt value."""
+def stored_by_label(cn: db.ConnectionWrapper) -> dict[str, str | None]:
+    """Map each stored label to its txt value.
+    """
     result = db.select(cn, 'select label, txt from null_probe')
     return dict(zip(col(result, 'label'), col(result, 'txt')))
 
@@ -38,12 +36,9 @@ def stored_by_label(cn) -> dict:
 def test_execute_stores_spelled_nulls_as_text_and_empty_as_null(probe_conn):
     """Verify execute and executemany keep spelled nulls, null only ''.
 
-    Mutation: restoring the SPECIAL_STRINGS lookup on either str path of
-        TypeConverter.convert_value (every spelled null stores NULL), or
-        dropping either '' arm (the empty string stores as text). The
-        np.str_ values take the slow path, plain str the fast one.
-    Oracle: hand-written expected mapping, identical for both dialects,
-        plus a lookup by 'NA' that must find its row.
+    Mutation: a SPECIAL_STRINGS lookup on the str or np.str_ path of
+        TypeConverter.convert_value, or dropping either '' arm.
+    Oracle: a hand-written mapping, and a lookup by 'NA' that finds its row.
     """
     sql = 'insert into null_probe (label, txt) values (%s, %s)'
     for value in SPELLED_NULLS[:4]:
@@ -66,14 +61,10 @@ def test_execute_stores_spelled_nulls_as_text_and_empty_as_null(probe_conn):
 
 
 def test_row_apis_map_spelled_nulls_and_empty_to_null(probe_conn):
-    """Verify insert_rows and upsert_rows store every null spelling as NULL.
+    """Verify insert_rows and upsert_rows store every null spelling as null.
 
-    Mutation: dropping null_special_string from the params built in
-        ConnectionWrapper.insert_rows or upsert_rows, which stores the
-        spelled nulls as text.
-    Oracle: hand-written expected mapping, identical for both dialects,
-        with near-miss controls 'n/a' and 'nan ' that must survive. The
-        PyArrow scalars are not str, so they need their own unwrap.
+    Mutation: dropping null_special_string from insert_rows or upsert_rows.
+    Oracle: a hand-written mapping; near misses 'n/a' and 'nan ' stay text.
     """
     values = (*SPELLED_NULLS, '', pa.scalar('nan'), pa.scalar('None'), 'n/a', 'nan ')
     db.insert_rows(

@@ -1,8 +1,4 @@
-"""Unit tests for generated SQL: SELECT/INSERT builders, strategy upsert
-statements, and the upsert_rows orchestration in ConnectionWrapper.
-
-Every expected statement here is an independently written literal, never a
-re-derivation using the joins the source itself uses.
+"""Tests for generated SQL: builders, strategy upserts, and upsert_rows.
 """
 import database as db
 import pytest
@@ -31,10 +27,6 @@ class RecordingCursor:
 
 class StubConnection:
     """ConnectionWrapper stand-in: real SQL building, stubbed schema and I/O.
-
-    The SQL-building methods are the production ones. Only the two schema
-    lookups, the cursor, and execute() are replaced, so a mutation anywhere
-    in the statement-building path still reaches the assertions.
     """
 
     filter_table_columns = ConnectionWrapper.filter_table_columns
@@ -75,31 +67,29 @@ class StubConnection:
 @pytest.fixture
 def upsert_conn():
     """In-memory SQLite connection with three tables covering key shapes.
-
-    inventory - composite primary key, no unique index.
-    combo     - surrogate primary key plus a two-column unique index.
-    eventlog  - no primary key at all.
     """
+    inventory_sql = """
+create table inventory (
+    sku text not null,
+    warehouse text not null,
+    qty integer,
+    note text,
+    primary key (sku, warehouse)
+)
+"""
+    combo_sql = """
+create table combo (
+    id integer primary key,
+    name text,
+    region text,
+    val integer,
+    unique (name, region)
+)
+"""
     cn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
-    db.execute(cn, """
-    CREATE TABLE inventory (
-        sku TEXT NOT NULL,
-        warehouse TEXT NOT NULL,
-        qty INTEGER,
-        note TEXT,
-        PRIMARY KEY (sku, warehouse)
-    )
-    """)
-    db.execute(cn, """
-    CREATE TABLE combo (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        region TEXT,
-        val INTEGER,
-        UNIQUE (name, region)
-    )
-    """)
-    db.execute(cn, 'CREATE TABLE eventlog (a TEXT, b TEXT)')
+    db.execute(cn, inventory_sql)
+    db.execute(cn, combo_sql)
+    db.execute(cn, 'create table eventlog (a text, b text)')
     yield cn
     cn.close()
 
@@ -107,9 +97,6 @@ def upsert_conn():
 @pytest.fixture
 def executed_statements(monkeypatch):
     """Record every (sql, params, batch_size) reaching Cursor.executemany.
-
-    The original still runs, so a recorded statement is also proved valid
-    against real SQLite.
     """
     calls = []
     original = Cursor.executemany
@@ -140,66 +127,49 @@ def constraint_lookups(monkeypatch):
 
 @pytest.mark.parametrize('dialect', ['postgresql', 'sqlite'])
 def test_select_without_columns_uses_star(dialect):
-    """Verify build_select_sql() emits SELECT * only when columns is empty.
+    """Verify build_select_sql() emits 'select *' only when columns is empty.
 
-    Mutation: swapping the `if columns:` branches in build_select_sql so an
-    empty list yields an empty column list instead of '*'.
+    Mutation: swapping the `if columns:` branches in build_select_sql.
     Oracle: hand-written literals for both the empty and non-empty case.
     """
-    assert build_select_sql('users', dialect) == 'SELECT * FROM "users"'
-    assert build_select_sql('users', dialect, columns=[]) == 'SELECT * FROM "users"'
+    assert build_select_sql('users', dialect) == 'select * from "users"'
+    assert build_select_sql('users', dialect, columns=[]) == 'select * from "users"'
     assert (build_select_sql('users', dialect, columns=['id'])
-            == 'SELECT "id" FROM "users"')
+            == 'select "id" from "users"')
 
 
 @pytest.mark.parametrize('dialect', ['postgresql', 'sqlite'])
 def test_select_quotes_each_identifier(dialect):
     """Verify every column and the table are quoted separately, in order.
 
-    Mutation: quoting the column list as one identifier in build_select_sql,
-    or dropping the schema split in quote_identifier.
+    Mutation: quoting the column list as one identifier in build_select_sql.
     Oracle: hand-written literal with a dotted table and a spaced column.
     """
     sql = build_select_sql('public.users', dialect, columns=['id', 'full name'])
-    assert sql == 'SELECT "id", "full name" FROM "public"."users"'
-
-
-def test_select_where_precedes_order_by():
-    """Verify WHERE is appended before ORDER BY and neither is quoted.
-
-    Mutation: reordering the clause appends in build_select_sql so ORDER BY
-    lands ahead of WHERE.
-    Oracle: hand-written literal for the full statement.
-    """
-    sql = build_select_sql(
-        'users', 'postgresql', where='active = TRUE',
-        order_by='"name" DESC')
-    assert sql == 'SELECT * FROM "users" WHERE active = TRUE ORDER BY "name" DESC'
+    assert sql == 'select "id", "full name" from "public"."users"'
 
 
 def test_select_limit_zero_is_emitted():
-    """Verify LIMIT 0 survives while limit=None emits no LIMIT.
+    """Verify 'limit 0' survives while limit=None emits no limit clause.
 
-    Mutation: `if limit is not None:` weakened to `if limit:` in
-    build_select_sql, which silently drops LIMIT 0.
+    Mutation: `if limit is not None:` weakened to `if limit:`.
     Oracle: boundary pair straddling the falsy/None distinction.
     """
     assert (build_select_sql('users', 'postgresql', limit=0)
-            == 'SELECT * FROM "users" LIMIT 0')
+            == 'select * from "users" limit 0')
     assert (build_select_sql('users', 'postgresql', limit=10)
-            == 'SELECT * FROM "users" LIMIT 10')
-    assert build_select_sql('users', 'postgresql') == 'SELECT * FROM "users"'
+            == 'select * from "users" limit 10')
+    assert build_select_sql('users', 'postgresql') == 'select * from "users"'
 
 
 @pytest.mark.parametrize(('dialect', 'expected'), [
-    ('postgresql', 'INSERT INTO "users" ("id", "name") VALUES (%s, %s)'),
-    ('sqlite', 'INSERT INTO "users" ("id", "name") VALUES (?, ?)'),
+    ('postgresql', 'insert into "users" ("id", "name") values (%s, %s)'),
+    ('sqlite', 'insert into "users" ("id", "name") values (?, ?)'),
     ], ids=['postgresql', 'sqlite'])
 def test_insert_placeholder_marker_per_dialect(dialect, expected):
     """Verify the placeholder marker follows the dialect, one per column.
 
-    Mutation: flipping the ternary in make_placeholders so '?' and '%s' swap
-    dialects.
+    Mutation: flipping the ternary in make_placeholders.
     Oracle: hand-written literal per dialect.
     """
     assert build_insert_sql(
@@ -208,54 +178,48 @@ def test_insert_placeholder_marker_per_dialect(dialect, expected):
 
 
 class TestSQLGeneration:
-    """Full-statement pins for the sql.py builders.
-    """
+    """Full-statement pins for the sql.py builders."""
 
     @pytest.mark.parametrize('dialect', ['postgresql', 'sqlite'])
     def test_build_select_sql(self, dialect):
         """Verify all four optional clauses render in SQL order.
 
-        Mutation: moving the LIMIT append above the ORDER BY append in
-        build_select_sql.
+        Mutation: swapping the order of two clause appends in build_select_sql.
         Oracle: hand-written literal for the whole statement.
         """
         sql = build_select_sql(
             'users', dialect, columns=['id', 'name'],
             where='active = true', order_by='"name"', limit=10)
         expected = (
-            'SELECT "id", "name" FROM "users" '
-            'WHERE active = true ORDER BY "name" LIMIT 10'
+            'select "id", "name" from "users" '
+            'where active = true order by "name" limit 10'
             )
         assert sql == expected
 
     def test_build_insert_sql(self):
         """Verify a dotted table splits and an embedded quote is doubled.
 
-        Mutation: replacing quote_identifier's per-segment quoting with a
-        single wrap, giving '"main.users"' and '"na"me"'.
+        Mutation: one wrap in place of quote_identifier's per-segment quoting.
         Oracle: hand-written literal following the SQL escaping rule.
         """
         sql = build_insert_sql(
             dialect='sqlite', table='main.users',
             columns=['id', 'na"me'])
-        assert sql == 'INSERT INTO "main"."users" ("id", "na""me") VALUES (?, ?)'
+        assert sql == 'insert into "main"."users" ("id", "na""me") values (?, ?)'
 
 
 @pytest.mark.parametrize(('dialect', 'expected'), [
     ('postgresql',
-     ('INSERT INTO "mytable" ("a", "b", "c") VALUES (%s, %s, %s) '
-      'ON CONFLICT ("a", "b") DO NOTHING')),
+     ('insert into "mytable" ("a", "b", "c") values (%s, %s, %s) '
+      'on conflict ("a", "b") do nothing')),
     ('sqlite',
      ('insert into "mytable" ("a", "b", "c") values (?, ?, ?) '
       'on conflict ("a", "b") do nothing')),
 ], ids=['postgresql', 'sqlite'])
 def test_upsert_sql_do_nothing_without_update_columns(dialect, expected):
-    """Verify no update columns yields DO NOTHING on the key column list.
+    """Verify no update columns yields do nothing on the key column list.
 
-    Mutation: deleting the `if not (update_cols_always or update_cols_ifnull):
-    return ... DO NOTHING` early return in postgres.py:409-410 /
-    sqlite.py:291-292, so the function emits a trailing `DO UPDATE SET ` with
-    an empty expression list.
+    Mutation: the do-nothing early return deleted from either build_upsert_sql.
     Oracle: hand-written literal per dialect.
     """
     sql = get_strategy(dialect).build_upsert_sql(
@@ -267,8 +231,8 @@ def test_upsert_sql_do_nothing_without_update_columns(dialect, expected):
 
 @pytest.mark.parametrize(('dialect', 'expected'), [
     ('postgresql',
-     ('INSERT INTO "mytable" ("a", "b", "c") VALUES (%s, %s, %s) '
-      'ON CONFLICT ("a") DO UPDATE SET "c" = excluded."c", "b" = excluded."b"')),
+     ('insert into "mytable" ("a", "b", "c") values (%s, %s, %s) '
+      'on conflict ("a") do update set "c" = excluded."c", "b" = excluded."b"')),
     ('sqlite',
      ('insert into "mytable" ("a", "b", "c") values (?, ?, ?) '
       'on conflict ("a") do update set "c" = excluded."c", "b" = excluded."b"')),
@@ -276,8 +240,7 @@ def test_upsert_sql_do_nothing_without_update_columns(dialect, expected):
 def test_upsert_sql_do_update_set_exact(dialect, expected):
     """Verify always-updated columns render as col = excluded.col, in order.
 
-    Mutation: building the conflict target from `quoted_columns` instead of
-    `quoted_keys` in build_upsert_sql, so every column becomes a key.
+    Mutation: conflict target built from quoted_columns over quoted_keys.
     Oracle: hand-written literal per dialect.
     """
     sql = get_strategy(dialect).build_upsert_sql(
@@ -291,8 +254,7 @@ def test_upsert_sql_do_update_set_exact(dialect, expected):
 def test_upsert_sql_coalesce_prefers_existing_row():
     """Verify the ifnull column coalesces the stored value ahead of excluded.
 
-    Mutation: swapping the COALESCE arguments in _build_update_exprs, which
-    would overwrite every non-null stored value.
+    Mutation: the coalesce arguments swapped in _build_update_exprs.
     Oracle: hand-written literal; argument order decides the semantics.
     """
     sql = get_strategy('postgresql').build_upsert_sql(
@@ -301,18 +263,17 @@ def test_upsert_sql_coalesce_prefers_existing_row():
         key_columns=['a'],
         update_cols_ifnull=['b'])
     expected = (
-        'INSERT INTO "mytable" ("a", "b") VALUES (%s, %s) '
-        'ON CONFLICT ("a") '
-        'DO UPDATE SET "b" = COALESCE("mytable"."b", excluded."b")'
+        'insert into "mytable" ("a", "b") values (%s, %s) '
+        'on conflict ("a") '
+        'do update set "b" = coalesce("mytable"."b", excluded."b")'
         )
     assert sql == expected
 
 
 def test_upsert_sql_always_columns_precede_ifnull_columns():
-    """Verify the SET list runs always-columns first, then ifnull-columns.
+    """Verify the set list runs always-columns first, then ifnull-columns.
 
-    Mutation: appending the ifnull block before the always block in
-    _build_update_exprs.
+    Mutation: the ifnull block appended before the always block.
     Oracle: hand-written literal with one column of each kind.
     """
     sql = get_strategy('postgresql').build_upsert_sql(
@@ -322,21 +283,19 @@ def test_upsert_sql_always_columns_precede_ifnull_columns():
         update_cols_always=['x'],
         update_cols_ifnull=['y'])
     expected = (
-        'INSERT INTO "t" ("k", "x", "y") VALUES (%s, %s, %s) '
-        'ON CONFLICT ("k") '
-        'DO UPDATE SET "x" = excluded."x", '
-        '"y" = COALESCE("t"."y", excluded."y")'
+        'insert into "t" ("k", "x", "y") values (%s, %s, %s) '
+        'on conflict ("k") '
+        'do update set "x" = excluded."x", '
+        '"y" = coalesce("t"."y", excluded."y")'
         )
     assert sql == expected
 
 
 def test_upsert_sql_constraint_expression_replaces_column_target():
-    """Verify a constraint expression is used verbatim and key columns are not.
+    """Verify a constraint expression replaces the key column target verbatim.
 
-    Mutation: dropping the `if constraint_expr:` branch in the PostgreSQL
-    build_upsert_sql so the key column list is emitted instead.
-    Oracle: hand-written literal carrying a partial-index WHERE clause that
-    a column list could never produce.
+    Mutation: dropping the `if constraint_expr:` branch for PostgreSQL.
+    Oracle: hand-written literal with a partial-index where clause.
     """
     sql = get_strategy('postgresql').build_upsert_sql(
         table='users',
@@ -345,9 +304,9 @@ def test_upsert_sql_constraint_expression_replaces_column_target():
         constraint_expr='(lower("name")) WHERE "name" IS NOT NULL',
         update_cols_always=['name'])
     expected = (
-        'INSERT INTO "users" ("id", "name") VALUES (%s, %s) '
-        'ON CONFLICT (lower("name")) WHERE "name" IS NOT NULL '
-        'DO UPDATE SET "name" = excluded."name"'
+        'insert into "users" ("id", "name") values (%s, %s) '
+        'on conflict (lower("name")) WHERE "name" IS NOT NULL '
+        'do update set "name" = excluded."name"'
         )
     assert sql == expected
 
@@ -355,16 +314,14 @@ def test_upsert_sql_constraint_expression_replaces_column_target():
 def test_upsert_sql_sqlite_ignores_constraint_expression():
     """Verify SQLite builds the conflict target from key columns regardless.
 
-    Mutation: honoring constraint_expr in the SQLite build_upsert_sql, which
-    would emit a PostgreSQL-only named-constraint target.
-    Oracle: hand-written literal; the same call on the PostgreSQL strategy
-    differs, so the two are compared against each other.
+    Mutation: constraint_expr honored in the SQLite build_upsert_sql.
+    Oracle: hand-written literal; the PostgreSQL call differs.
     """
     kwargs = {
         'table': 't',
         'columns': ['k', 'v'],
         'key_columns': ['k'],
-        'constraint_expr': 'ON CONSTRAINT uq_t',
+        'constraint_expr': 'on constraint uq_t',
         'update_cols_always': ['v'],
         }
     sqlite_sql = get_strategy('sqlite').build_upsert_sql(**kwargs)
@@ -377,10 +334,9 @@ def test_upsert_sql_sqlite_ignores_constraint_expression():
 
 
 def test_upsert_sql_quotes_schema_qualified_table():
-    """Verify a dotted table is split in both the INSERT and the COALESCE.
+    """Verify a dotted table is split in both the insert and the coalesce.
 
-    Mutation: quoting the table as one identifier in _build_update_exprs,
-    giving COALESCE("public.t"."b", ...).
+    Mutation: the table quoted as one identifier in _build_update_exprs.
     Oracle: hand-written literal with the schema split applied twice.
     """
     sql = get_strategy('postgresql').build_upsert_sql(
@@ -389,20 +345,18 @@ def test_upsert_sql_quotes_schema_qualified_table():
         key_columns=['a'],
         update_cols_ifnull=['b'])
     expected = (
-        'INSERT INTO "public"."t" ("a", "b") VALUES (%s, %s) '
-        'ON CONFLICT ("a") '
-        'DO UPDATE SET "b" = COALESCE("public"."t"."b", excluded."b")'
+        'insert into "public"."t" ("a", "b") values (%s, %s) '
+        'on conflict ("a") '
+        'do update set "b" = coalesce("public"."t"."b", excluded."b")'
         )
     assert sql == expected
 
 
 def test_upsert_rows_uses_table_column_order(upsert_conn, executed_statements):
-    """Verify insert columns and parameters follow table order, not dict order.
+    """Verify insert columns and parameters follow table order.
 
-    Mutation: `columns = tuple(col for col in table_columns if ...)` replaced
-    by a sort or by the caller's key order in upsert_rows.
-    Oracle: row dict written in an order that matches neither table order nor
-    alphabetical order, checked against a hand-written literal.
+    Mutation: columns sorted, or taken in the caller's key order.
+    Oracle: a row dict in neither table nor alphabetical order.
     """
     rows = ({'note': 'n', 'qty': 5, 'warehouse': 'W1', 'sku': 'A'},)
     upsert_conn.upsert_rows('inventory', rows, update_cols_always=['qty'])
@@ -421,9 +375,8 @@ def test_upsert_rows_corrects_case_and_drops_unknown_columns(
         upsert_conn, executed_statements):
     """Verify column names are case-corrected and unknown keys are dropped.
 
-    Mutation: dropping the case_map lookup in filter_table_columns so 'QTY'
-    is kept verbatim.
-    Oracle: hand-written literal naming the lower-case schema columns only.
+    Mutation: the case_map lookup dropped in filter_table_columns.
+    Oracle: hand-written literal naming the schema columns only.
     """
     rows = ({'SKU': 'A', 'Warehouse': 'W1', 'QTY': 5, 'bogus': 1},)
     upsert_conn.upsert_rows('inventory', rows, update_cols_always=['QTY'])
@@ -442,9 +395,8 @@ def test_upsert_rows_omits_key_columns_from_update_set(
         upsert_conn, executed_statements):
     """Verify a key column named in update_cols_always is filtered out.
 
-    Mutation: dropping the `lower not in key_cols_lower` guard on the
-    update_cols_always filter in upsert_rows.
-    Oracle: hand-written literal whose SET list holds only the non-key column.
+    Mutation: updatable_lower built without subtracting key_cols_lower.
+    Oracle: hand-written literal whose set list holds only the non-key column.
     """
     rows = ({'sku': 'A', 'warehouse': 'W1', 'qty': 5},)
     upsert_conn.upsert_rows(
@@ -464,8 +416,7 @@ def test_upsert_rows_ifnull_skips_columns_already_always_updated(
         upsert_conn, executed_statements):
     """Verify a column in both update lists is set once, unconditionally.
 
-    Mutation: dropping the `lower not in uc_always_lower` guard on the
-    update_cols_ifnull filter, which would emit the column twice.
+    Mutation: update_cols_ifnull filtered on updatable_lower over ifnull_lower.
     Oracle: hand-written literal with one assignment per column.
     """
     rows = ({'sku': 'A', 'warehouse': 'W1', 'qty': 5, 'note': 'n'},)
@@ -480,7 +431,7 @@ def test_upsert_rows_ifnull_skips_columns_already_always_updated(
         'values (?, ?, ?, ?) '
         'on conflict ("sku", "warehouse") '
         'do update set "qty" = excluded."qty", '
-        '"note" = COALESCE("inventory"."note", excluded."note")'
+        '"note" = coalesce("inventory"."note", excluded."note")'
         )
     assert sql == expected
 
@@ -489,10 +440,8 @@ def test_upsert_rows_ifnull_excludes_key_columns(
         upsert_conn, executed_statements):
     """Verify key columns listed in update_cols_ifnull are filtered out.
 
-    Mutation: dropping `lower not in key_cols_lower` from the
-    update_cols_ifnull filter in upsert_rows (connection.py:738), which would
-    emit `"sku" = COALESCE("inventory"."sku", excluded."sku")` in the SET list.
-    Oracle: hand-written literal whose SET list holds only the non-key column.
+    Mutation: updatable_lower built without subtracting key_cols_lower.
+    Oracle: hand-written literal whose set list holds only the non-key column.
     """
     rows = ({'sku': 'A', 'warehouse': 'W1', 'qty': 1, 'note': 'n'},)
     upsert_conn.upsert_rows('inventory', rows, update_cols_ifnull=['sku', 'note'])
@@ -502,25 +451,22 @@ def test_upsert_rows_ifnull_excludes_key_columns(
         'insert into "inventory" ("sku", "warehouse", "qty", "note") '
         'values (?, ?, ?, ?) '
         'on conflict ("sku", "warehouse") '
-        'do update set "note" = COALESCE("inventory"."note", excluded."note")'
+        'do update set "note" = coalesce("inventory"."note", excluded."note")'
         )
     assert sql == expected
 
 
 def test_filter_table_columns_drops_unknown_keys():
-    """Verify filter_table_columns silently drops keys absent from the schema.
+    """Verify filter_table_columns drops keys absent from the schema.
 
-    Mutation: making filter_table_columns keep unknown keys verbatim
-    (`else: filtered_row[col] = val`), which would include 'bogus' in the
-    INSERT column list.
-    Oracle: hand-written INSERT literal with two schema columns only; 'bogus'
-    would appear as a third column if not dropped.
+    Mutation: filter_table_columns keeping unknown keys verbatim.
+    Oracle: hand-written insert literal with the two schema columns.
     """
     cn = StubConnection('postgresql', ['id', 'name'], ['id'])
     cn.insert_rows('t', ({'id': 1, 'name': 'a', 'bogus': 9},))
 
     sql, params, _ = cn.recorder.calls[-1]
-    assert sql == 'INSERT INTO "t" ("id","name") VALUES (%s, %s)'
+    assert sql == 'insert into "t" ("id","name") values (%s, %s)'
     assert params == [[1, 'a']]
 
 
@@ -528,10 +474,8 @@ def test_upsert_rows_conflict_columns_override_primary_key(
         upsert_conn, executed_statements):
     """Verify conflict_columns replace the primary key and are case-corrected.
 
-    Mutation: `key_cols = [case_map.get(c.lower(), c) for c in
-    conflict_columns]` replaced by the raw caller list, giving
-    ON CONFLICT ("NAME").
-    Oracle: hand-written literal; SQLite would reject the uncorrected name.
+    Mutation: key_cols taken from the raw conflict_columns list.
+    Oracle: hand-written literal; SQLite rejects the uncorrected name.
     """
     rows = ({'id': 1, 'name': 'x', 'region': 'y', 'val': 3},)
     upsert_conn.upsert_rows(
@@ -551,10 +495,8 @@ def test_upsert_rows_uses_unique_index_when_primary_key_absent(
         upsert_conn, executed_statements):
     """Verify SQLite falls back to a unique index when the key is not supplied.
 
-    Mutation: `not use_primary_key` flipped to `use_primary_key` in the
-    unique-column fallback guard in upsert_rows.
-    Oracle: hand-written literal targeting the two-column unique index; the
-    primary key 'id' never appears.
+    Mutation: `not use_primary_key` flipped in the unique-index fallback.
+    Oracle: hand-written literal on the unique index; 'id' never appears.
     """
     rows = ({'name': 'x', 'region': 'y', 'val': 3},)
     upsert_conn.upsert_rows('combo', rows, update_cols_always=['val'])
@@ -571,26 +513,22 @@ def test_upsert_rows_requires_every_unique_column_present(
         upsert_conn, executed_statements):
     """Verify a partly supplied unique index is not used as a conflict target.
 
-    Mutation: `all(...)` weakened to `any(...)` on the unique-column check in
-    upsert_rows, which would target ("name", "region") without a region value.
-    Oracle: hand-written plain INSERT literal; the boundary is one supplied
-    column out of the index's two.
+    Mutation: all() weakened to any() on the unique-column check.
+    Oracle: hand-written plain insert literal; one of two index columns given.
     """
     rows = ({'name': 'x', 'val': 3},)
     upsert_conn.upsert_rows('combo', rows, update_cols_always=['val'])
 
     sql, _, _ = executed_statements[-1]
-    assert sql == 'INSERT INTO "combo" ("name","val") VALUES (?, ?)'
+    assert sql == 'insert into "combo" ("name","val") values (?, ?)'
 
 
 def test_upsert_rows_use_primary_key_disables_unique_fallback(
         upsert_conn, executed_statements):
     """Verify use_primary_key=True forbids the unique-index fallback.
 
-    Mutation: dropping `not use_primary_key` from the fallback guard in
-    upsert_rows, which would produce ON CONFLICT ("name", "region").
-    Oracle: same input as the fallback test, so only the flag differs; the
-    hand-written expectation is a plain INSERT.
+    Mutation: `not use_primary_key` dropped from the fallback guard.
+    Oracle: the fallback test's input with only the flag changed.
     """
     rows = ({'name': 'x', 'region': 'y', 'val': 3},)
     upsert_conn.upsert_rows(
@@ -598,17 +536,15 @@ def test_upsert_rows_use_primary_key_disables_unique_fallback(
         use_primary_key=True)
 
     sql, _, _ = executed_statements[-1]
-    assert sql == 'INSERT INTO "combo" ("name","region","val") VALUES (?, ?, ?)'
+    assert sql == 'insert into "combo" ("name","region","val") values (?, ?, ?)'
 
 
 def test_upsert_rows_ignores_constraint_name_on_sqlite(
         upsert_conn, executed_statements):
     """Verify constraint_name is cleared for SQLite before column filtering.
 
-    Mutation: `if dialect != 'postgresql': constraint_name = None` flipped to
-    `==`, which leaves constraint_name set and lets key columns survive into
-    the SET list.
-    Oracle: hand-written literal whose SET list excludes the key column 'sku'.
+    Mutation: `dialect != 'postgresql'` flipped to `==` in upsert_rows.
+    Oracle: hand-written literal whose set list excludes the key column 'sku'.
     """
     rows = ({'sku': 'A', 'warehouse': 'W1', 'qty': 5},)
     upsert_conn.upsert_rows(
@@ -627,11 +563,8 @@ def test_upsert_rows_ignores_constraint_name_on_sqlite(
 def test_upsert_rows_do_nothing_leaves_existing_row_untouched(upsert_conn):
     """Verify an upsert with no update columns keeps the stored row.
 
-    Mutation: deleting the `if not (update_cols_always or update_cols_ifnull):
-    return ... DO NOTHING` early return in sqlite.py:291-292, so the
-    conflicting write reaches DO UPDATE and overwrites the stored qty.
-    Oracle: hand-computed table state - qty stays 1 after a conflicting
-    write of 9.
+    Mutation: the do-nothing early return deleted from the SQLite builder.
+    Oracle: hand-computed state; qty stays 1 after a conflicting write of 9.
     """
     upsert_conn.upsert_rows(
         'inventory',
@@ -645,12 +578,10 @@ def test_upsert_rows_do_nothing_leaves_existing_row_untouched(upsert_conn):
 
 
 def test_upsert_rows_coalesce_fills_only_null_targets(upsert_conn):
-    """Verify an ifnull column overwrites NULL but never an existing value.
+    """Verify an ifnull column overwrites null but never an existing value.
 
-    Mutation: swapping the COALESCE arguments in _build_update_exprs, which
-    would replace 'orig' with 'new'.
-    Oracle: hand-computed row pair - one stored note is NULL, the other is
-    not, and only the NULL one changes.
+    Mutation: the coalesce arguments swapped in _build_update_exprs.
+    Oracle: two rows, one stored note null; only that one changes.
     """
     upsert_conn.upsert_rows('inventory', (
         {'sku': 'A', 'warehouse': 'W', 'qty': 1, 'note': 'orig'},
@@ -673,30 +604,24 @@ def test_upsert_rows_coalesce_fills_only_null_targets(upsert_conn):
 
 def test_upsert_rows_without_primary_key_falls_back_to_insert(
         upsert_conn, executed_statements):
-    """Verify a keyless table degrades to a plain INSERT, not a broken upsert.
+    """Verify a keyless table degrades to a plain insert.
 
-    Mutation: replacing `return self.insert_rows(table, rows)` at the keyless
-    fallback in upsert_rows (connection.py:742) with `return 0`, silently
-    dropping the rows instead of inserting them.
-    Oracle: hand-written INSERT literal, which uses the comma spacing of
-    insert_rows rather than build_upsert_sql.
+    Mutation: the keyless insert_rows fallback replaced by `return 0`.
+    Oracle: hand-written insert literal with insert_rows' comma spacing.
     """
     upsert_conn.upsert_rows('eventlog', ({'a': '1', 'b': '2'},),
                             update_cols_always=['b'])
 
     sql, params, _ = executed_statements[-1]
-    assert sql == 'INSERT INTO "eventlog" ("a","b") VALUES (?, ?)'
+    assert sql == 'insert into "eventlog" ("a","b") values (?, ?)'
     assert params == [['1', '2']]
 
 
 def test_upsert_rows_constraint_name_uses_resolved_expression(constraint_lookups):
     """Verify the resolved constraint expression becomes the conflict target.
 
-    Mutation: `and (dialect != 'postgresql' or not constraint_name)` reduced
-    so a named constraint no longer excuses an absent key column, which would
-    fall back to a plain INSERT.
-    Oracle: hand-written literal plus a spy recording the constraint lookup;
-    the primary key 'id' is deliberately absent from the rows.
+    Mutation: `and not constraint_name` dropped from the insert fallback guard.
+    Oracle: hand-written literal and a lookup spy; the rows omit key 'id'.
     """
     cn = StubConnection('postgresql', ['id', 'name', 'email'], ['id'])
     cn.upsert_rows('users', ({'name': 'a', 'email': 'e'},),
@@ -704,9 +629,9 @@ def test_upsert_rows_constraint_name_uses_resolved_expression(constraint_lookups
 
     sql, params, _ = cn.recorder.calls[-1]
     expected = (
-        'INSERT INTO "users" ("name", "email") VALUES (%s, %s) '
-        'ON CONFLICT (lower("name")) WHERE "email" IS NOT NULL '
-        'DO UPDATE SET "email" = excluded."email"'
+        'insert into "users" ("name", "email") values (%s, %s) '
+        'on conflict (lower("name")) WHERE "email" IS NOT NULL '
+        'do update set "email" = excluded."email"'
         )
     assert sql == expected
     assert params == [['a', 'e']]
@@ -715,13 +640,10 @@ def test_upsert_rows_constraint_name_uses_resolved_expression(constraint_lookups
 
 def test_upsert_rows_constraint_name_permits_key_columns_in_update(
         constraint_lookups):
-    """Verify a named constraint keeps primary-key columns in the SET list.
+    """Verify a named constraint keeps primary-key columns in the set list.
 
-    Mutation: dropping `constraint_name is not None or` from the
-    update_cols_always filter in upsert_rows, which would silently discard
-    the 'id' assignment.
-    Oracle: hand-written literal; the same call without constraint_name drops
-    'id', so the two branches disagree.
+    Mutation: key_cols_lower subtracted from updatable_lower in every case.
+    Oracle: hand-written literal keeping the 'id' assignment.
     """
     cn = StubConnection('postgresql', ['id', 'name', 'email'], ['id'])
     cn.upsert_rows('users', ({'id': 1, 'name': 'a', 'email': 'e'},),
@@ -730,20 +652,18 @@ def test_upsert_rows_constraint_name_permits_key_columns_in_update(
 
     sql, _, _ = cn.recorder.calls[-1]
     expected = (
-        'INSERT INTO "users" ("id", "name", "email") VALUES (%s, %s, %s) '
-        'ON CONFLICT (lower("name")) WHERE "email" IS NOT NULL '
-        'DO UPDATE SET "id" = excluded."id", "email" = excluded."email"'
+        'insert into "users" ("id", "name", "email") values (%s, %s, %s) '
+        'on conflict (lower("name")) WHERE "email" IS NOT NULL '
+        'do update set "id" = excluded."id", "email" = excluded."email"'
         )
     assert sql == expected
 
 
 def test_upsert_rows_returns_cursor_rowcount():
-    """Verify the return value is the cursor rowcount, not the input length.
+    """Verify the return value is the cursor rowcount.
 
-    Mutation: `total_affected = rc if isinstance(rc, int) else 0` replaced by
-    `len(rows)` in upsert_rows.
-    Oracle: a stub cursor reporting 7 for 3 supplied rows, so the two
-    candidate answers cannot coincide.
+    Mutation: total_affected replaced by len(rows) in upsert_rows.
+    Oracle: a stub cursor reporting 7 for 3 rows.
     """
     cn = StubConnection('postgresql', ['id', 'v'], ['id'], rowcount=7)
     rows = tuple({'id': i, 'v': i} for i in range(3))
@@ -752,10 +672,9 @@ def test_upsert_rows_returns_cursor_rowcount():
 
 
 def test_upsert_rows_forwards_batch_size():
-    """Verify batch_size reaches the cursor rather than the 500 default.
+    """Verify batch_size reaches the cursor.
 
-    Mutation: dropping the batch_size argument from the
-    `cursor.executemany(sql, params, batch_size)` call in upsert_rows.
+    Mutation: batch_size dropped from the executemany call in upsert_rows.
     Oracle: a stub cursor recording the third positional argument.
     """
     cn = StubConnection('postgresql', ['id', 'v'], ['id'])
@@ -766,11 +685,10 @@ def test_upsert_rows_forwards_batch_size():
 
 
 def test_upsert_rows_reset_sequence_runs_only_when_requested():
-    """Verify the sequence reset fires on True and stays silent on False.
+    """Verify the sequence reset runs on True only.
 
     Mutation: `if reset_sequence:` inverted in upsert_rows.
-    Oracle: a spy recording reset_table_sequence calls across both flag
-    values.
+    Oracle: a spy recording reset_table_sequence calls for both flag values.
     """
     quiet = StubConnection('postgresql', ['id', 'v'], ['id'])
     quiet.upsert_rows('t', ({'id': 1, 'v': 2},), update_cols_always=['v'])
@@ -785,9 +703,8 @@ def test_upsert_rows_reset_sequence_runs_only_when_requested():
 def test_upsert_rows_rejects_constraint_name_with_conflict_columns():
     """Verify the two conflict-target arguments cannot both be supplied.
 
-    Mutation: dropping the mutual-exclusion check in upsert_rows, which would
-    let conflict_columns silently lose to constraint_name.
-    Oracle: the raised exception type and message, with no statement issued.
+    Mutation: the mutual-exclusion check dropped from upsert_rows.
+    Oracle: the exception type and message, with no statement issued.
     """
     cn = StubConnection('postgresql', ['id', 'name'], ['id'])
     with pytest.raises(ValidationError, match='mutually exclusive'):
@@ -798,12 +715,10 @@ def test_upsert_rows_rejects_constraint_name_with_conflict_columns():
 
 
 def test_upsert_rows_unknown_columns_only_issues_no_statement():
-    """Verify rows with all-unknown keys, or empty input, produce no statement.
+    """Verify all-unknown keys or empty input issue no statement.
 
-    Mutation: `if not columns:` in upsert_rows changed to test table_columns
-    instead, which would emit INSERT INTO "t" () VALUES ().
-    Oracle: a stub cursor recording every call; the list stays empty for both
-    an all-unknown-key row and an empty row tuple.
+    Mutation: `if not columns:` changed to test table_columns.
+    Oracle: a recording stub cursor stays empty for both inputs.
     """
     cn = StubConnection('postgresql', ['id', 'v'], ['id'])
 
@@ -815,12 +730,10 @@ def test_upsert_rows_unknown_columns_only_issues_no_statement():
 
 
 def test_upsert_rows_missing_key_binds_null_parameter():
-    """Verify a row omitting a column binds NULL instead of raising KeyError.
+    """Verify a row omitting a column binds null and raises no KeyError.
 
-    Mutation: `row.get(col)` restored to `row[col]` in the upsert_rows
-    parameter build, which raises KeyError on the row that omits 'email'.
-    Oracle: hand-written parameter lists, both three long, with None filling
-    the gap in the second row.
+    Mutation: row.get(col) changed to row[col] in upsert_rows.
+    Oracle: hand-written parameter lists with None filling the gap.
     """
     cn = StubConnection('postgresql', ['id', 'name', 'email'], ['id'])
     rows = (
@@ -833,8 +746,8 @@ def test_upsert_rows_missing_key_binds_null_parameter():
 
     sql, params, _ = cn.recorder.calls[-1]
     expected = (
-        'INSERT INTO "t" ("id", "name", "email") VALUES (%s, %s, %s) '
-        'ON CONFLICT ("id") DO UPDATE SET '
+        'insert into "t" ("id", "name", "email") values (%s, %s, %s) '
+        'on conflict ("id") do update set '
         '"name" = excluded."name", "email" = excluded."email"'
         )
     assert sql == expected
@@ -842,37 +755,11 @@ def test_upsert_rows_missing_key_binds_null_parameter():
     assert affected == 2
 
 
-def test_upsert_rows_missing_key_stores_null(upsert_conn):
-    """Verify the column one row omits reaches the table as NULL.
-
-    Mutation: `row.get(col)` restored to `row[col]` in the upsert_rows
-    parameter build, so the row omitting 'note' raises KeyError and neither
-    row is written.
-    Oracle: hand-computed table state read back in sku order - notes
-    ['n', None] against quantities [1, 2].
-    """
-    upsert_conn.upsert_rows('inventory', (
-        {'sku': 'A', 'warehouse': 'W', 'qty': 1, 'note': 'n'},
-        {'sku': 'B', 'warehouse': 'W', 'qty': 2},
-        ), update_cols_always=['qty'])
-
-    notes = db.select_column(
-        upsert_conn,
-        'select note from inventory order by sku')
-    quantities = db.select_column(
-        upsert_conn,
-        'select qty from inventory order by sku')
-    assert notes == ['n', None]
-    assert quantities == [1, 2]
-
-
 def test_insert_rows_column_and_parameter_order():
     """Verify insert_rows emits one placeholder per column, values aligned.
 
-    Mutation: `make_placeholders(len(cols), self.dialect)` taking len(rows)
-    instead of len(cols) in insert_rows.
-    Oracle: hand-written literal with three columns and two rows, so the two
-    lengths differ.
+    Mutation: make_placeholders given len(rows) in place of len(cols).
+    Oracle: hand-written literal with three columns and two rows.
     """
     cn = StubConnection('postgresql', ['id', 'name', 'email'], ['id'])
     rows = (
@@ -882,7 +769,7 @@ def test_insert_rows_column_and_parameter_order():
     cn.insert_rows('users', rows)
 
     sql, params, _ = cn.recorder.calls[-1]
-    assert sql == 'INSERT INTO "users" ("id","name","email") VALUES (%s, %s, %s)'
+    assert sql == 'insert into "users" ("id","name","email") values (%s, %s, %s)'
     assert params == [[1, 'a', 'x'], [2, 'b', 'y']]
 
 
@@ -893,25 +780,22 @@ def test_insert_rows_column_and_parameter_order():
 def test_insert_row_placeholder_style_per_dialect(dialect, marker):
     """Verify insert_row takes its placeholder marker from the connection.
 
-    Mutation: hardcoding 'postgresql' in the make_placeholders call inside
-    insert_row.
+    Mutation: 'postgresql' hardcoded in insert_row's make_placeholders call.
     Oracle: hand-written literal per dialect.
     """
     cn = StubConnection(dialect, ['id', 'name'], ['id'])
     cn.insert_row('users', ['id', 'name'], [1, 'a'])
 
     sql, args = cn.executed[-1]
-    assert sql == f'INSERT INTO "users" ("id", "name") VALUES ({marker}, {marker})'
+    assert sql == f'insert into "users" ("id", "name") values ({marker}, {marker})'
     assert args == (1, 'a')
 
 
 def test_update_row_sets_data_before_keys():
-    """Verify the SET list, the AND-joined WHERE, and the value order.
+    """Verify the set list, the and-joined where, and the value order.
 
-    Mutation: `values = tuple(datavalues) + tuple(keyvalues)` reversed in
-    update_row, or the WHERE clause joined with ' or '.
-    Oracle: hand-written literal plus a hand-ordered argument tuple; two key
-    fields and two data fields keep the halves distinguishable.
+    Mutation: the value tuple order reversed, or the where joined by ' or '.
+    Oracle: hand-written literal and argument tuple; two keys, two data fields.
     """
     cn = StubConnection('postgresql', ['a', 'b', 'c', 'd'], ['a', 'b'])
     cn.update_row('t', ['a', 'b'], [1, 2], ['c', 'd'], [3, 4])
@@ -924,9 +808,8 @@ def test_update_row_sets_data_before_keys():
 def test_update_row_rejects_overlapping_and_mismatched_fields():
     """Verify update_row refuses a key field in datafields or ragged inputs.
 
-    Mutation: dropping the `kf in datafields` check in update_row, which would
-    emit an UPDATE that rewrites its own WHERE column.
-    Oracle: three rejected calls; each raises before any statement is sent.
+    Mutation: the `kf in datafields` check dropped from update_row.
+    Oracle: three rejected calls, none sending a statement.
     """
     cn = StubConnection('postgresql', ['a', 'b'], ['a'])
 
