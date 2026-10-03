@@ -133,23 +133,28 @@ def create_url_from_options(options: DatabaseOptions,
     Notes
     -----
     - The strategies percent-encode the database name so a '?' or '#' in
-      it cannot inject libpq query parameters. make_url unquotes only
-      username and password, so the raw name is put back here; without
+      it cannot inject libpq query parameters. The raw name is put back
+      after make_url, which in SQLAlchemy 2.0 leaves it encoded; without
       that, a database called 'my db' would be opened as 'my%20db'.
-    - The SQLite file: URI an open_mode builds is left as built. Its
-      path is percent-encoded on purpose, and the raw name would turn
-      the URI back into a plain filename.
+    - For a SQLite open_mode, url.database is the percent-encoded file:
+      URI the strategy built. The raw name would turn the URI back into
+      a plain filename.
     """
     strategy = get_strategy(options.drivername)
     url_string = strategy.build_connection_url(options)
-    keeps_uri = options.drivername == 'sqlite' and options.open_mode is not None
+    if options.drivername == 'sqlite' and options.open_mode is not None:
+        # make_url in SQLAlchemy 2.1 unquotes the database part, and
+        # SQLite would then read '%20' as a space and end the path at
+        # a '#' or '?'.
+        database = url_string.removeprefix('sqlite:///').partition('?')[0]
+    else:
+        database = options.database
 
     if url_creator is not None:
         # For testing - parse and recreate using the provided factory
         parsed = sa.make_url(url_string)
-        if (options.database and not keeps_uri
-                and parsed.database != options.database):
-            parsed = parsed.set(database=options.database)
+        if database and parsed.database != database:
+            parsed = parsed.set(database=database)
         return url_creator(
             drivername=parsed.drivername,
             username=parsed.username,
@@ -161,9 +166,8 @@ def create_url_from_options(options: DatabaseOptions,
         )
 
     url = sa.make_url(url_string)
-    if (options.database and not keeps_uri
-            and url.database != options.database):
-        url = url.set(database=options.database)
+    if database and url.database != database:
+        url = url.set(database=database)
     return url
 
 
