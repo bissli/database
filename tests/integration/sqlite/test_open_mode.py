@@ -61,6 +61,24 @@ def test_reader_opens_a_path_holding_uri_delimiters(tmp_path, open_mode):
         cn.close()
 
 
+@pytest.mark.parametrize('open_mode', ['ro', 'immutable'])
+def test_reader_opens_a_path_holding_a_percent_escape(tmp_path, open_mode):
+    """Verify each open mode reads a file whose directory name holds '%20'.
+
+    Mutation: create_url_from_options keeping the file: URI as make_url
+        returns it, which SQLAlchemy 2.1 unquotes, so SQLite opens the
+        missing 'p q' directory in place of 'p%20q'.
+    Oracle: the one row written by plain sqlite3 before the connect.
+    """
+    db_file = _delete_mode_file(tmp_path / 'p%20q')
+
+    cn = db.connect(_options(db_file, open_mode), role='reader')
+    try:
+        assert db.select_scalar(cn, 'select count(*) from t') == 1
+    finally:
+        cn.close()
+
+
 def test_immutable_reader_reads_through_an_exclusive_lock(tmp_path):
     """Verify open_mode='immutable' reads while another connection locks.
 
