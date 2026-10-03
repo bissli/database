@@ -1150,6 +1150,14 @@ db.vacuum_table(cn)
 # Get table information
 columns = db.get_table_columns(cn, 'users')
 
+# Schema introspection (SQLite only; PostgreSQL raises NotImplementedError)
+cn.list_tables()                 # ['orders', 'users'], internal tables excluded
+cn.table_exists('users')         # True
+cn.describe_columns('users')     # [ColumnInfo(name='id', type='INTEGER',
+                                 #   notnull=False, default=None, primary_key=True), ...]
+cn.get_unique_indexes('users')   # [['email']], primary-key indexes included
+cn.table_ddl('users')            # 'CREATE TABLE users (...)'
+
 # Reset AUTOINCREMENT sequence
 db.reset_table_sequence(cn, 'users')
 ```

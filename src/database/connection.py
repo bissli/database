@@ -34,7 +34,7 @@ from database.sql import _split_qualified_identifier, make_placeholders
 from database.sql import prepare_query, quote_identifier
 from database.strategy import get_db_strategy, get_strategy
 from database.transaction import Transaction
-from database.types import RowAdapter, null_special_string
+from database.types import ColumnInfo, RowAdapter, null_special_string
 from database.utils import ensure_commit, get_dialect_name
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
@@ -666,6 +666,41 @@ class ConnectionWrapper:
         """Get all column names for a table ordered by their position.
         """
         return self.get_table_columns(table, bypass_cache=bypass_cache)
+
+    def list_tables(self) -> list[str]:
+        """User table names, ordered by name.
+        """
+        return get_db_strategy(self).list_tables(self)
+
+    def table_exists(self, table: str) -> bool:
+        """True when a user table of that name exists.
+        """
+        return get_db_strategy(self).table_exists(self, table)
+
+    def describe_columns(self, table: str) -> list[ColumnInfo]:
+        """Each column of a table as declared, in declaration order.
+
+        Raises
+        ------
+        ValidationError
+            When the table does not exist.
+        """
+        return get_db_strategy(self).describe_columns(self, table)
+
+    def get_unique_indexes(self, table: str) -> list[list[str | None]]:
+        """Columns of each unique index on a table, primary key included.
+        """
+        return get_db_strategy(self).get_unique_indexes(self, table)
+
+    def table_ddl(self, table: str) -> str:
+        """CREATE statement text of a table.
+
+        Raises
+        ------
+        ValidationError
+            When the table does not exist.
+        """
+        return get_db_strategy(self).table_ddl(self, table)
 
     def vacuum_table(self, table: str) -> None:
         """Optimize a table by reclaiming space.

@@ -21,7 +21,8 @@ from database.exceptions import QueryError, ValidationError
 from database.sql import make_placeholders, quote_identifier
 from database.sql import standardize_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
-from database.types import convert_date, convert_datetime, sqlite_types
+from database.types import ColumnInfo, convert_date, convert_datetime
+from database.types import sqlite_types
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -426,6 +427,135 @@ ORDER BY cid
                 unique_columns.append(cols)
 
         return unique_columns
+
+    def list_tables(self, cn: 'ConnectionWrapper') -> list[str]:
+        """User table names in the main database, ordered by name.
+
+        Returns
+        -------
+        list[str]
+            Every table except SQLite's internal 'sqlite_' tables. Views
+            and temporary tables are left out.
+        """
+        # GLOB, because LIKE reads the '_' in 'sqlite_' as a wildcard.
+        sql = """
+select name from sqlite_master
+where type = 'table' and name not glob 'sqlite_*'
+order by name
+"""
+        return self._select_column_raw(cn, sql)
+
+    def table_exists(self, cn: 'ConnectionWrapper', table: str) -> bool:
+        """True when the main database holds a table of that name.
+
+        Parameters
+        ----------
+        table : str
+            Table name, matched without regard to ASCII case, as SQLite
+            matches identifiers. A view does not count.
+        """
+        sql = """
+select count(*) from sqlite_master
+where type = 'table' and name = ? collate nocase
+"""
+        return bool(self._select_column_raw(cn, sql, (table,))[0])
+
+    def describe_columns(self, cn: 'ConnectionWrapper',
+                         table: str) -> list[ColumnInfo]:
+        """Each column of a table as declared, in declaration order.
+
+        Parameters
+        ----------
+        table : str
+            Table or view name in the main database, matched without regard
+            to ASCII case.
+
+        Returns
+        -------
+        list[ColumnInfo]
+            One record per column, read from pragma_table_info, which
+            leaves out generated columns.
+
+        Raises
+        ------
+        ValidationError
+            When no table or view has that name.
+        """
+        sql = """
+select name, type, "notnull", dflt_value, pk
+from pragma_table_info(?, 'main')
+order by cid
+"""
+        rows = self._select_raw(cn, sql, (table,))
+        if not rows:
+            raise ValidationError(f'No table or view named {table}')
+        return [
+            ColumnInfo(
+                name=row['name'],
+                type=row['type'],
+                notnull=bool(row['notnull']),
+                default=row['dflt_value'],
+                primary_key=bool(row['pk']))
+            for row in rows
+            ]
+
+    def get_unique_indexes(self, cn: 'ConnectionWrapper',
+                           table: str) -> list[list[str | None]]:
+        """Columns of each unique index on a table, ordered by index name.
+
+        Parameters
+        ----------
+        table : str
+            Table name in the main database, matched without regard to
+            ASCII case. A missing table has no indexes and returns [].
+
+        Returns
+        -------
+        list[list[str | None]]
+            Each index's columns in index order, primary-key and partial
+            indexes included. An expression column appears as None. An
+            INTEGER PRIMARY KEY is the rowid and has no index, so it does
+            not appear.
+        """
+        sql = """
+select il.name as index_name, ii.name as column_name
+from pragma_index_list(?, 'main') as il
+join pragma_index_info(il.name, 'main') as ii
+where il."unique" = 1
+order by il.name, ii.seqno
+"""
+        columns_by_index: dict[str, list[str | None]] = {}
+        for row in self._select_raw(cn, sql, (table,)):
+            columns_by_index.setdefault(row['index_name'], []).append(row['column_name'])
+        return list(columns_by_index.values())
+
+    def table_ddl(self, cn: 'ConnectionWrapper', table: str) -> str:
+        """CREATE TABLE statement text as SQLite stored it.
+
+        Parameters
+        ----------
+        table : str
+            Table name, matched without regard to ASCII case.
+
+        Returns
+        -------
+        str
+            The statement as written, with any later ALTER TABLE applied.
+            It leaves out the table's indexes and triggers.
+
+        Raises
+        ------
+        ValidationError
+            When the main database holds no table of that name.
+        """
+        sql = """
+select sql from sqlite_master
+where type = 'table' and name = ? collate nocase
+"""
+        ddl = self._select_column_raw(cn, sql, (table,))
+        if not ddl:
+            raise ValidationError(f'No table named {table}')
+        return ddl[0]
 
     def build_upsert_sql(
         self,

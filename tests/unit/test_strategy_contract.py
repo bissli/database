@@ -6,6 +6,7 @@ cost a strategy that ignores it nothing, which means staying off the
 abstract set.
 """
 import pytest
+from database.strategy import get_strategy
 from database.strategy.base import DatabaseStrategy
 
 
@@ -59,3 +60,24 @@ def test_the_unimplemented_hook_refuses_a_reader():
 
     with pytest.raises(NotImplementedError, match='LegacyStrategy'):
         strategy.set_session_readonly(object())
+
+
+@pytest.mark.parametrize(('method', 'args'), [
+    ('list_tables', ()),
+    ('table_exists', ('t',)),
+    ('describe_columns', ('t',)),
+    ('get_unique_indexes', ('t',)),
+    ('table_ddl', ('t',)),
+    ])
+def test_schema_introspection_refuses_on_postgres(method, args):
+    """Verify a dialect without schema introspection raises.
+
+    Mutation: a base body returning [] or False, which tells a PostgreSQL
+        caller its table has no columns or does not exist.
+    Oracle: NotImplementedError naming PostgresStrategy, raised before
+        the method touches the connection it is handed.
+    """
+    strategy = get_strategy('postgresql')
+
+    with pytest.raises(NotImplementedError, match='PostgresStrategy'):
+        getattr(strategy, method)(None, *args)

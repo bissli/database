@@ -20,7 +20,7 @@ from database.exceptions import TypeConversionError, UniqueViolation
 from database.exceptions import ValidationError
 from database.options import DatabaseOptions
 from database.transaction import Transaction as transaction
-from database.types import Column, get_adapter_registry
+from database.types import Column, ColumnInfo, get_adapter_registry
 
 adapter_registry = get_adapter_registry()
 
@@ -190,6 +190,7 @@ __all__ = [
     'cluster_table',
     'copy_from',
     'Column',
+    'ColumnInfo',
     'IntegrityError',
     'ProgrammingError',
     'OperationalError',

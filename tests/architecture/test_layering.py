@@ -126,6 +126,7 @@ def test_all_registered_strategies_are_concrete():
 # fail to force a deliberate review of the API change.
 _EXPECTED_ALL: frozenset[str] = frozenset({
     'Column',
+    'ColumnInfo',
     'ConnectionFailure',
     'ConnectionWrapper',
     'DatabaseError',

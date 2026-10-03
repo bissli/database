@@ -17,6 +17,7 @@ from database.cache import cacheable_strategy
 from database.exceptions import ValidationError
 from database.sql import quote_identifier as sql_quote_identifier
 from database.sql import raise_on_readonly_disarm
+from database.types import ColumnInfo
 
 if TYPE_CHECKING:
     from database.connection import ConnectionWrapper
@@ -302,6 +303,58 @@ class DatabaseStrategy(ABC):
         raise NotImplementedError(
             f'{type(self).__name__} has no read-only session setting, so '
             f"role='reader' is not available for this dialect")
+
+    def list_tables(self, cn: 'ConnectionWrapper') -> list[str]:
+        """User table names, ordered by name.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot list tables')
+
+    def table_exists(self, cn: 'ConnectionWrapper', table: str) -> bool:
+        """True when a user table of that name exists.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot test a table')
+
+    def describe_columns(self, cn: 'ConnectionWrapper',
+                         table: str) -> list[ColumnInfo]:
+        """Each column of a table, in declaration order.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot describe a table')
+
+    def get_unique_indexes(self, cn: 'ConnectionWrapper',
+                           table: str) -> list[list[str | None]]:
+        """Columns of each unique index on a table, in index order.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot list indexes')
+
+    def table_ddl(self, cn: 'ConnectionWrapper', table: str) -> str:
+        """CREATE statement text of a table.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot read table DDL')
 
     @property
     @abstractmethod

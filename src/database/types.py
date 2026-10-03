@@ -4,6 +4,7 @@ Consolidated type handling for database operations.
 This module provides:
 - TypeConverter: Convert Python values to database-compatible formats
 - Column: Column metadata from cursor descriptions
+- ColumnInfo: A table column as the schema declares it
 - resolve_type: Resolve database type codes to Python types
 - Row adapters: Convert database rows to dictionaries
 """
@@ -12,6 +13,7 @@ import logging
 import math
 import sqlite3
 import sys
+from dataclasses import dataclass
 from typing import Any, Self, TypeVar
 
 import dateutil.parser
@@ -434,6 +436,31 @@ def resolve_type(
             return float
 
     return str
+
+
+@dataclass(frozen=True)
+class ColumnInfo:
+    """A table column as the schema declares it.
+
+    Attributes
+    ----------
+    name : str
+        Column name.
+    type : str
+        Declared type text as the database reports it, which may differ in
+        case from the DDL. Empty when the column declares no type.
+    notnull : bool
+        True when the database reports the column NOT NULL.
+    default : str or None
+        Default as SQL expression text ("'x'" for a string), or None.
+    primary_key : bool
+        True when the column is part of the primary key.
+    """
+    name: str
+    type: str
+    notnull: bool
+    default: str | None
+    primary_key: bool
 
 
 # Column - Metadata from cursor descriptions
