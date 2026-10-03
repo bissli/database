@@ -1027,7 +1027,8 @@ class TestConcreteStrategyMethodsAreCached:
 
         assert spy.call_count == 1
         sql = spy.call_args.args[1]
-        assert 'pragma_table_info("foo")' in sql
+        assert 'pragma_table_info(?, ?)' in sql
+        assert spy.call_args.args[2] == ('foo', None)
         assert 'l.pk <> 0' in sql
 
     def test_sqlite_get_columns_caches_and_lists_every_column(
@@ -1049,7 +1050,8 @@ class TestConcreteStrategyMethodsAreCached:
 
         assert spy.call_count == 1
         sql = spy.call_args.args[1]
-        assert 'pragma_table_info("foo")' in sql
+        assert 'pragma_table_info(?, ?)' in sql
+        assert spy.call_args.args[2] == ('foo', None)
         assert 'pk' not in sql
 
     def test_sqlite_sequence_columns_reuse_the_primary_key_lookup(

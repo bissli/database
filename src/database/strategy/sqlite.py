@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, TextIO
 
 from database.cache import cacheable_strategy
 from database.exceptions import QueryError, ValidationError
-from database.sql import make_placeholders, quote_identifier
-from database.sql import standardize_placeholders
+from database.sql import _split_qualified_identifier, make_placeholders
+from database.sql import quote_identifier, standardize_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
 from database.types import ColumnInfo, convert_date, convert_datetime
 from database.types import sqlite_types
@@ -41,13 +41,32 @@ def _raw_sqlite(conn: Any) -> Any:
     return conn
 
 
+def _pragma_target(table: str) -> tuple[str, str | None]:
+    """Name and schema to bind into a pragma table-valued function.
+
+    Parameters
+    ----------
+    table : str
+        Table or index name in any form quote_identifier accepts: 't',
+        '"t"', 'main.t'.
+
+    Returns
+    -------
+    tuple[str, str | None]
+        The unquoted name, and its schema or None. None searches every
+        database, temp first.
+    """
+    parts = _split_qualified_identifier(table)
+    return parts[-1], (parts[-2] if len(parts) >= 2 else None)
+
+
 def _is_memory_db(sqlite_conn: Any) -> bool:
     """Return True when the 'main' database is backed by ':memory:'.
 
     PRAGMA database_list yields (seq, name, file); the file path is
     empty for in-memory databases.
     """
-    cursor = sqlite_conn.execute('PRAGMA database_list')
+    cursor = sqlite_conn.execute('pragma database_list')
     for row in cursor.fetchall():
         if row[1] == 'main':
             return not row[2]
@@ -153,7 +172,7 @@ class SQLiteStrategy(DatabaseStrategy):
             lambda value: value.isoformat(' '))
 
         # Converters (SQLite -> Python)
-        connection.execute('SELECT 1')
+        connection.execute('select 1')
         sqlite3.register_converter('date', convert_date)
         sqlite3.register_converter('datetime', convert_datetime)
         sqlite3.register_converter('timestamp', convert_datetime)
@@ -208,14 +227,14 @@ class SQLiteStrategy(DatabaseStrategy):
     def vacuum_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Optimize a table with VACUUM.
         """
-        self._execute_raw(cn, 'VACUUM')
+        self._execute_raw(cn, 'vacuum')
         logger.info('Executed VACUUM on entire SQLite database (table-specific vacuum not supported)')
 
     def reindex_table(self, cn: 'ConnectionWrapper', table: str) -> None:
         """Rebuild indexes for a table.
         """
         quoted_table = self.quote_identifier(table)
-        self._execute_raw(cn, f'REINDEX {quoted_table}')
+        self._execute_raw(cn, f'reindex {quoted_table}')
 
     def cluster_table(self, cn: 'ConnectionWrapper', table: str,
                       index: str | None = None) -> None:
@@ -242,22 +261,20 @@ class SQLiteStrategy(DatabaseStrategy):
                          bypass_cache: bool = False) -> list[str]:
         """Get primary key columns for a table.
         """
-        quoted_table = quote_identifier(table, 'sqlite')
-        sql = f"""
-select l.name as column from pragma_table_info({quoted_table}) as l where l.pk <> 0
+        sql = """
+select l.name as column from pragma_table_info(?, ?) as l where l.pk <> 0
 """
-        return self._select_column_raw(cn, sql)
+        return self._select_column_raw(cn, sql, _pragma_target(table))
 
     @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
                     bypass_cache: bool = False) -> list[str]:
         """Get all columns for a table.
         """
-        quoted_table = quote_identifier(table, 'sqlite')
-        sql = f"""
-select name as column from pragma_table_info({quoted_table})
+        sql = """
+select name as column from pragma_table_info(?, ?)
     """
-        return self._select_column_raw(cn, sql)
+        return self._select_column_raw(cn, sql, _pragma_target(table))
 
     @cacheable_strategy('sequence_columns', ttl=300, maxsize=50)
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
@@ -281,8 +298,8 @@ select name as column from pragma_table_info({quoted_table})
           them too.
         """
         sqlite_conn = _raw_sqlite(conn)
-        sqlite_conn.execute('PRAGMA foreign_keys = ON')
-        sqlite_conn.execute('PRAGMA busy_timeout = 5000')
+        sqlite_conn.execute('pragma foreign_keys = on')
+        sqlite_conn.execute('pragma busy_timeout = 5000')
         sqlite_conn.row_factory = sqlite3.Row
         self.enable_autocommit(sqlite_conn)
 
@@ -319,9 +336,9 @@ select name as column from pragma_table_info({quoted_table})
         sqlite_conn = _raw_sqlite(conn)
         if _is_memory_db(sqlite_conn):
             return
-        synchronous = 'NORMAL' if options.journal_mode == 'wal' else 'FULL'
-        sqlite_conn.execute(f'PRAGMA journal_mode = {options.journal_mode}')
-        sqlite_conn.execute(f'PRAGMA synchronous = {synchronous}')
+        synchronous = 'normal' if options.journal_mode == 'wal' else 'full'
+        sqlite_conn.execute(f'pragma journal_mode = {options.journal_mode}')
+        sqlite_conn.execute(f'pragma synchronous = {synchronous}')
 
     def enable_autocommit(self, raw_conn: Any) -> None:
         """Enable auto-commit mode for SQLite.
@@ -348,7 +365,7 @@ select name as column from pragma_table_info({quoted_table})
         - It does not cover journal_mode, which is why
           configure_writer_connection holds that pragma instead.
         """
-        _raw_sqlite(conn).execute('PRAGMA query_only = ON')
+        _raw_sqlite(conn).execute('pragma query_only = on')
 
     def get_placeholder_style(self) -> str:
         """Return SQLite's placeholder marker.
@@ -366,7 +383,7 @@ select name as column from pragma_table_info({quoted_table})
         """
         logger.warning("SQLite doesn't fully support constraint definition retrieval")
         quoted_constraint = quote_identifier(constraint_name, 'sqlite')
-        sql = f'PRAGMA index_info({quoted_constraint})'
+        sql = f'pragma index_info({quoted_constraint})'
         result = self._select_raw(cn, sql)
 
         if not result:
@@ -375,7 +392,7 @@ select name as column from pragma_table_info({quoted_table})
         columns = [row['name'] for row in result]
         return {
             'name': constraint_name,
-            'definition': f"UNIQUE ({', '.join(columns)})",
+            'definition': f"unique ({', '.join(columns)})",
             'columns': columns,
         }
 
@@ -383,23 +400,21 @@ select name as column from pragma_table_info({quoted_table})
                             bypass_cache: bool = False) -> list[str]:
         """Get columns suitable for general data display.
         """
-        quoted_table = quote_identifier(table, 'sqlite')
-        sql = f"""
-SELECT name FROM pragma_table_info({quoted_table})
-ORDER BY cid
+        sql = """
+select name from pragma_table_info(?, ?)
+order by cid
 """
-        return self._select_column_raw(cn, sql)
+        return self._select_column_raw(cn, sql, _pragma_target(table))
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
         """Get all column names for a table ordered by their position.
         """
-        quoted_table = quote_identifier(table, 'sqlite')
-        sql = f"""
-SELECT name FROM pragma_table_info({quoted_table})
-ORDER BY cid
+        sql = """
+select name from pragma_table_info(?, ?)
+order by cid
 """
-        return self._select_column_raw(cn, sql)
+        return self._select_column_raw(cn, sql, _pragma_target(table))
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
@@ -411,17 +426,16 @@ ORDER BY cid
                            bypass_cache: bool = False) -> list[list[str]]:
         """Get columns that have UNIQUE constraints (excluding primary key).
         """
-        quoted_table = quote_identifier(table, 'sqlite')
-        sql = f'SELECT name FROM pragma_index_list({quoted_table}) WHERE "unique" = 1'
-        index_names = self._select_column_raw(cn, sql)
+        name, schema = _pragma_target(table)
+        sql = 'select name from pragma_index_list(?, ?) where "unique" = 1'
+        index_names = self._select_column_raw(cn, sql, (name, schema))
 
         unique_columns = []
         primary_keys = set(self.get_primary_keys(cn, table, bypass_cache=bypass_cache))
 
         for idx_name in index_names:
-            quoted_idx = quote_identifier(idx_name, 'sqlite')
-            col_sql = f'SELECT name FROM pragma_index_info({quoted_idx})'
-            cols = self._select_column_raw(cn, col_sql)
+            col_sql = 'select name from pragma_index_info(?, ?)'
+            cols = self._select_column_raw(cn, col_sql, (idx_name, schema))
 
             if cols and set(cols) != primary_keys:
                 unique_columns.append(cols)
@@ -574,13 +588,13 @@ where type = 'table' and name = ? collate nocase
         quoted_columns = [self.quote_identifier(col) for col in columns]
         placeholders = make_placeholders(len(columns), 'sqlite')
 
-        insert_sql = f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) VALUES ({placeholders})"
+        insert_sql = f"insert into {quoted_table} ({', '.join(quoted_columns)}) values ({placeholders})"
 
         quoted_keys = [self.quote_identifier(k) for k in key_columns]
-        conflict_sql = f"ON CONFLICT ({', '.join(quoted_keys)})"
+        conflict_sql = f"on conflict ({', '.join(quoted_keys)})"
 
         if not (update_cols_always or update_cols_ifnull):
-            return f'{insert_sql} {conflict_sql} DO NOTHING'
+            return f'{insert_sql} {conflict_sql} do nothing'
 
         update_exprs = self._build_update_exprs(table, update_cols_always, update_cols_ifnull)
-        return f"{insert_sql} {conflict_sql} DO UPDATE SET {', '.join(update_exprs)}"
+        return f"{insert_sql} {conflict_sql} do update set {', '.join(update_exprs)}"

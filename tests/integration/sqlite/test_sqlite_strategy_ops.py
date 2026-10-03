@@ -128,5 +128,35 @@ def test_sqlite_copy_from_returns_zero(sqlite_strategy_conn, caplog):
     assert 'COPY operation not supported in SQLite' in caplog.text
 
 
+@pytest.mark.parametrize(('table', 'spelling'), [
+    ('type', 'type'),
+    ('seq', 'seq'),
+    ('type', '"type"'),
+    ('type', 'main.type'),
+    ('seq', 'main."seq"'),
+    ])
+def test_sqlite_metadata_reads_a_table_named_like_a_pragma_column(
+        sqlite_strategy_conn, table, spelling):
+    """Verify metadata methods read a table named after a pragma column.
+
+    Mutation: passing quote_identifier(table) or quote_identifier(index)
+        into a pragma in place of a bound name, which SQLite reads as the
+        pragma's own column; or binding the spelling unsplit, which looks
+        for a table named '"type"' or 'main.type'.
+    Oracle: hand-written columns of a two-column table whose unique index
+        is named after a pragma_index_info column.
+    """
+    conn = sqlite_strategy_conn
+    db.execute(conn, f'create table "{table}" (id integer primary key, z text)')
+    db.execute(conn, f'create unique index seqno on "{table}" (z)')
+    strategy = SQLiteStrategy()
+
+    assert strategy.get_primary_keys(conn, spelling, bypass_cache=True) == ['id']
+    assert strategy.get_columns(conn, spelling, bypass_cache=True) == ['id', 'z']
+    assert strategy.get_ordered_columns(conn, spelling) == ['id', 'z']
+    assert strategy.get_default_columns(conn, spelling) == ['id', 'z']
+    assert strategy.get_unique_columns(conn, spelling, bypass_cache=True) == [['z']]
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

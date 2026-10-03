@@ -241,11 +241,15 @@ class TestSQLGeneration:
         assert sql == 'INSERT INTO "main"."users" ("id", "na""me") VALUES (?, ?)'
 
 
-@pytest.mark.parametrize(('dialect', 'marker'), [
-    ('postgresql', '%s'),
-    ('sqlite', '?'),
-])
-def test_upsert_sql_do_nothing_without_update_columns(dialect, marker):
+@pytest.mark.parametrize(('dialect', 'expected'), [
+    ('postgresql',
+     ('INSERT INTO "mytable" ("a", "b", "c") VALUES (%s, %s, %s) '
+      'ON CONFLICT ("a", "b") DO NOTHING')),
+    ('sqlite',
+     ('insert into "mytable" ("a", "b", "c") values (?, ?, ?) '
+      'on conflict ("a", "b") do nothing')),
+], ids=['postgresql', 'sqlite'])
+def test_upsert_sql_do_nothing_without_update_columns(dialect, expected):
     """Verify no update columns yields DO NOTHING on the key column list.
 
     Mutation: deleting the `if not (update_cols_always or update_cols_ifnull):
@@ -258,19 +262,18 @@ def test_upsert_sql_do_nothing_without_update_columns(dialect, marker):
         table='mytable',
         columns=['a', 'b', 'c'],
         key_columns=['a', 'b'])
-    expected = (
-        f'INSERT INTO "mytable" ("a", "b", "c") '
-        f'VALUES ({marker}, {marker}, {marker}) '
-        f'ON CONFLICT ("a", "b") DO NOTHING'
-        )
     assert sql == expected
 
 
-@pytest.mark.parametrize(('dialect', 'marker'), [
-    ('postgresql', '%s'),
-    ('sqlite', '?'),
-])
-def test_upsert_sql_do_update_set_exact(dialect, marker):
+@pytest.mark.parametrize(('dialect', 'expected'), [
+    ('postgresql',
+     ('INSERT INTO "mytable" ("a", "b", "c") VALUES (%s, %s, %s) '
+      'ON CONFLICT ("a") DO UPDATE SET "c" = excluded."c", "b" = excluded."b"')),
+    ('sqlite',
+     ('insert into "mytable" ("a", "b", "c") values (?, ?, ?) '
+      'on conflict ("a") do update set "c" = excluded."c", "b" = excluded."b"')),
+], ids=['postgresql', 'sqlite'])
+def test_upsert_sql_do_update_set_exact(dialect, expected):
     """Verify always-updated columns render as col = excluded.col, in order.
 
     Mutation: building the conflict target from `quoted_columns` instead of
@@ -282,12 +285,6 @@ def test_upsert_sql_do_update_set_exact(dialect, marker):
         columns=['a', 'b', 'c'],
         key_columns=['a'],
         update_cols_always=['c', 'b'])
-    expected = (
-        f'INSERT INTO "mytable" ("a", "b", "c") '
-        f'VALUES ({marker}, {marker}, {marker}) '
-        f'ON CONFLICT ("a") '
-        f'DO UPDATE SET "c" = excluded."c", "b" = excluded."b"'
-        )
     assert sql == expected
 
 
@@ -372,8 +369,8 @@ def test_upsert_sql_sqlite_ignores_constraint_expression():
         }
     sqlite_sql = get_strategy('sqlite').build_upsert_sql(**kwargs)
     expected = (
-        'INSERT INTO "t" ("k", "v") VALUES (?, ?) '
-        'ON CONFLICT ("k") DO UPDATE SET "v" = excluded."v"'
+        'insert into "t" ("k", "v") values (?, ?) '
+        'on conflict ("k") do update set "v" = excluded."v"'
         )
     assert sqlite_sql == expected
     assert 'uq_t' in get_strategy('postgresql').build_upsert_sql(**kwargs)
@@ -412,9 +409,9 @@ def test_upsert_rows_uses_table_column_order(upsert_conn, executed_statements):
 
     sql, params, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty", "note") '
-        'VALUES (?, ?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") DO UPDATE SET "qty" = excluded."qty"'
+        'insert into "inventory" ("sku", "warehouse", "qty", "note") '
+        'values (?, ?, ?, ?) '
+        'on conflict ("sku", "warehouse") do update set "qty" = excluded."qty"'
         )
     assert sql == expected
     assert params == [['A', 'W1', 5, 'n']]
@@ -433,9 +430,9 @@ def test_upsert_rows_corrects_case_and_drops_unknown_columns(
 
     sql, params, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty") '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") DO UPDATE SET "qty" = excluded."qty"'
+        'insert into "inventory" ("sku", "warehouse", "qty") '
+        'values (?, ?, ?) '
+        'on conflict ("sku", "warehouse") do update set "qty" = excluded."qty"'
         )
     assert sql == expected
     assert params == [['A', 'W1', 5]]
@@ -456,9 +453,9 @@ def test_upsert_rows_omits_key_columns_from_update_set(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty") '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") DO UPDATE SET "qty" = excluded."qty"'
+        'insert into "inventory" ("sku", "warehouse", "qty") '
+        'values (?, ?, ?) '
+        'on conflict ("sku", "warehouse") do update set "qty" = excluded."qty"'
         )
     assert sql == expected
 
@@ -479,10 +476,10 @@ def test_upsert_rows_ifnull_skips_columns_already_always_updated(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty", "note") '
-        'VALUES (?, ?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") '
-        'DO UPDATE SET "qty" = excluded."qty", '
+        'insert into "inventory" ("sku", "warehouse", "qty", "note") '
+        'values (?, ?, ?, ?) '
+        'on conflict ("sku", "warehouse") '
+        'do update set "qty" = excluded."qty", '
         '"note" = COALESCE("inventory"."note", excluded."note")'
         )
     assert sql == expected
@@ -502,10 +499,10 @@ def test_upsert_rows_ifnull_excludes_key_columns(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty", "note") '
-        'VALUES (?, ?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") '
-        'DO UPDATE SET "note" = COALESCE("inventory"."note", excluded."note")'
+        'insert into "inventory" ("sku", "warehouse", "qty", "note") '
+        'values (?, ?, ?, ?) '
+        'on conflict ("sku", "warehouse") '
+        'do update set "note" = COALESCE("inventory"."note", excluded."note")'
         )
     assert sql == expected
 
@@ -543,9 +540,9 @@ def test_upsert_rows_conflict_columns_override_primary_key(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "combo" ("id", "name", "region", "val") '
-        'VALUES (?, ?, ?, ?) '
-        'ON CONFLICT ("name", "region") DO UPDATE SET "val" = excluded."val"'
+        'insert into "combo" ("id", "name", "region", "val") '
+        'values (?, ?, ?, ?) '
+        'on conflict ("name", "region") do update set "val" = excluded."val"'
         )
     assert sql == expected
 
@@ -564,8 +561,8 @@ def test_upsert_rows_uses_unique_index_when_primary_key_absent(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "combo" ("name", "region", "val") VALUES (?, ?, ?) '
-        'ON CONFLICT ("name", "region") DO UPDATE SET "val" = excluded."val"'
+        'insert into "combo" ("name", "region", "val") values (?, ?, ?) '
+        'on conflict ("name", "region") do update set "val" = excluded."val"'
         )
     assert sql == expected
 
@@ -620,9 +617,9 @@ def test_upsert_rows_ignores_constraint_name_on_sqlite(
 
     sql, _, _ = executed_statements[-1]
     expected = (
-        'INSERT INTO "inventory" ("sku", "warehouse", "qty") '
-        'VALUES (?, ?, ?) '
-        'ON CONFLICT ("sku", "warehouse") DO UPDATE SET "qty" = excluded."qty"'
+        'insert into "inventory" ("sku", "warehouse", "qty") '
+        'values (?, ?, ?) '
+        'on conflict ("sku", "warehouse") do update set "qty" = excluded."qty"'
         )
     assert sql == expected
 
