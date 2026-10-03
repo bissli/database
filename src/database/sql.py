@@ -14,11 +14,13 @@ _SUPPORTED_DIALECTS = {'postgresql', 'sqlite'}
 _PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')
 _HAS_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?|(?<!:):\w+')
 _STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
-_REGEXP_RE = re.compile(r'regexp_replace\s*\([^)]*(?:\([^)]*\)[^)]*)*\)', re.I)
-_UNESCAPED_PCT_RE = re.compile(r'(?<!%)%(?![%s(])')
+_UNESCAPED_PCT_RE = re.compile(r'(?<!%)%(?!%)')
 _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')
 _NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')
 _NAMED_SQLITE_RE = re.compile(r'(?<!:):\w+|(?<![\w$@])[$@]\w+')
+_IN_END_RE = re.compile(r'\bIN$')
+_IS_NOT_END_RE = re.compile(r'\bIS NOT$')
+_IS_END_RE = re.compile(r'\bIS$')
 
 _IDENT_CHARS = frozenset('_$')
 _MASKABLE_RE = re.compile(r'[\'"$]|--|/\*')
@@ -553,7 +555,7 @@ def _find_contexts(sql: str, dialect: str) -> list[PH]:
 
 
 def _protected_ranges(sql: str, dialect: str) -> set[int]:
-    """Offsets inside a literal, comment, dollar body or regexp_replace call.
+    """Offsets inside a literal, comment or dollar body.
 
     Parameters
     ----------
@@ -616,9 +618,6 @@ def _protected_ranges(sql: str, dialect: str) -> set[int]:
                 i = j
                 continue
         i += 1
-    for m in _REGEXP_RE.finditer(sql):
-        if m.start() not in protected:
-            protected.update(range(m.start(), m.end()))
     return protected
 
 
@@ -660,15 +659,18 @@ def _parse_ctx(prefix: str) -> tuple[str, bool]:
     tuple[str, bool]
         The PH ctx, and whether the IN list's '(' is already written.
     """
-    if prefix.endswith('('):
-        inner = prefix[:-1].rstrip()
-        if inner.endswith('IN'):
+    # A tail one character longer than 'IS NOT' keeps the \b check
+    # inside the slice and the scan constant per placeholder.
+    tail = prefix[-8:]
+    if tail.endswith('('):
+        inner = prefix[:-1].rstrip()[-8:]
+        if _IN_END_RE.search(inner):
             return 'in', True
-    if prefix.endswith('IN'):
+    if _IN_END_RE.search(tail):
         return 'in', False
-    if prefix.endswith('IS NOT'):
+    if _IS_NOT_END_RE.search(tail):
         return 'is_not', False
-    if prefix.endswith('IS'):
+    if _IS_END_RE.search(tail):
         return 'is', False
     return 'val', False
 
@@ -705,14 +707,14 @@ def _normalize(args: tuple | list | dict | None, phs: list[PH]) -> tuple | dict 
     in_count = sum(1 for p in phs if p.ctx == 'in')
 
     if (in_count == 1 and len(phs) == 1
-            and _isseq(args) and not any(_isseq(arg) for arg in args)):
+            and issequence(args) and not any(issequence(arg) for arg in args)):
         return (tuple(args),)
 
-    if len(args) == 1 and _isseq(args[0]):
+    if len(args) == 1 and issequence(args[0]):
         inner = args[0]
         if len(inner) == len(phs) and len(phs) > 1:
             return tuple(inner)
-        if len(inner) == 1 and _isseq(inner[0]):
+        if len(inner) == 1 and issequence(inner[0]):
             return (tuple(inner[0]),)
 
     if isinstance(args, list) and in_count > 1:
@@ -843,10 +845,10 @@ def _expand_in(val: Any, marker: str, in_parens: bool) -> tuple[str, list]:
         The list SQL and its args. An empty sequence gives null and no
         args, so the list matches no row.
     """
-    if _isseq(val) and len(val) == 1 and _isseq(val[0]):
+    if issequence(val) and len(val) == 1 and issequence(val[0]):
         val = val[0]
 
-    if _isseq(val):
+    if issequence(val):
         if not val:
             return 'null' if in_parens else '(null)', []
         phs = ', '.join([marker] * len(val))
@@ -917,10 +919,10 @@ def _expand_named_in(
         The list SQL and its args. An empty sequence gives null and no
         args, so the list matches no row.
     """
-    if _isseq(val) and len(val) == 1 and _isseq(val[0]):
+    if issequence(val) and len(val) == 1 and issequence(val[0]):
         val = val[0]
 
-    if _isseq(val):
+    if issequence(val):
         if not val:
             return ('null', {}) if in_parens else ('(null)', {})
 
@@ -940,25 +942,10 @@ def _expand_named_in(
 
 
 def _escape_percents(segment: str) -> str:
-    """Segment with lone '%' in literals doubled, except in regexp_replace.
+    """Segment with lone '%' in literals doubled.
     """
-    regexps = []
-
-    def save_regexp(m: re.Match[str]) -> str:
-        regexps.append(m.group(0))
-        return f'\x00R{len(regexps) - 1}\x00'
-
     def double_percents(m: re.Match[str]) -> str:
         return _UNESCAPED_PCT_RE.sub('%%', m.group(0))
 
-    segment = _REGEXP_RE.sub(save_regexp, segment)
-    segment = _STR_RE.sub(double_percents, segment)
-    for i, regexp in enumerate(regexps):
-        segment = segment.replace(f'\x00R{i}\x00', regexp)
-    return segment
+    return _STR_RE.sub(double_percents, segment)
 
-
-def _isseq(v: Any) -> bool:
-    """True for a Sequence other than a str or dict.
-    """
-    return issequence(v) and not isinstance(v, (str, dict))

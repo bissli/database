@@ -3,7 +3,7 @@
 import logging
 
 import pytest
-from database.cache import Cache, get_schema_cache
+from database.cache import Cache, _create_cache_key, get_schema_cache
 
 
 @pytest.fixture
@@ -128,9 +128,9 @@ def test_clear_for_table_folds_case_on_both_sides(cache_manager):
 
 
 def test_clear_for_table_matches_inside_composite_keys(cache_manager):
-    """Verify the table name matches anywhere in the stringified key.
+    """Verify the table part of a composite or tuple key matches.
 
-    Mutation: equality in place of containment, or str() dropped.
+    Mutation: the whole str(key) compared, or tuple elements skipped.
     Oracle: a composite key and a tuple key go; 'customers' stays.
     """
     cache = cache_manager.get_schema_cache(77111)
@@ -141,6 +141,30 @@ def test_clear_for_table_matches_inside_composite_keys(cache_manager):
     cache_manager.clear_for_table('orders')
 
     assert list(cache.keys()) == ['customers']
+
+
+def test_clear_for_table_spares_tables_whose_names_contain_it(cache_manager):
+    """Verify clear_for_table matches the table part of a key exactly.
+
+    Mutation: substring containment over str(key), or the schema prefix
+    kept in the comparison.
+    Oracle: hand-listed survivors among strategy keys for look-alike tables.
+    """
+    cache = cache_manager.get_cache('table_columns_ExactPin_get_columns')
+    for table in ('order', 'public.order', '"Order"', 'orders',
+                  'order_items', 'reorder'):
+        cache[_create_cache_key(table, (), {})] = table
+    cache[_create_cache_key('customers', ('order',), {'sort': 'order'})] = 'customers'
+
+    cache_manager.clear_for_table('order')
+
+    assert sorted(cache.values()) == [
+        'customers', 'order_items', 'orders', 'reorder']
+
+    cache[_create_cache_key('order', (), {})] = 'order'
+    cache_manager.clear_for_table('main."ORDER"')
+
+    assert 'order' not in cache.values()
 
 
 def test_falsy_connection_id_keeps_its_own_cache(cache_manager):

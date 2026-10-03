@@ -1,11 +1,11 @@
 # Database Module
 
-A comprehensive Python database interface supporting PostgreSQL and SQLite with a consistent API.
+A Python database interface for PostgreSQL and SQLite with one API.
 
 [![License: OSL-3.0](https://img.shields.io/badge/License-OSL--3.0-blue.svg)](https://opensource.org/licenses/OSL-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-For detailed documentation, see the [API Reference](docs/README.md)
+The [API Reference](docs/README.md) holds the detailed documentation.
 
 ## Table of Contents
 
@@ -26,7 +26,7 @@ For detailed documentation, see the [API Reference](docs/README.md)
 pip install git+https://github.com/bissli/database
 ```
 
-For detailed installation options, see the [Installation section in the full documentation](docs/README.md#installation).
+The [Installation section of the full documentation](docs/README.md#installation) lists the dependencies.
 
 ## Quick Start
 
@@ -58,13 +58,13 @@ db.update(cn, 'UPDATE users SET active = %s WHERE id = %s', False, 42)
 cn.close()
 ```
 
-For more connection options and advanced queries, see the [detailed documentation](docs/README.md#connection-management).
+[Connection Management](docs/README.md#connection-management) covers the other connection options.
 
 ## Core Concepts
 
 ### Connections
 
-The Database Module provides a unified connection interface for different database types:
+One `connect()` call opens either database:
 
 ```python
 import database as db
@@ -86,7 +86,7 @@ sqlite_cn = db.connect({
 })
 ```
 
-For more connection options including pooling, see the [Connection Management documentation](docs/README.md#connection-management).
+Pooling and the other options are in [Connection Management](docs/README.md#connection-management).
 
 ### Reader Endpoints
 
@@ -129,12 +129,13 @@ missing file and creates nothing. `'immutable'` also takes no lock on the
 file. Both are described in the
 [SQLite open modes documentation](docs/README.md#sqlite-open-modes).
 
-For endpoint selection, the full list of refused operations, and pooling
-behavior, see the [Reader Endpoints documentation](docs/README.md#reader-endpoints-and-read-only-connections).
+[Reader Endpoints](docs/README.md#reader-endpoints-and-read-only-connections)
+covers endpoint selection, the full list of refused operations, and
+pooling.
 
 ### Queries
 
-The module provides consistent query functions across all database backends:
+The query functions are the same on both backends:
 
 ```python
 # Basic SELECT query returning a pandas DataFrame
@@ -151,30 +152,31 @@ count = db.select_scalar(cn, 'SELECT COUNT(*) FROM users')
 emails = db.select_column(cn, 'SELECT email FROM users')
 ```
 
-`select_row` and `select_scalar` raise `db.ValidationError` if the query
-returns zero or multiple rows. Use `select_row_or_none` /
-`select_scalar_or_none` when zero rows are valid. Both still raise
-`db.ValidationError` on multiple rows.
+`select_row` and `select_scalar` raise `db.ValidationError` when the
+query returns zero rows or more than one. `select_row_or_none` and
+`select_scalar_or_none` return `None` on zero rows, and still raise
+`db.ValidationError` on more than one.
 
-For more query operations, see the [Query Operations documentation](docs/README.md#query-operations).
+[Query Operations](docs/README.md#query-operations) covers the rest.
 
 ### Bulk Operations
 
 ```python
-# Upsert: INSERT ... ON CONFLICT DO UPDATE
+# Upsert: INSERT ... ON CONFLICT DO UPDATE, on the primary key by default
 db.upsert_rows(cn, 'users',
                ({'email': 'a@example.com', 'name': 'Alice'},
                 {'email': 'b@example.com', 'name': 'Bob'}),
+               conflict_columns=['email'],
                update_cols_always=['name'])
 
-# COPY FROM (PostgreSQL only) — fastest bulk load from a CSV file
+# COPY FROM (PostgreSQL only) - bulk load from a CSV file
 with open('users.csv') as f:
     db.copy_from(cn, 'users', f, columns=['email', 'name'])
 ```
 
 ### Transactions
 
-Use the transaction context manager for atomic operations:
+The `transaction` context manager runs a block as one transaction:
 
 ```python
 with db.transaction(cn) as tx:
@@ -188,7 +190,9 @@ with db.transaction(cn) as tx:
     # If any operation fails, all changes are rolled back
 ```
 
-For transaction isolation levels and advanced features, see the [Transaction Management documentation](docs/README.md#transaction-management).
+Outside a block each statement commits as soon as it finishes.
+[Transaction Management](docs/README.md#transaction-management) covers
+`RETURNING` values and isolation levels.
 
 ## Common Usage Patterns
 
@@ -244,4 +248,5 @@ finally:
     cn.close()
 ```
 
-For more advanced features and detailed API documentation, see the [complete documentation](docs/README.md#advanced-features).
+[Advanced Features](docs/README.md#advanced-features) covers data
+loaders, caching, and parameter handling.

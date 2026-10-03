@@ -10,7 +10,7 @@ from urllib.parse import quote, quote_plus
 from database.cache import cacheable_strategy
 from database.exceptions import QueryError
 from database.row import DictRowFactory
-from database.sql import _split_qualified_identifier, make_placeholders
+from database.sql import make_placeholders
 from database.strategy.base import DatabaseStrategy, register_strategy
 from database.types import postgres_types
 
@@ -44,19 +44,13 @@ def _escape_string_literal(s: str) -> str:
     return s.replace("'", "''")
 
 
-def _split_schema_table(table: str) -> tuple[str | None, str]:
-    """(schema, name) of a table, with schema None when unqualified.
-
-    Parameters
-    ----------
-    table : str
-        'name', 'schema.name', or the double-quoted form of either.
-        Quotes are removed from both parts.
-    """
-    parts = _split_qualified_identifier(table)
-    if len(parts) >= 2:
-        return parts[-2], parts[-1]
-    return None, parts[-1]
+_TABLE_MATCHES_REGCLASS = """
+(t.table_schema, t.table_name) = (
+select n.nspname, c.relname
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.oid = to_regclass(%s))
+"""
 
 
 @register_strategy('postgresql')
@@ -245,7 +239,12 @@ from
     @cacheable_strategy('primary_keys', ttl=300, maxsize=50)
     def get_primary_keys(self, cn: 'ConnectionWrapper', table: str,
                          bypass_cache: bool = False) -> list[str]:
-        """Primary key column names of table, in no set order.
+        """Primary key columns of table, in no set order.
+
+        Raises
+        ------
+        psycopg.errors.UndefinedTable
+            The table does not exist, so no fallback column gets cached.
         """
         sql = """
 select a.attname as column
@@ -253,7 +252,7 @@ from pg_index i
 join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
 where i.indrelid = %s::regclass and i.indisprimary
 """
-        return self._select_column_raw(cn, sql, (table,))
+        return self._select_column_raw(cn, sql, (self.quote_identifier(table),))
 
     @cacheable_strategy('table_columns', ttl=300, maxsize=50)
     def get_columns(self, cn: 'ConnectionWrapper', table: str,
@@ -270,19 +269,14 @@ select skeys(hstore(null::{quoted_table})) as column
     def get_sequence_columns(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> list[str]:
         """Columns of table whose default draws from a sequence.
-
-        An unqualified table matches that name in every schema.
         """
-        schema, name = _split_schema_table(table)
-        schema_clause = 'table_schema = %s and ' if schema is not None else ''
         sql = f"""
-select column_name as column
-from information_schema.columns
-where {schema_clause}table_name = %s
-and column_default like 'nextval%%'
+select t.column_name as column
+from information_schema.columns t
+where {_TABLE_MATCHES_REGCLASS}
+and t.column_default like 'nextval%%'
 """
-        params = (schema, name) if schema is not None else (name,)
-        return self._select_column_raw(cn, sql, params)
+        return self._select_column_raw(cn, sql, (self.quote_identifier(table),))
 
     def configure_connection(self, conn: Any) -> None:
         """Turn autocommit on.
@@ -312,7 +306,7 @@ and column_default like 'nextval%%'
         raw_conn.execute('set default_transaction_read_only = on')
 
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
-                                  constraint_name: str) -> dict[str, Any] | str:
+                                  constraint_name: str) -> str:
         """Conflict target of a named unique index or constraint.
 
         Parameters
@@ -320,53 +314,56 @@ and column_default like 'nextval%%'
         cn : ConnectionWrapper
             Connection to query.
         table : str
-            Table name. Any schema prefix is ignored.
+            Table name, optionally schema-qualified.
         constraint_name : str
             Index or constraint name.
 
         Returns
         -------
         str
-            For a unique index, the parenthesized column list plus any
-            where predicate. For a unique or primary key constraint, its
-            column list without parentheses.
+            The parenthesized column list, plus any where predicate of a
+            partial unique index.
 
         Raises
         ------
         QueryError
-            No unique index or check, primary key, or unique constraint of
-            that name exists on table, or its definition has no column list.
+            No unique index or primary key or unique constraint of that
+            name exists on table, or its definition has no column list.
         """
-        table_name = table.split('.')[-1].strip('"')
+        quoted_table = self.quote_identifier(table)
 
         union_query = """
 select
-    indexdef as definition,
-    'index' as source
+    pg_get_indexdef(i.indexrelid) as definition,
+    'index' as source,
+    0 as precedence
 from
-    pg_indexes
+    pg_index i
+    join pg_class ic on ic.oid = i.indexrelid
 where
-    indexname = %s
-    and tablename = %s
-    and indexdef ~ 'CREATE UNIQUE INDEX'
+    ic.relname = %s
+    and i.indrelid = to_regclass(%s)
+    and i.indisunique
 
 union all
 
 select
     pg_get_constraintdef(c.oid) as definition,
-    'constraint' as source
+    'constraint' as source,
+    1 as precedence
 from
     pg_constraint c
-    join pg_class tbl on c.conrelid = tbl.oid
-    join pg_namespace n on tbl.relnamespace = n.oid
 where
     c.conname = %s
-    and tbl.relname = %s
-    and c.contype in ('c', 'p', 'u')
+    and c.conrelid = to_regclass(%s)
+    and c.contype in ('p', 'u')
+
+order by
+    precedence
 """
         result = self._select_raw(
             cn, union_query,
-            (constraint_name, table_name, constraint_name, table_name))
+            (constraint_name, quoted_table, constraint_name, quoted_table))
 
         if not result:
             raise QueryError(f"Constraint or unique index '{constraint_name}' not found on table '{table}'.")
@@ -379,10 +376,10 @@ where
         match = re.search(
             r'(?:UNIQUE|PRIMARY KEY)\s*\(([^)]+)\)', definition, re.IGNORECASE)
         if match:
-            return match.group(1)
+            return f'({match.group(1)})'
         match = re.search(r'\(([^)]+)\)', definition)
         if match:
-            return match.group(1)
+            return f'({match.group(1)})'
 
         raise QueryError(f'Failed to extract regex from definition: {definition}')
 
@@ -390,44 +387,38 @@ where
                             bypass_cache: bool = False) -> list[str]:
         """Text, boolean, numeric, date, and time columns of table, in order.
 
-        Uncached. An unqualified table matches that name in every schema.
+        Uncached.
         """
-        schema, name = _split_schema_table(table)
-        schema_clause = 't.table_schema = %s and ' if schema is not None else ''
         sql = f"""
 select
 t.column_name
 from information_schema.columns t
 where
-{schema_clause}t.table_name = %s
+{_TABLE_MATCHES_REGCLASS}
 and t.data_type in ('character', 'character varying', 'boolean',
     'text', 'double precision', 'real', 'integer', 'date',
     'time without time zone', 'timestamp without time zone')
 order by
 t.ordinal_position
 """
-        params = (schema, name) if schema is not None else (name,)
-        return self._select_column_raw(cn, sql, params)
+        return self._select_column_raw(cn, sql, (self.quote_identifier(table),))
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
         """Column names of table in declaration order.
 
-        Uncached. An unqualified table matches that name in every schema.
+        Uncached.
         """
-        schema, name = _split_schema_table(table)
-        schema_clause = 't.table_schema = %s and ' if schema is not None else ''
         sql = f"""
 select
 t.column_name
 from information_schema.columns t
 where
-{schema_clause}t.table_name = %s
+{_TABLE_MATCHES_REGCLASS}
 order by
 t.ordinal_position
 """
-        params = (schema, name) if schema is not None else (name,)
-        return self._select_column_raw(cn, sql, params)
+        return self._select_column_raw(cn, sql, (self.quote_identifier(table),))
 
     def find_sequence_column(self, cn: 'ConnectionWrapper', table: str,
                              bypass_cache: bool = False) -> str:
@@ -498,8 +489,8 @@ def extract_index_definition(definition: str) -> str:
     Returns
     -------
     str
-        The parenthesized column list, plus ' WHERE <predicate>' for a
-        partial index. NULLS NOT DISTINCT is dropped.
+        The parenthesized key columns, plus ' WHERE <predicate>' for a
+        partial index. INCLUDE, NULLS NOT DISTINCT and WITH are dropped.
 
     Raises
     ------
@@ -511,7 +502,9 @@ def extract_index_definition(definition: str) -> str:
         r'\s+ON\s+(?:[a-zA-Z0-9_]+\.)?[a-zA-Z0-9_]+'
         r'(?:\s+USING\s+\w+)?'
         r'\s+(\(.*?\))'
+        r'(?:\s+INCLUDE\s+\(.*?\))?'
         r'(?:\s+NULLS\s+NOT\s+DISTINCT)?'
+        r'(?:\s+WITH\s+\(.*?\))?'
         r'(?:\s+WHERE\s+(.*?))?$')
 
     match = re.search(pattern, definition)

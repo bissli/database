@@ -1,3 +1,4 @@
+import copy
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import wraps
@@ -31,7 +32,9 @@ def use_iterdict_data_loader(func: Callable[..., Any]) -> Callable[..., Any]:
     Returns
     -------
     Callable[..., Any]
-        Wrapper that swaps the loader for the call only.
+        Wrapper that gives the connection a copy of its options for the
+        call only, so other connections sharing the object keep their
+        loader.
     """
 
     @wraps(func)
@@ -41,13 +44,15 @@ def use_iterdict_data_loader(func: Callable[..., Any]) -> Callable[..., Any]:
         if hasattr(cn, 'connection') and not hasattr(cn, 'options'):
             cn = cn.connection
 
-        original_data_loader = cn.options.data_loader
-        cn.options.data_loader = iterdict_data_loader
+        original_options = cn.options
+        iterdict_options = copy.copy(original_options)
+        iterdict_options.data_loader = iterdict_data_loader
+        cn.options = iterdict_options
 
         try:
             return func(*args, **kwargs)
         finally:
-            cn.options.data_loader = original_data_loader
+            cn.options = original_options
 
     return inner
 

@@ -396,15 +396,15 @@ def test_auto_commit_only_outside_a_transaction(make_cursor, method, call_args):
     """Verify a call commits outside a transaction and never inside one.
 
     Mutation: dropping `not` from the auto-commit guard in Cursor.
-    Oracle: connwrapper.commit spy, in_transaction False then True.
+    Oracle: dbapi_connection.commit spy, in_transaction False then True.
     """
     outer = make_cursor(in_transaction=False)
     getattr(outer, method)(*call_args)
-    outer.connwrapper.commit.assert_called_once_with()
+    outer.connwrapper.dbapi_connection.commit.assert_called_once_with()
 
     inner = make_cursor(in_transaction=True)
     getattr(inner, method)(*call_args)
-    inner.connwrapper.commit.assert_not_called()
+    inner.connwrapper.dbapi_connection.commit.assert_not_called()
 
 
 def test_batching_record_keeps_percent_format(make_cursor, caplog):

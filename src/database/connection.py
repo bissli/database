@@ -4,6 +4,7 @@ import atexit
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from functools import wraps
@@ -21,7 +22,7 @@ from database.sql import prepare_query, quote_identifier
 from database.strategy import get_db_strategy, get_strategy
 from database.transaction import Transaction
 from database.types import ColumnInfo, RowAdapter, null_special_string
-from database.utils import ensure_commit, get_dialect_name
+from database.utils import get_dialect_name
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool, StaticPool
@@ -37,7 +38,6 @@ __all__ = [
     'get_engine_for_options',
     'dispose_all_engines',
     'get_dialect_name',
-    'ensure_commit',
 ]
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
-_schema_cache: dict[tuple, list[str]] = {}
+_schema_cache: weakref.WeakKeyDictionary[Engine, dict[tuple, list[str]]] = (
+    weakref.WeakKeyDictionary())
 _schema_cache_lock = threading.RLock()
 _CONNECTION_ROLES = frozenset({'writer', 'reader'})
 
@@ -158,7 +159,7 @@ def check_connection(
     func : Callable[..., T] | None, default None
         The decorated function in the bare form, None in the called form.
     max_retries : int, default 3
-        Total attempts, the first included.
+        Total attempts, the first included. Below 1 still makes one.
     retry_delay : float, default 1
         Seconds before the first retry.
     retry_errors : type | tuple[type, ...] | None, default None
@@ -186,7 +187,7 @@ def check_connection(
 
             tries = 0
             delay = retry_delay
-            while tries < max_retries:
+            while True:
                 try:
                     return f(*args, **kwargs)
                 except error_types as err:
@@ -440,7 +441,18 @@ class ConnectionWrapper:
     def commit(self) -> None:
         """Commit, whatever the auto-commit setting.
         """
+        # SQLAlchemy tracks no transaction for the raw cursor's
+        # statements, so only the DBAPI commit reaches them.
         self.sa_connection.commit()
+        if not self.sa_connection.closed:
+            self.dbapi_connection.commit()
+
+    def rollback(self) -> None:
+        """Roll back work not yet committed, whatever the auto-commit setting.
+        """
+        self.sa_connection.rollback()
+        if not self.sa_connection.closed:
+            self.dbapi_connection.rollback()
 
     def close(self) -> None:
         """Commit unless in a transaction, then close the connection.
@@ -449,8 +461,8 @@ class ConnectionWrapper:
         """
         if not getattr(self.sa_connection, 'closed', False):
             try:
-                if not self.in_transaction:
-                    ensure_commit(self.sa_connection)
+                if self.sa_connection is not None and not self.in_transaction:
+                    self.commit()
             except Exception as e:
                 logger.warning(f'Error during pre-close commit: {e}')
             finally:
@@ -520,7 +532,10 @@ class ConnectionWrapper:
         list[dict[str, Any]] | pd.DataFrame | list[pd.DataFrame]
             The loader's result. A statement opening with exec, call or
             execute in any case, or return_all=True, goes through
-            process_multiple_result_sets instead.
+            process_multiple_result_sets instead. Any other
+            multi-statement query, whatever prefer_first says, returns its
+            first result set without args and its last with args, since
+            each statement then runs on its own.
         """
         processed_sql, processed_args = prepare_query(sql, args, self.dialect)
         cursor = self.cursor()
@@ -681,17 +696,18 @@ class ConnectionWrapper:
         list[str]
             The cached list itself, so a caller must not mutate it.
         """
-        cache_key = ('columns', id(self.engine), table)
+        cache_key = ('columns', table)
         with _schema_cache_lock:
-            if not bypass_cache and cache_key in _schema_cache:
-                return _schema_cache[cache_key]
+            engine_cache = _schema_cache.setdefault(self.engine, {})
+            if not bypass_cache and cache_key in engine_cache:
+                return engine_cache[cache_key]
 
         schema, name = _split_schema_for_inspector(table)
         self._ensure_connection()
         inspector = inspect(self.sa_connection)
         columns = [col['name'] for col in inspector.get_columns(name, schema=schema)]
         with _schema_cache_lock:
-            _schema_cache[cache_key] = columns
+            engine_cache[cache_key] = columns
         return columns
 
     def get_table_primary_keys(self, table: str,
@@ -711,10 +727,11 @@ class ConnectionWrapper:
             Empty for a table without a primary key. The cached list
             itself, so a caller must not mutate it.
         """
-        cache_key = ('primary_keys', id(self.engine), table)
+        cache_key = ('primary_keys', table)
         with _schema_cache_lock:
-            if not bypass_cache and cache_key in _schema_cache:
-                return _schema_cache[cache_key]
+            engine_cache = _schema_cache.setdefault(self.engine, {})
+            if not bypass_cache and cache_key in engine_cache:
+                return engine_cache[cache_key]
 
         schema, name = _split_schema_for_inspector(table)
         self._ensure_connection()
@@ -722,7 +739,7 @@ class ConnectionWrapper:
         pk_constraint = inspector.get_pk_constraint(name, schema=schema)
         primary_keys = pk_constraint.get('constrained_columns', [])
         with _schema_cache_lock:
-            _schema_cache[cache_key] = primary_keys
+            engine_cache[cache_key] = primary_keys
         return primary_keys
 
     def get_sequence_columns(self, table: str,
@@ -881,14 +898,13 @@ class ConnectionWrapper:
             Table name, optionally schema-qualified.
         rows : list[dict[str, Any]] | tuple[dict[str, Any], ...]
             Rows keyed by column name, matched without regard to case.
-            Keys the table lacks are dropped. Values bind in the first
-            row's key order, so every row needs the same keys in the
-            same order.
+            Keys the table lacks are dropped. A row missing a key
+            another row supplies binds null for it.
 
         Returns
         -------
         int
-            Rows inserted, 0 for no rows.
+            Rows inserted, 0 for no rows or no key the table has.
 
         Raises
         ------
@@ -901,12 +917,12 @@ class ConnectionWrapper:
             return 0
 
         filtered_rows = self.filter_table_columns(table, rows)
-        if not filtered_rows:
+        if not any(filtered_rows):
             logger.warning(f'No valid columns found for {table} after filtering')
             return 0
         rows = tuple(filtered_rows)
 
-        cols = tuple(rows[0].keys())
+        cols = tuple(dict.fromkeys(col for row in rows for col in row))
 
         quoted_table = quote_identifier(table, self.dialect)
         quoted_cols = ','.join(
@@ -917,7 +933,7 @@ class ConnectionWrapper:
                f' values ({placeholders})')
 
         all_params = [
-            tuple(null_special_string(v) for v in row.values())
+            tuple(null_special_string(row.get(col)) for col in cols)
             for row in rows
             ]
 
@@ -1155,11 +1171,7 @@ class ConnectionWrapper:
         if dialect != 'postgresql':
             constraint_name = None
 
-        filtered_rows = self.filter_table_columns(table, list(rows))
-        if not filtered_rows:
-            logger.debug(f'No valid columns found for {table} after filtering')
-            return 0
-        rows = tuple(filtered_rows)
+        rows = tuple(self.filter_table_columns(table, list(rows)))
 
         table_columns = self.get_table_columns(table)
         case_map = {col.lower(): col for col in table_columns}
@@ -1196,11 +1208,6 @@ class ConnectionWrapper:
                         key_cols = unique_cols
                         key_cols_in_data = True
                         break
-
-        if should_update and not constraint_name and not key_cols:
-            logger.debug(
-                f'No primary keys found for {table}, falling back to INSERT')
-            return self.insert_rows(table, rows)
 
         key_cols_lower = {k.lower() for k in key_cols} if key_cols else set()
         if constraint_name is not None:

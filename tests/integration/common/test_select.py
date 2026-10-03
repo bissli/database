@@ -156,5 +156,21 @@ class TestSelectWithMultipleParams:
         assert col(result, 'name') == ['Alice', 'Charlie']
 
 
+@pytest.mark.postgres
+def test_multi_statement_select_returns_first_result_set(pg_conn):
+    """Verify a plain multi-statement select returns the first result set.
+
+    Mutation: the plain path routed through process_multiple_result_sets,
+        which returns the largest set unless prefer_first is set.
+    Oracle: a one-row first statement before a six-row second.
+    """
+    sql = """
+select name from test_table where name = 'Alice';
+select name from test_table order by name;
+"""
+    assert col(db.select(pg_conn, sql), 'name') == ['Alice']
+    assert col(db.select(pg_conn, sql, prefer_first=False), 'name') == ['Alice']
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

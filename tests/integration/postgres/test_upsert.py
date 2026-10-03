@@ -5,6 +5,8 @@ import time
 
 import database as db
 import pytest
+from database.exceptions import QueryError
+from database.strategy import get_db_strategy
 
 
 def test_upsert_reset_sequence(psql_docker, pg_conn):
@@ -396,6 +398,61 @@ create temporary table test_smart_case (
     value = db.select_scalar(
         pg_conn, 'select value from test_smart_case where name = %s', 'SmartCaseTest')
     assert value == 200
+
+
+@pytest.mark.parametrize('ddl', [
+    'create unique index uq_include_target on test_include_target (sku)'
+    ' include (qty) with (fillfactor = 70) where active',
+    'alter table test_include_target add constraint uq_include_target'
+    ' unique (sku) include (qty) with (fillfactor = 70)',
+    ], ids=['partial-index', 'constraint'])
+def test_upsert_on_unique_target_with_include_and_storage_options(
+        psql_docker, pg_conn, ddl):
+    """Verify INCLUDE and WITH on the named target still yield a valid upsert.
+
+    Mutation: the INCLUDE or WITH clause left in the conflict target,
+              which PostgreSQL rejects as a syntax error.
+    Oracle: a hand-written table after an insert and an update.
+    """
+    db.execute(pg_conn, """
+create temporary table test_include_target (
+    sku text not null,
+    qty integer,
+    active boolean not null default true
+)
+""")
+    db.execute(pg_conn, ddl)
+
+    def upsert(qty):
+        db.upsert_rows(
+            pg_conn,
+            'test_include_target',
+            [{'sku': 'A1', 'qty': qty, 'active': True}],
+            constraint_name='uq_include_target',
+            update_cols_always=['qty'])
+
+    upsert(1)
+    upsert(2)
+    rows = db.select(pg_conn, 'select sku, qty from test_include_target')
+    assert [(r['sku'], r['qty']) for r in rows] == [('A1', 2)]
+
+
+def test_check_constraint_is_not_a_conflict_target(psql_docker, pg_conn):
+    """Verify a check constraint name raises instead of yielding a target.
+
+    Mutation: 'c' kept in the contype list, returning '(value > 0'.
+    Oracle: QueryError naming the constraint, since on conflict accepts
+            only a unique index or constraint.
+    """
+    db.execute(pg_conn, """
+create temporary table test_check_target (
+    id integer primary key,
+    value integer constraint ck_positive check (value > 0)
+)
+""")
+    strategy = get_db_strategy(pg_conn)
+    with pytest.raises(QueryError, match='ck_positive'):
+        strategy.get_constraint_definition(pg_conn, 'test_check_target', 'ck_positive')
 
 
 if __name__ == '__main__':

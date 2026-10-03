@@ -1,10 +1,13 @@
 import datetime
+import threading
 from types import SimpleNamespace
 
+import database as db
 import pandas as pd
 import pyarrow as pa
 import pytest
-from database.options import iterdict_data_loader, pandas_numpy_data_loader
+from database.options import DatabaseOptions, iterdict_data_loader
+from database.options import pandas_numpy_data_loader
 from database.options import pandas_pyarrow_data_loader
 from database.options import use_iterdict_data_loader
 from database.types import Column
@@ -297,6 +300,45 @@ def test_use_iterdict_keeps_the_object_that_owns_options():
 
     assert seen == [(iterdict_data_loader, pandas_pyarrow_data_loader)]
     assert wrapper.options.data_loader is pandas_numpy_data_loader
+
+
+def test_use_iterdict_leaves_a_shared_options_object_alone():
+    """Verify a decorated call on one connection keeps its sibling's loader.
+
+    Mutation: the decorator swapping data_loader on the options object
+        the two connections share.
+    Oracle: two connections on one DatabaseOptions; a barrier holds
+        select_row on the first mid-query while the second selects.
+    """
+    options = DatabaseOptions(drivername='sqlite', database=':memory:')
+    cn_held = db.connect(options)
+    cn_free = db.connect(options)
+    query_running = threading.Barrier(2, timeout=10)
+    free_done = threading.Barrier(2, timeout=10)
+
+    def hold():
+        query_running.wait()
+        free_done.wait()
+        return 1
+
+    cn_held.dbapi_connection.driver_connection.create_function('hold', 0, hold)
+    held = {}
+    worker = threading.Thread(
+        target=lambda: held.update(
+            row=cn_held.select_row('select hold() as x')))
+    worker.start()
+    try:
+        query_running.wait()
+        free_result = cn_free.select('select 1 as x')
+    finally:
+        free_done.wait()
+        worker.join(timeout=10)
+        cn_held.close()
+        cn_free.close()
+
+    assert isinstance(free_result, pd.DataFrame)
+    assert held['row'].x == 1
+    assert options.data_loader is pandas_numpy_data_loader
 
 
 def test_use_iterdict_preserves_wrapped_function_identity():

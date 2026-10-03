@@ -2,7 +2,7 @@
 
 [← Back to Main README](../README.md)
 
-This document provides detailed API documentation and advanced usage information for the Database Module.
+Detailed API documentation and advanced usage for the Database Module.
 
 ## Table of Contents
 
@@ -33,8 +33,8 @@ This document provides detailed API documentation and advanced usage information
   - [Multiple-Row Operations](#multiple-row-operations)
 - [Transaction Management](#transaction-management)
   - [Using Transactions](#using-transactions)
-  - [Transaction Isolation Levels](#transaction-isolation-levels)
-  - [Database-Specific Transaction Behavior](#database-specific-transaction-behavior)
+  - [Commits Outside a Transaction](#commits-outside-a-transaction)
+  - [Isolation Levels](#isolation-levels)
 - [Type System](#type-system)
   - [Type Conversion](#type-conversion)
   - [Type Handling](#type-handling)
@@ -118,9 +118,18 @@ pooled_cn = db.connect({
     'hostname': 'localhost',
     'username': 'your_username',
     'password': 'your_password',
-    'port': 5432
-}, use_pool=True, pool_max_connections=10)
+    'port': 5432,
+    'use_pool': True,
+    'pool_max_connections': 10
+})
+
+# Options as bare keyword arguments
+cn = db.connect(drivername='sqlite', database='database.db')
 ```
+
+`connect` reads keyword options only when `options` is `None`. With a
+dict, object or `DatabaseOptions` in `options`, every option goes inside
+it.
 
 ### Connection Options
 
@@ -138,8 +147,6 @@ options = DatabaseOptions(
     port=5432,
     timeout=30,
     appname='my_application',  # Application name for connection
-    cleanup=True,              # Auto-close on garbage collection
-    check_connection=True,     # Enable auto-reconnect
     data_loader=None,          # Custom data loader function (defaults to pandas)
     # Reader endpoint parameters
     reader_hostname=None,      # Host serving the cluster's replicas
@@ -280,7 +287,6 @@ arguments and so need no look at any SQL:
   `upsert_rows`, `copy_from`
 - `vacuum_table`, `reindex_table`, `cluster_table`,
   `reset_table_sequence`
-- the same methods called on a `transaction()` block
 
 Each raises `ReadOnlyError`, a subclass of `DatabaseError`, in process,
 before a statement exists:
@@ -305,26 +311,29 @@ db.execute(reader, 'delete from orders')
 # cannot execute DELETE in a read-only transaction
 ```
 
-The server refuses at statement start, before a row moves, so a write
-never lands on a replica. This layer also catches what no reading of the
+The server refuses at statement start, before a row moves, so no write
+reaches a replica. This layer also catches what no reading of the
 statement text could: a write reached through a function, such as
-`select setval(...)`, and a statement issued on the raw DBAPI connection.
+`select setval(...)`, a write inside a `transaction()` block, and a
+statement issued on the raw DBAPI connection. PostgreSQL permits
+`VACUUM` and `ANALYZE` under the setting, so `vacuum_table` on a reader
+is stopped by the first layer alone.
 
 A reader may not turn that setting off. `SET default_transaction_read_only`,
 `RESET default_transaction_read_only`, `RESET ALL`, and an assigning
 `PRAGMA query_only` raise `ReadOnlyError`. That check reads the statement
-only far enough to recognize those four forms; it does not classify writes,
-and everything else goes to the server.
+only far enough to recognize those four forms. It does not classify
+writes, and every other statement goes to the server.
 
 Reads are untouched. `select`, `select_row`, `select_scalar`,
 `select_column`, `table_data`, the schema helpers, and a `transaction()`
 block that only reads all behave as they do on a writer.
 
-One limit is worth knowing. `cn.dbapi_connection` and the SQLAlchemy
-methods reached through attribute delegation, such as `exec_driver_sql`,
-are the documented escape hatch out of the wrapper. A statement issued
-there answers to the session setting alone, and a caller who reaches that
-far can also turn the setting off.
+`cn.dbapi_connection` and the SQLAlchemy methods reached through
+attribute delegation, such as `exec_driver_sql`, are the documented
+escape hatch out of the wrapper. A statement issued there answers to the
+session setting alone, and a caller who reaches that far can also turn
+the setting off.
 
 #### Pooling
 
@@ -333,7 +342,8 @@ the read-only session setting never reaches a writer through the pool.
 
 ### Configuration File Pattern
 
-A common pattern is to create a module-level config.py file with `Setting` objects for different database environments:
+A module-level `config.py` holds one `Setting` object per database
+environment:
 
 ```python
 # config.py
@@ -364,7 +374,7 @@ sqlite.use_pool = False
 Setting.lock()
 ```
 
-Then import these settings to connect to different environments:
+A caller imports a setting and hands it to `connect`:
 
 ```python
 # Import from config file
@@ -376,7 +386,7 @@ pg_cn = db.connect(postgresql)
 # Connect to SQLite
 lite_cn = db.connect(sqlite)
 
-# You can also override settings temporarily
+# A copy overrides settings for one connection
 from copy import copy
 temp_config = copy(postgresql)
 temp_config.use_pool = True
@@ -384,15 +394,10 @@ temp_config.pool_max_connections = 10
 cn_pool = db.connect(temp_config)
 ```
 
-This pattern provides:
-1. Separation of configuration from code
-2. Centralized management of connection settings
-3. Easy switching between development/testing/production environments
-4. Type safety through the `Setting` object's structure
-
 ### Connection Pooling
 
-Connection pooling can be configured either through the `DatabaseOptions` object or as parameters to `connect()`:
+Pooling is configured on `DatabaseOptions`, in the options dict, or on a
+`Setting` object:
 
 ```python
 # Method 1: Using DatabaseOptions
@@ -444,9 +449,13 @@ cn = db.connect(postgres_config)
 # Use the connection normally
 result = db.select(cn, 'SELECT * FROM users')
 
-# When you're done with the connection
-cn.close()  # Returns connection to pool instead of closing
+cn.close()  # Returns the connection to the pool
 ```
+
+A PostgreSQL pool holds at most `pool_max_connections` connections,
+with no overflow. A checkout pings the connection first and discards a
+stale one. A connection returned to the pool is rolled back, so an
+aborted transaction never reaches the next checkout.
 
 ## Query Operations
 
@@ -541,14 +550,8 @@ print(list(empty_results[0].columns))      # ['id', 'name'] (first result set co
 print(list(empty_results[1].columns))      # ['email', 'status'] (second result set columns)
 ```
 
-The enhanced empty result handling ensures:
-1. Column structure is preserved in empty DataFrames
-2. Column order matches the query's SELECT clause
-3. Multiple empty result sets preserve their individual column structures
-4. Consistent behavior when working with empty results
-5. No special handling needed for `None` cases
-
-This makes your code more robust when dealing with queries that might return no rows, as the column structure is still available for processing.
+An empty DataFrame keeps the query's columns, in SELECT order, and each
+empty result set of a multi-statement query keeps its own.
 
 ### Type Information
 
@@ -574,7 +577,8 @@ print(f"ID type: {empty_types['id']['python_type']}")  # Still knows it's "int"
 
 ### Column Static Helpers
 
-The `Column` class provides static helper methods to simplify working with columns, particularly useful in custom data loaders:
+The `Column` class has static helpers for the column list a data loader
+receives:
 
 ```python
 # Get column names from a list of Column objects
@@ -590,70 +594,44 @@ type_dict = Column.get_column_types_dict(columns)
 empty_columns = Column.create_empty_columns(['id', 'name', 'email'])
 ```
 
-You can also use a custom loader to handle type information directly:
+[Custom Data Loaders](#custom-data-loaders) shows a loader built on them.
 
-```python
-# Create a custom data loader that uses type information
-def typed_dict_loader(data, column_info, **kwargs):
-    result = {
-        'data': list(data),
-        'columns': column_info.names,
-        'column_types': {}
-    }
-
-    # Add type information by column
-    for i, name in enumerate(column_info.names):
-        col_type = column_info.get_column_type(i)
-        if col_type:
-            result['column_types'][name] = {
-                'type_name': col_type.name,
-                'python_type': col_type.python_type.__name__,
-                'nullable': col_type.nullable
-            }
-
-    return result
-
-# Use the custom loader with a connection
-cn.options.data_loader = typed_dict_loader
-result = db.select(cn, "SELECT * FROM users")
-
-# Now you have direct access to the type information
-for name, type_info in result['column_types'].items():
-    print(f"{name}: {type_info['python_type']}")
-```
-
-Type information is mapped consistently across all database backends:
-- PostgreSQL: Uses the native type system with OIDs
-- SQLite: Maps type strings to Python types
+Type information comes from each backend's own metadata:
+- PostgreSQL: the native type system, by OID
+- SQLite: the declared type string, mapped to a Python type
 
 ### Stored Procedures and Multiple Result Sets
 
-The `select` function handles stored procedures and multiple result sets:
+`select` reads every result set of a statement that opens with `EXEC`,
+`CALL` or `EXECUTE` (in any case), or of any statement under
+`return_all=True`. A plain multi-statement query without `return_all`
+returns its first result set, whatever `prefer_first` says.
 
 ```python
-# PostgreSQL stored procedure
+# PostgreSQL stored procedure: the result set with the most rows,
+# the earlier one on a tie
 result = db.select(cn, 'CALL get_users_by_status(%s)', 'active')
 
-# With multiple statements that return different result sets
+# The procedure's first result set, whatever its size
+first_result = db.select(cn, 'CALL get_users_by_status(%s)', 'active',
+                         prefer_first=True)
+
+# Every result set, as a list, for a procedure or a plain query
 result_sets = db.select(cn, """
     SELECT id, name FROM users WHERE active = true;
     SELECT COUNT(*) AS total_count FROM users;
 """, return_all=True)
 
-# Return the largest result set (default behavior)
-largest_result = db.select(cn, multi_statement_sql)
-
-# Return the first result set regardless of size
-first_result = db.select(cn, multi_statement_sql, prefer_first=True)
-
-# Return all result sets as a list
-all_results = db.select(cn, multi_statement_sql, return_all=True)
+# A plain multi-statement query: the first result set
+first = db.select(cn, """
+    SELECT id, name FROM users WHERE active = true;
+    SELECT COUNT(*) AS total_count FROM users;
+""")
 ```
 
-The enhanced `select` function is particularly useful for:
-- Stored procedures that return multiple result sets
-- Multiple SQL statements that each return different data
-- Any scenario where you need to handle sequential result sets from a single query
+`return_all` wins over `prefer_first`. A result set the loader turns
+into `None` is left out, and a call whose result sets all load as
+`None` returns `[]`.
 
 ## Data Manipulation
 
@@ -680,16 +658,22 @@ db.insert_row(cn, 'users',
 
 #### insert_rows
 
-Insert multiple rows at once:
+Insert multiple rows in one `executemany` and return the row count:
 
 ```python
 rows = [
     {'name': 'John Doe', 'email': 'john@example.com', 'age': 25},
-    {'name': 'Jane Smith', 'email': 'jane@example.com', 'age': 30},
+    {'name': 'Jane Smith', 'email': 'jane@example.com'},
     {'name': 'Bob Johnson', 'email': 'bob@example.com', 'age': 45}
 ]
-db.insert_rows(cn, 'users', rows)
+db.insert_rows(cn, 'users', rows)   # 3; Jane's age binds null
 ```
+
+`insert_rows` binds by column name. The column list is the union of
+every row's keys, matched to the table without regard to case. A row
+missing a key another row supplies binds null for it. Keys the table
+lacks are dropped, and rows holding only unknown columns return 0 with
+nothing written.
 
 ### Update Operations
 
@@ -726,7 +710,7 @@ db.update_or_insert(
 
 #### upsert_rows
 
-Insert or update multiple rows based on primary key:
+Insert rows, updating those that hit a conflict target:
 
 ```python
 rows = [
@@ -735,22 +719,39 @@ rows = [
     {'id': 3, 'name': 'New User', 'email': 'new@example.com'}
 ]
 
-# Update all columns on conflict
+# Conflict on the primary key; do nothing for a row already there
 db.upsert_rows(cn, 'users', rows)
 
-# Only update specific columns on conflict
-db.upsert_rows(cn, 'users', rows, update_cols_key=['id'], update_cols_always=['name'])
+# Update name on conflict
+db.upsert_rows(cn, 'users', rows, update_cols_always=['name'])
 
-# Only update null values on conflict
-db.upsert_rows(cn, 'users', rows, update_cols_key=['id'], update_cols_ifnull=['email'])
+# Set email on conflict only where the stored value is null
+db.upsert_rows(cn, 'users', rows, update_cols_ifnull=['email'])
+
+# Conflict on a unique column set instead of the primary key
+db.upsert_rows(cn, 'users', rows, conflict_columns=['email'],
+               update_cols_always=['name'])
+
+# PostgreSQL: conflict on a named unique index or constraint
+db.upsert_rows(cn, 'users', rows, constraint_name='users_email_key',
+               update_cols_always=['name'])
 
 # Reset sequence after operation (for auto-increment columns)
 db.upsert_rows(cn, 'users', rows, reset_sequence=True)
 ```
 
-Database-specific behavior:
-- **PostgreSQL**: Uses `INSERT ... ON CONFLICT DO UPDATE`
-- **SQLite**: Uses `INSERT ... ON CONFLICT DO UPDATE`
+Both backends use `INSERT ... ON CONFLICT`. With both update lists
+`None` the conflict action is `DO NOTHING`. Key columns are dropped from
+the update lists, except under `constraint_name`. `constraint_name` and
+`conflict_columns` are mutually exclusive and raise `ValidationError`
+together. `constraint_name` is PostgreSQL only and ignored on SQLite.
+Its conflict target is read from the index or constraint definition: a
+partial unique index keeps its `WHERE` predicate, and `INCLUDE`,
+`NULLS NOT DISTINCT` and `WITH` clauses are dropped. With no usable
+target (no primary key in the rows and no `conflict_columns` or
+`constraint_name`) the rows go to `insert_rows`. On SQLite with
+`use_primary_key=False`, rows that omit the primary key fall back to
+the first unique index whose columns they all supply.
 
 ### Delete Operations
 
@@ -764,10 +765,11 @@ db.delete(cn, 'DELETE FROM users WHERE active = %s', False)
 
 ### Multiple-Row Operations
 
-The module includes several operations optimized for working with multiple rows:
+`insert_rows` and `upsert_rows` take a sequence of dict rows and send
+them in `executemany` batches, `batch_size` rows (default 500) per
+batch for `upsert_rows`:
 
 ```python
-# Bulk insert with efficient parameter handling
 users = [
     {'name': 'User 1', 'email': 'user1@example.com'},
     {'name': 'User 2', 'email': 'user2@example.com'},
@@ -775,24 +777,17 @@ users = [
 ]
 db.insert_rows(cn, 'users', users)
 
-# Upsert (update or insert) with different update behaviors
 db.upsert_rows(cn, 'products', products,
-               update_cols_key=['product_code'],  # Identify records by product_code
+               conflict_columns=['product_code'],     # Identify records by product_code
                update_cols_always=['name', 'price'],  # Always update these fields
-               update_cols_ifnull=['description'])  # Only update if target is NULL
+               update_cols_ifnull=['description'])    # Only update if target is NULL
 ```
-
-These operations are implemented with efficiency in mind:
-- Proper parameter batching for optimal performance
-- Database-specific SQL generation for best behavior on each engine
-- Transaction management to ensure atomicity
-- Built-in error handling with appropriate exceptions
 
 ## Transaction Management
 
 ### Using Transactions
 
-Use the `transaction` context manager for atomic operations:
+The `transaction` context manager runs a block as one transaction:
 
 ```python
 with db.transaction(cn) as tx:
@@ -855,56 +850,39 @@ with db.transaction(cn) as tx:
     column = tx.select_column(sql, *args)
 ```
 
-### Transaction Isolation Levels
+A thread holds at most one open `transaction` per connection; a nested
+one raises `RuntimeError`. Auto-commit is on after the block, even
+where it was off before it.
 
-Database transactions support different isolation levels that control how concurrent transactions interact:
+### Commits Outside a Transaction
+
+Outside a `transaction` block every `execute`, `executemany` and write
+method commits the DBAPI connection as soon as it finishes. `cn.commit()`
+and `cn.rollback()` act on the DBAPI connection as well as the
+SQLAlchemy connection, so they reach work done on a raw cursor.
+`cn.close()` commits first unless a transaction is open, then closes;
+an error in either step is logged at WARNING and never raised.
+
+### Isolation Levels
+
+`transaction(cn)` takes no isolation level. A block runs at the
+driver's default: `READ COMMITTED` on PostgreSQL, a `DEFERRED`
+transaction on SQLite. On PostgreSQL a block that needs another level
+sets it with its first statement:
 
 ```python
-# PostgreSQL with explicit isolation level
-with db.transaction(cn, isolation_level='SERIALIZABLE') as tx:
-    # Operations with serializable isolation
+with db.transaction(cn) as tx:
+    tx.execute('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
     tx.execute('UPDATE accounts SET balance = balance - %s WHERE id = %s', 100, 1)
     tx.execute('UPDATE accounts SET balance = balance + %s WHERE id = %s', 100, 2)
 ```
 
-Available isolation levels:
-- **READ UNCOMMITTED**: Lowest isolation, allows dirty reads (PostgreSQL)
-- **READ COMMITTED**: Prevents dirty reads (Default for PostgreSQL)
-- **REPEATABLE READ**: Prevents non-repeatable reads (PostgreSQL)
-- **SERIALIZABLE**: Highest isolation, prevents all concurrency issues (All databases)
-
-### Database-Specific Transaction Behavior
-
-Isolation levels and transaction behavior vary by database type:
-
-#### PostgreSQL
-- Supports full ACID transactions with multiple isolation levels
-- Uses READ COMMITTED as the default isolation level
-- Supports explicit isolation level specification
-- Example:
-  ```python
-  with db.transaction(cn, isolation_level='SERIALIZABLE') as tx:
-      # PostgreSQL serializable transaction
-  ```
-
-#### SQLite
-- Uses deferred transactions by default (DEFERRED)
-- Supports IMMEDIATE and EXCLUSIVE modes
-- EXCLUSIVE locks the entire database for writing
-- Example:
-  ```python
-  with db.transaction(cn) as tx:  # Uses SQLite defaults
-      # SQLite transaction
-  ```
-
 ## Type System
 
-The database module provides a clean, predictable type handling system with a clear flow of responsibility:
+Each value is converted once in each direction:
 
-- **Database → Python**: Types are converted exactly once by the database drivers and their registered adapters
-- **Python → Database**: Python types are converted to database types during parameter binding via `TypeConverter`
-
-This single-conversion approach ensures values maintain their integrity without unnecessary transformations.
+- **Database to Python**: the database driver and its registered adapters
+- **Python to database**: `TypeConverter`, during parameter binding
 
 ### Type Conversion
 
@@ -1040,34 +1018,27 @@ for col, type_info in types.items():
 
 ### Type Conversion Architecture
 
-The module follows these architectural principles:
+1. **Single conversion point**: a value is converted once, where it
+   crosses the database boundary
+   - Going in (Python to database): `TypeConverter` during parameter binding
+   - Coming out (database to Python): the database driver and the
+     adapters `types.py` registers with it
 
-1. **Single Conversion Point**: Values are converted exactly once, when crossing the database boundary
-   - Going in (Python → Database): Handled by `TypeConverter` during parameter binding
-   - Coming out (Database → Python): Handled solely by database drivers and their registered adapters
+2. **Separate responsibilities**:
+   - **Database adapters**: convert values
+   - **Column class**: type metadata only, no conversion
+   - **Row adapters**: row structure (dict/row format) only, no conversion
+   - **Type maps**: database type codes to Python types
 
-2. **Clear Separation of Responsibilities**:
-   - **Database Adapters**: Handle the actual type conversion (registered via `type_adapters.py`)
-   - **Column Class**: Provides type metadata only, never performs conversions
-   - **Row Adapters**: Handle structure mapping only (dict/row format), not conversion
-   - **Type Handlers**: Identify appropriate Python types, never convert values
-   - **Type Resolver**: Maps database type codes to Python types
-
-3. **Consistent Flow of Data**:
+3. **Flow of data**:
    ```
-   [Python Values] → TypeConverter → Database Driver → Database
-   Database → Database Driver → Registered Adapters → [Python Values]
+   [Python values] -> TypeConverter -> database driver -> database
+   database -> database driver -> registered adapters -> [Python values]
    ```
-
-This architecture provides several benefits:
-- **Performance**: Values traverse a shorter, more direct path
-- **Correctness**: No information loss from multiple conversions
-- **Consistency**: Values behave predictably across database backends
-- **Maintainability**: Clear responsibility boundaries make code easier to update
 
 ## Schema Operations
 
-The module provides several operations to manage database schema objects like tables and sequences.
+Operations on tables and sequences.
 
 ### Table Sequence Operations
 
@@ -1098,7 +1069,8 @@ db.vacuum_table(cn, 'users')
 
 Different behavior by database:
 - **PostgreSQL**: Executes `VACUUM users`
-- **SQLite**: Executes `VACUUM` on the entire database if supported
+- **SQLite**: Executes `VACUUM` on the entire database; `table` is
+  required and ignored
 
 #### reindex_table
 
@@ -1135,20 +1107,25 @@ db.reindex_table(cn, 'users')
 db.cluster_table(cn, 'users', 'users_email_idx')
 
 # Get primary key columns
-primary_keys = db.get_table_primary_keys(cn, 'users')  # ['id']
+primary_keys = cn.get_table_primary_keys('users')  # ['id']
 
-# Get all columns with types
-columns = db.get_table_columns(cn, 'users')  # {'id': 'integer', 'name': 'text', ...}
+# Get all column names, in declaration order
+columns = cn.get_table_columns('users')  # ['id', 'name', ...]
 ```
+
+`get_table_columns` and `get_table_primary_keys` return the cached list
+itself; a caller must not mutate it. The cache is keyed by engine and
+dies with it. `cn.get_table_columns('users', bypass_cache=True)` reads
+the catalog again.
 
 #### SQLite Schema Operations
 
 ```python
-# SQLite VACUUM (operates on entire database)
-db.vacuum_table(cn)
+# SQLite VACUUM (operates on entire database; the table is ignored)
+db.vacuum_table(cn, 'users')
 
 # Get table information
-columns = db.get_table_columns(cn, 'users')
+columns = cn.get_table_columns('users')
 
 # Schema introspection (SQLite only; PostgreSQL raises NotImplementedError)
 cn.list_tables()                 # ['orders', 'users'], internal tables excluded
@@ -1166,7 +1143,8 @@ db.reset_table_sequence(cn, 'users')
 
 ### SQL Query Helpers
 
-The module provides several utilities to handle SQL formatting and parameter handling:
+`database.sql` exports the identifier quoting and placeholder rewriting
+the connection methods use:
 
 ```python
 from database.sql import prepare_query, quote_identifier
@@ -1176,8 +1154,8 @@ from database.sql import prepare_query, quote_identifier
 table_name = quote_identifier('my_table', 'postgresql')     # '"my_table"'
 qualified = quote_identifier('public.users', 'postgresql')  # '"public"."users"'
 
-# IN-clause expansion is built into prepare_query — pass a sequence
-# inline; placeholders are expanded automatically.
+# IN-clause expansion is built into prepare_query: a sequence at an
+# IN placeholder expands to one marker per item.
 sql, args = prepare_query(
     'SELECT * FROM users WHERE status IN %s',
     [('active', 'pending', 'new')],
@@ -1189,7 +1167,7 @@ sql, args = prepare_query(
 
 ### Custom Data Loaders
 
-You can control how query results are returned:
+`data_loader` sets the form query results take:
 
 ```python
 from database.options import pandas_numpy_data_loader, pandas_pyarrow_data_loader, iterdict_data_loader
@@ -1218,15 +1196,18 @@ cn = db.connect({
     'data_loader': iterdict_data_loader
 })
 
-# Define your own custom data loader
+# A custom data loader
 def my_custom_loader(data, columns, **kwargs):
-    """
-    Args:
-         Raw data rows from database
-        columns: List of Column objects with names and types
-        kwargs: Additional options
-    Returns:
-        Processed data in your preferred format
+    """Rows as dicts keyed by column name.
+
+    Parameters
+    ----------
+    data : iterable
+        Raw rows from the database.
+    columns : list[Column]
+        Column objects with names and types.
+    **kwargs
+        The select() keyword arguments the connection did not consume.
     """
     # Use Column static helpers to get information
     column_names = Column.get_names(columns)
@@ -1255,7 +1236,9 @@ cn = db.connect({
 
 ### Caching
 
-The module includes caching utilities for performance optimization:
+`database.cache.Cache` is a singleton registry of named TTL caches. The
+strategies' `get_primary_keys`, `get_columns` and `get_sequence_columns`
+results live in it:
 
 ```python
 from database.cache import Cache
@@ -1279,26 +1262,51 @@ cache_manager.clear_all()
 cache_manager.clear_for_table('users')
 ```
 
+`clear_for_table` matches the table part of each key exactly, by its
+last dotted segment, unquoted and lower-cased: `'order'` drops
+`order:...`, `public.order:...` and `other.order:...`, and keeps
+`orders:...`. An empty name logs a warning and drops nothing.
+
 ### SQL Parameter Handling
 
-The module automatically adapts SQL parameters based on database type and handles special cases like SQL `IN` clauses, LIKE patterns, and NULL values.
-
-Note that SQL keywords such as NULL, IN, and LIKE are not case sensitive.
+`prepare_query` rewrites placeholders for the connection's dialect and
+handles `IN` lists, `LIKE` patterns, and `NULL` comparisons. The SQL
+keywords `NULL`, `IN`, and `LIKE` match in any case.
 
 #### LIKE Clauses and Percent Signs
 
-| What you write                                                                               | What the driver receives                                                       |
+The table applies to PostgreSQL. SQLite's driver never reads `%`, so
+no `%` is doubled for SQLite.
+
+| Statement as written                                                                         | Statement the driver receives                                                  |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `db.select(cn, "SELECT * FROM users WHERE name LIKE 'test%'")`                               | `"SELECT * FROM users WHERE name LIKE 'test%%'"`                               |
-| `db.select(cn, "SELECT * FROM users WHERE code LIKE '%%CODE'")`                              | `"SELECT * FROM users WHERE code LIKE '%%CODE'"`                               |
+| `db.select(cn, "SELECT * FROM users WHERE name LIKE 'test%'")`                               | `"SELECT * FROM users WHERE name LIKE 'test%'"`                                |
+| `db.select(cn, "SELECT * FROM users WHERE code LIKE '%%CODE' AND id = %s", 1)`               | `"SELECT * FROM users WHERE code LIKE '%%CODE' AND id = %s", 1`                |
 | `db.select(cn, "SELECT * FROM users WHERE name LIKE %s", "test%")`                           | `"SELECT * FROM users WHERE name LIKE %s", "test%"`                            |
 | `db.select(cn, "SELECT * FROM products WHERE code LIKE 'PRD-%' AND name LIKE %s", "Chair%")` | `"SELECT * FROM products WHERE code LIKE 'PRD-%%' AND name LIKE %s", "Chair%"` |
+| `db.select(cn, "SELECT '%s' AS tag, name FROM users WHERE id = %s", 1)`                      | `"SELECT '%%s' AS tag, name FROM users WHERE id = %s", 1`                      |
 
-The module automatically escapes percent signs in string literals while preserving percent signs in parameters.
+A call with no args sends the statement as written, so `LIKE 'test%'`
+reaches the server as is, and so does a `%%`. With bound args psycopg
+reads every `%` as a format directive, so inside a string literal or
+quoted identifier `prepare_query` doubles each `%` that is not already
+part of `%%`, `%s` and `%(` included. A `%` in a parameter value is
+never touched.
+
+With bound args, a `%%` the caller writes in a literal stays `%%`, and
+psycopg collapses it to one `%` on the way to the server. The alias
+`"SI %% Float"` in libtc relies on this and reads back as `SI % Float`.
+Without args the same `%%` reaches the server as two characters.
+
+When the args all inline into the text (`is %s` with `None`, `in %s`
+with an empty list), or a statement in a multi-statement call holds no
+placeholder, the cursor runs that text without parameters and turns
+each `%%` back into `%` first. A literal therefore reads back as
+written.
 
 #### IS NULL / IS NOT NULL Handling
 
-| What you write                                                                                 | What the driver receives                                                        |
+| Statement as written                                                                           | Statement the driver receives                                                   |
 | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `db.select(cn, "SELECT * FROM users WHERE last_login IS NULL")`                                | `"SELECT * FROM users WHERE last_login IS NULL"`                                |
 | `db.select(cn, "SELECT * FROM users WHERE email IS NOT NULL")`                                 | `"SELECT * FROM users WHERE email IS NOT NULL"`                                 |
@@ -1306,11 +1314,11 @@ The module automatically escapes percent signs in string literals while preservi
 | `db.select(cn, "SELECT * FROM users WHERE email IS NOT %s", None)`                             | `"SELECT * FROM users WHERE email IS NOT NULL"`                                 |
 | `db.select(cn, "SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date)` | `"SELECT * FROM orders WHERE date > %s AND tracking_number IS NULL", some_date` |
 
-The module handles `NULL` values consistently across all database backends.
+`None` at `IS %s` or `IS NOT %s` is inlined as `NULL` on both backends.
 
 #### IN Clause Parameter Handling
 
-| What you write                                                                                                                                          | What the driver receives                                                                                 |
+| Statement as written                                                                                                                                    | Statement the driver receives                                                                            |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `db.select(cn, "SELECT * FROM users WHERE id IN %s", [1, 2, 3])`                                                                                        | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3`                                                |
 | `db.select(cn, "SELECT * FROM users WHERE status IN %s", ['active'])`                                                                                   | `"SELECT * FROM users WHERE status IN (%s)", "active"`                                                   |
@@ -1318,11 +1326,16 @@ The module handles `NULL` values consistently across all database backends.
 | `db.select(cn, "SELECT * FROM users WHERE id IN %(ids)s", {'ids': [1, 2, 3]})`                                                                          | `"SELECT * FROM users WHERE id IN (%s, %s, %s)", 1, 2, 3`                                                |
 | `db.select(cn, """SELECT * FROM products WHERE category IN %(cat)s AND status IN %(status)s""", {'cat': ['electronics'], 'status': ['active', 'new']})` | `"SELECT * FROM products WHERE category IN (%s) AND status IN (%s, %s)", "electronics", "active", "new"` |
 
-The module automatically handles all necessary SQL and parameter transformations for each database backend.
+An empty sequence at an `IN` placeholder becomes `(null)`, which
+matches no row. With one placeholder in the statement, a lone sequence
+is the `IN` list itself; with several, a lone sequence fills the
+placeholders in order. A dict binds by name only when the SQL names a
+placeholder (`%(name)s`, or `:name` on SQLite); under `%s` or `?` alone
+a dict is one value, for a JSON column.
 
 ### Common Table Expressions (CTEs)
 
-The module fully supports advanced SQL features like CTEs:
+Placeholders inside a CTE bind as anywhere else:
 
 ```python
 # PostgreSQL CTE example
@@ -1379,17 +1392,9 @@ result = db.select(cn, """
 """)
 ```
 
-The module ensures:
-1. Proper parameter handling in CTE clauses
-2. Consistent return types and column handling
-3. Support for recursive CTEs where the database allows
-4. Full transaction integration with CTEs
-
 ## Database-Specific Features
 
 ### PostgreSQL Features
-
-PostgreSQL offers advanced features with specialized support in the module:
 
 ```python
 # VACUUM operation (requires autocommit)
@@ -1427,11 +1432,9 @@ result = db.select(cn, """
 
 ### SQLite Features
 
-SQLite provides simplicity with effective features:
-
 ```python
-# SQLite VACUUM (operates on entire database)
-db.vacuum_table(cn)
+# SQLite VACUUM (operates on entire database; the table is ignored)
+db.vacuum_table(cn, 'users')
 
 # In-memory database
 cn = db.connect({
@@ -1464,15 +1467,15 @@ result = db.select(cn, "SELECT * FROM article_fts WHERE article_fts MATCH ?", "t
 
 ## API Reference
 
-The following is a complete reference of the public API functions and types.
+The public functions of `database` and the methods they wrap.
 
 ### Core Functions
 
-| Function                                                 | Description                        | Parameters                                                                                                                                                                                           | Returns                            |
-| -------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `connect(options, config=None, role='writer', **kwargs)` | Create database connection         | `options`: Connection options dictionary or object<br>`config`: Configuration object a dotted path resolves against<br>`role`: `'writer'` or `'reader'`<br>`**kwargs`: Additional connection options | `ConnectionWrapper`                |
-| `execute(cn, sql, *args)`                                | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                                                                                                                       | Row count or specified return data |
-| `transaction(cn)`                                        | Create transaction context manager | `cn`: Database connection                                                                                                                                                                            | `Transaction` context manager      |
+| Function                                                    | Description                        | Parameters                                                                                                                                                                                                                                                        | Returns                            |
+| ----------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `connect(options, config=None, *, role='writer', **kwargs)` | Create database connection         | `options`: `DatabaseOptions`, dict, `Setting` object, dotted config path, or `None`<br>`config`: Configuration object a dotted path resolves against<br>`role`: `'writer'` or `'reader'`, keyword only<br>`**kwargs`: Options, read only when `options` is `None` | `ConnectionWrapper`                |
+| `execute(cn, sql, *args)`                                   | Execute SQL statement              | `cn`: Database connection<br>`sql`: SQL statement<br>`*args`: Query parameters                                                                                                                                                                                    | Row count or specified return data |
+| `transaction(cn)`                                           | Create transaction context manager | `cn`: Database connection                                                                                                                                                                                                                                         | `Transaction` context manager      |
 
 ### Query Operations
 
@@ -1487,43 +1490,63 @@ The following is a complete reference of the public API functions and types.
 
 ### Data Operations
 
-| Function                                                              | Description                                  | Parameters                                                                                                                                                                                                   | Returns   |
-| --------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
-| `insert(cn, sql, *args)`                                              | Execute INSERT statement                     | `cn`: Database connection<br>`sql`: INSERT statement<br>`*args`: Query parameters                                                                                                                            | Row count |
-| `update(cn, sql, *args)`                                              | Execute UPDATE statement                     | `cn`: Database connection<br>`sql`: UPDATE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
-| `delete(cn, sql, *args)`                                              | Execute DELETE statement                     | `cn`: Database connection<br>`sql`: DELETE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
-| `insert_row(cn, table, fields, values)`                               | Insert single row with named fields          | `cn`: Database connection<br>`table`: Table name<br>`fields`: List of column names<br>`values`: List of values                                                                                               | None      |
-| `insert_rows(cn, table, rows)`                                        | Insert multiple rows                         | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries                                                                                                                             | None      |
-| `update_row(cn, table, keyfields, keyvalues, datafields, datavalues)` | Update single row with named fields          | `cn`: Database connection<br>`table`: Table name<br>`keyfields`: List of key column names<br>`keyvalues`: List of key values<br>`datafields`: List of data column names<br>`datavalues`: List of data values | None      |
-| `update_or_insert(cn, update_sql, insert_sql, *args)`                 | Try update, insert if not exists             | `cn`: Database connection<br>`update_sql`: UPDATE statement<br>`insert_sql`: INSERT statement<br>`*args`: Query parameters                                                                                   | None      |
-| `upsert_rows(cn, table, rows, **kwargs)`                              | Insert or update multiple rows based on keys | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries<br>`**kwargs`: Additional options                                                                                           | None      |
+| Function                                                                                                                                                                                   | Description                                              | Parameters                                                                                                                                                                                                   | Returns   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| `insert(cn, sql, *args)`                                                                                                                                                                   | Execute INSERT statement                                 | `cn`: Database connection<br>`sql`: INSERT statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `update(cn, sql, *args)`                                                                                                                                                                   | Execute UPDATE statement                                 | `cn`: Database connection<br>`sql`: UPDATE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `delete(cn, sql, *args)`                                                                                                                                                                   | Execute DELETE statement                                 | `cn`: Database connection<br>`sql`: DELETE statement<br>`*args`: Query parameters                                                                                                                            | Row count |
+| `insert_row(cn, table, fields, values)`                                                                                                                                                    | Insert single row with named fields                      | `cn`: Database connection<br>`table`: Table name<br>`fields`: List of column names<br>`values`: List of values                                                                                               | Row count |
+| `insert_rows(cn, table, rows)`                                                                                                                                                             | Insert multiple rows                                     | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries                                                                                                                             | Row count |
+| `update_row(cn, table, keyfields, keyvalues, datafields, datavalues)`                                                                                                                      | Update rows matching the key fields                      | `cn`: Database connection<br>`table`: Table name<br>`keyfields`: List of key column names<br>`keyvalues`: List of key values<br>`datafields`: List of data column names<br>`datavalues`: List of data values | Row count |
+| `update_or_insert(cn, update_sql, insert_sql, *args)`                                                                                                                                      | Try update, insert if no row matched                     | `cn`: Database connection<br>`update_sql`: UPDATE statement<br>`insert_sql`: INSERT statement<br>`*args`: Query parameters                                                                                   | Row count |
+| `upsert_rows(cn, table, rows, constraint_name=None, conflict_columns=None, update_cols_always=None, update_cols_ifnull=None, reset_sequence=False, batch_size=500, use_primary_key=False)` | Insert rows, updating those that hit the conflict target | `cn`: Database connection<br>`table`: Table name<br>`rows`: List of dictionaries<br>See [upsert_rows](#upsert_rows) for the rest                                                                             | Row count |
+| `copy_from(cn, table, file, columns=None)`                                                                                                                                                 | Bulk load CSV text with PostgreSQL `COPY`                | `cn`: Database connection<br>`table`: Table name<br>`file`: Text file object<br>`columns`: Optional list of column names                                                                                     | Row count |
 
 ### Schema Operations
 
-| Function                                         | Description                               | Parameters                                                                                    | Returns                                  |
-| ------------------------------------------------ | ----------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `reset_table_sequence(cn, table, identity=None)` | Reset table's auto-increment sequence     | `cn`: Database connection<br>`table`: Table name<br>`identity`: Optional identity column name | None                                     |
-| `vacuum_table(cn, table)`                        | Optimize table, reclaiming space          | `cn`: Database connection<br>`table`: Table name                                              | None                                     |
-| `reindex_table(cn, table)`                       | Rebuild table indexes                     | `cn`: Database connection<br>`table`: Table name                                              | None                                     |
-| `cluster_table(cn, table, index=None)`           | Order table data according to an index    | `cn`: Database connection<br>`table`: Table name<br>`index`: Optional index name              | None                                     |
-| `get_table_columns(cn, table)`                   | Get all column names for a table          | `cn`: Database connection<br>`table`: Table name                                              | Dictionary mapping column names to types |
-| `get_table_primary_keys(cn, table)`              | Get primary key columns for a table       | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
-| `get_sequence_columns(cn, table)`                | Get sequence/identity columns for a table | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
-| `table_fields(cn, table)`                        | Get ordered list of all table columns     | `cn`: Database connection<br>`table`: Table name                                              | List of column names                     |
-| `table_data(cn, table, columns=[])`              | Get table data by columns                 | `cn`: Database connection<br>`table`: Table name<br>`columns`: Optional list of column names  | DataFrame with table data                |
+| Function                                         | Description                            | Parameters                                                                                    | Returns |
+| ------------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------- | ------- |
+| `reset_table_sequence(cn, table, identity=None)` | Reset table's auto-increment sequence  | `cn`: Database connection<br>`table`: Table name<br>`identity`: Optional identity column name | None    |
+| `vacuum_table(cn, table)`                        | Optimize table, reclaiming space       | `cn`: Database connection<br>`table`: Table name                                              | None    |
+| `reindex_table(cn, table)`                       | Rebuild table indexes                  | `cn`: Database connection<br>`table`: Table name                                              | None    |
+| `cluster_table(cn, table, index=None)`           | Order table data according to an index | `cn`: Database connection<br>`table`: Table name<br>`index`: Optional index name              | None    |
+
+The schema readers are methods on the connection, with a `bypass_cache`
+keyword that rereads the catalog:
+
+| Method                               | Description                       | Parameters                                                      | Returns                      |
+| ------------------------------------ | --------------------------------- | --------------------------------------------------------------- | ---------------------------- |
+| `cn.get_table_columns(table)`        | Column names in declaration order | `table`: Table name                                             | List of column names, cached |
+| `cn.get_table_primary_keys(table)`   | Primary key columns               | `table`: Table name                                             | List of column names, cached |
+| `cn.get_sequence_columns(table)`     | Sequence/identity columns         | `table`: Table name                                             | List of column names         |
+| `cn.table_fields(table)`             | Same as `get_table_columns`       | `table`: Table name                                             | List of column names, cached |
+| `cn.table_data(table, columns=None)` | Every row, through `select()`     | `table`: Table name<br>`columns`: Optional list of column names | The data loader's result     |
 
 ### Exception Types
 
-| Exception                 | Description                        |
-| ------------------------- | ---------------------------------- |
-| `DatabaseError`           | Base class for all database errors |
-| `DbConnectionError`       | Connection issues                  |
-| `IntegrityError`          | Constraint violations              |
-| `ProgrammingError`        | SQL syntax errors                  |
-| `OperationalError`        | Database operational issues        |
-| `UniqueViolation`         | Unique constraint violations       |
-| `ConnectionError`         | Custom connection errors           |
-| `IntegrityViolationError` | Custom constraint errors           |
-| `QueryError`              | Query execution errors             |
-| `TypeConversionError`     | Type conversion errors             |
-| `ReadOnlyError`           | Write on a read-only connection    |
+| Exception                 | Description                         |
+| ------------------------- | ----------------------------------- |
+| `DatabaseError`           | Base class for all database errors  |
+| `DbConnectionError`       | Connection issues                   |
+| `IntegrityError`          | Constraint violations               |
+| `ProgrammingError`        | SQL syntax errors                   |
+| `OperationalError`        | Database operational issues         |
+| `UniqueViolation`         | Unique constraint violations        |
+| `ConnectionFailure`       | Custom connection errors            |
+| `IntegrityViolationError` | Custom constraint errors            |
+| `QueryError`              | Query execution errors              |
+| `TypeConversionError`     | Type conversion errors              |
+| `ValidationError`         | Bad input: options, role, row count |
+| `ReadOnlyError`           | Write on a read-only connection     |
+
+`DbConnectionError`, `IntegrityError`, `ProgrammingError`,
+`OperationalError` and `UniqueViolation` are tuples of driver and
+library classes, for `except` clauses.
+
+`database.exceptions.is_retryable_error(exc)` says whether a retry may
+succeed. An error carrying `connection_invalidated` is retryable. A
+driver error with a SQLSTATE is retryable when the code starts with an
+entry of `RETRYABLE_SQLSTATES` (`08`, `25P03`, `53300`, `57P`); a
+statement timeout or a lock timeout is not. A `sqlite3` error is never
+retryable. An error with no SQLSTATE is retryable when its message,
+double-quoted names removed, matches `RETRYABLE_PATTERNS`.

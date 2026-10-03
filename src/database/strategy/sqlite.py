@@ -237,19 +237,8 @@ class SQLiteStrategy(DatabaseStrategy):
 
     def reset_sequence(self, cn: 'ConnectionWrapper', table: str,
                        identity: str | None = None) -> None:
-        """Change nothing, since SQLite assigns rowids without a sequence.
-
-        Parameters
-        ----------
-        cn : ConnectionWrapper
-            Connection to the database.
-        table : str
-            Table name.
-        identity : str or None, default None
-            Ignored.
+        """Run nothing, since SQLite assigns rowids without a sequence.
         """
-        if identity is None:
-            identity = self.find_sequence_column(cn, table)
 
     def copy_from(self, cn: 'ConnectionWrapper', table: str,
                   file: TextIO, columns: list[str] | None = None) -> int:
@@ -373,7 +362,7 @@ select name as column from pragma_table_info(?, ?)
         return standardize_placeholders(sql, dialect='sqlite')
 
     def get_constraint_definition(self, cn: 'ConnectionWrapper', table: str,
-                                  constraint_name: str) -> dict[str, Any] | str:
+                                  constraint_name: str) -> dict[str, Any]:
         """Columns of the index named constraint_name, read as unique.
 
         Parameters
@@ -413,13 +402,9 @@ select name as column from pragma_table_info(?, ?)
 
     def get_default_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:
-        """Column names of a table in position order, never cached.
+        """Every column, as get_ordered_columns returns them.
         """
-        sql = """
-select name from pragma_table_info(?, ?)
-order by cid
-"""
-        return self._select_column_raw(cn, sql, _pragma_target(table))
+        return self.get_ordered_columns(cn, table)
 
     def get_ordered_columns(self, cn: 'ConnectionWrapper', table: str,
                             bypass_cache: bool = False) -> list[str]:

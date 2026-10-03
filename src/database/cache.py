@@ -8,6 +8,8 @@ from typing import Any
 
 import cachetools
 
+from database.sql import _split_qualified_identifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,27 +74,33 @@ class Cache:
                 self._caches[name].clear()
 
     def clear_for_table(self, table_name: str) -> None:
-        """Drop every entry, in every cache, whose key mentions a table.
+        """Drop every entry, in every cache, whose key names a table.
 
         Parameters
         ----------
         table_name : str
-            Matched case-insensitively as a substring of str(key), so
-            'orders' also drops the entries of 'orders_archive'. An empty
-            name logs a warning and drops nothing.
+            Compared by its last segment, unquoted and lower-cased, with
+            the table part of each key: the text before the first ':' of
+            str(key), or any str element of a tuple key. 'order' drops
+            'order:...', 'public.order:...' and 'other.order:...', and keeps
+            'orders:...'. An empty name logs a warning and drops nothing.
         """
         if not table_name:
             logger.warning('clear_for_table called with an empty table name; '
                            'ignoring rather than clearing every cache')
             return
 
-        table_lower = table_name.lower()
+        bare_name = _bare_table_name(table_name)
         with self._lock:
             for cache in self._caches.values():
-                keys_to_clear = [
-                    key for key in list(cache.keys())
-                    if table_lower in str(key).lower()
-                ]
+                keys_to_clear = []
+                for key in list(cache.keys()):
+                    if isinstance(key, tuple):
+                        table_parts = [part for part in key if isinstance(part, str)]
+                    else:
+                        table_parts = [str(key).split(':', 1)[0]]
+                    if any(_bare_table_name(part) == bare_name for part in table_parts):
+                        keys_to_clear.append(key)
                 for key in keys_to_clear:
                     if key in cache:
                         del cache[key]
@@ -144,6 +152,12 @@ class Cache:
 
 
 _MISS = object()
+
+
+def _bare_table_name(name: str) -> str:
+    """Last segment of a possibly qualified name, unquoted and lower-cased.
+    """
+    return _split_qualified_identifier(name)[-1].lower()
 
 
 def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) -> str:

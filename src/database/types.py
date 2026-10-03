@@ -23,11 +23,6 @@ SPECIAL_STRINGS: set[str] = {'null', 'nan', 'none', 'na', 'nat'}
 NUMPY_FLOAT_TYPES = (np.floating,)
 NUMPY_INT_TYPES = (np.integer, np.unsignedinteger)
 NUMPY_BOOL_TYPES = (np.bool_,)
-PANDAS_NULLABLE_TYPES = (
-    pd.Int64Dtype, pd.Int32Dtype, pd.Int16Dtype, pd.Int8Dtype,
-    pd.UInt64Dtype, pd.UInt32Dtype, pd.UInt16Dtype, pd.UInt8Dtype,
-    pd.Float64Dtype
-)
 
 
 # --- Python to database value conversion ---
@@ -81,11 +76,8 @@ def _convert_pyarrow_value(value: Any) -> Any:
     if pa is None or value is None:
         return value
 
-    try:
-        if pa.compute.is_null(value).as_py():
-            return None
-    except (AttributeError, TypeError, ValueError):
-        pass
+    if isinstance(value, pa.Scalar) and not value.is_valid:
+        return None
 
     if hasattr(value, 'as_py'):
         try:
@@ -205,11 +197,6 @@ class TypeConverter:
             and pd.api.types.is_dtype_equal(value.dtype, 'object')
             and pd.isna(value)):
             return None
-
-        if isinstance(value, PANDAS_NULLABLE_TYPES):
-            if pd.isna(value):
-                return None
-            return _empty_string_to_none(value)
 
         pa = sys.modules.get('pyarrow')
         if pa and (isinstance(value, pa.Scalar)

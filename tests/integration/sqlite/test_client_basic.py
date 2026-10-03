@@ -123,5 +123,19 @@ create table adapter_test (
     assert retrieved_datetime == now
 
 
+def test_commit_and_rollback_after_close_do_nothing():
+    """Verify commit() and rollback() on a closed connection return quietly.
+
+    Mutation: the closed guard dropped, so the DBAPI call reaches the
+              released pool proxy and raises AttributeError.
+    Oracle: both calls returning None after close().
+    """
+    cn = db.connect({'drivername': 'sqlite', 'database': ':memory:'})
+    cn.close()
+
+    assert cn.commit() is None
+    assert cn.rollback() is None
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

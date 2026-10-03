@@ -1,5 +1,6 @@
 """Unit tests for SQL parameter processing and identifier quoting."""
 import datetime
+import time
 
 import pytest
 from database.exceptions import DatabaseError, QueryError, ValidationError
@@ -74,6 +75,16 @@ class TestPrepareQueryBasic:
         """
         with pytest.raises(QueryError, match='Parameter count mismatch'):
             prepare_query('select * from t where a = %s and b = %s', args, dialect)
+
+    def test_lone_bytes_arg_is_not_spread_across_placeholders(self):
+        """One bytes arg against two placeholders raises, never binds its ints.
+
+        Mutation: libb issequence counting bytes, so b'ab' fills both
+            as 97, 98.
+        Oracle: two placeholders against one arg.
+        """
+        with pytest.raises(QueryError, match='Parameter count mismatch'):
+            prepare_query('select * from t where a = %s and b = %s', (b'ab',))
 
 
 class TestDialectDefaults:
@@ -272,13 +283,44 @@ class TestPrepareQueryInClause:
     def test_not_in_expands_like_in(self):
         """Upper-case NOT IN reaches the same expansion as IN.
 
-        Mutation: `== 'IN'` in place of `endswith('IN')` in _parse_ctx.
+        Mutation: matching IN only as the whole prefix in _parse_ctx.
         Oracle: hand-written SQL expanding to width 2.
         """
         result = prepare_query(
             'select * from t where id NOT IN %s', [(1, 2)], 'postgresql')
 
         assert result == ('select * from t where id NOT IN (%s, %s)', (1, 2))
+
+    @pytest.mark.parametrize(
+        'sql',
+        [
+            'select min(%s) from t',
+            'select bin(%s) from t',
+            'select origin(%s) from t',
+            'select * from t join %s',
+            ],
+        ids=['min_paren', 'bin_paren', 'origin_paren', 'join_bare'])
+    def test_word_ending_in_in_is_not_an_in_context(self, sql):
+        """A list after min(, bin(, origin( or join binds whole, unexpanded.
+
+        Mutation: dropping the word boundary before IN in _parse_ctx.
+        Oracle: SQL identical to the input, plus the list as one arg.
+        """
+        assert prepare_query(sql, ([1, 2],), 'postgresql') == (sql, ([1, 2],))
+
+    @pytest.mark.parametrize(
+        'value',
+        [b'ab', bytearray(b'ab'), memoryview(b'ab')],
+        ids=['bytes', 'bytearray', 'memoryview'])
+    def test_bytes_like_in_value_is_one_item(self, value):
+        """A bytes-like IN value binds as one item, never as its byte ints.
+
+        Mutation: libb issequence counting bytes, bytearray or memoryview.
+        Oracle: hand-written one-marker SQL; the spread gives (97, 98).
+        """
+        result = prepare_query('select * from t where h in %s', (value,), 'postgresql')
+
+        assert result == ('select * from t where h in (%s)', (value,))
 
     def test_flat_list_is_not_spread_when_other_placeholders_exist(self):
         """A flat list against IN plus a second slot binds one arg to each.
@@ -626,6 +668,38 @@ class TestPrepareQueryPercentEscaping:
 
         assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
 
+    def test_many_placeholders_prepare_in_linear_time(self):
+        """Verify 5000 placeholders prepare well inside a second.
+
+        Mutation: the IN/IS context regexes searching the whole prefix
+                  per placeholder, which takes seconds at this size.
+        Oracle: the linear scan takes a few hundredths of a second.
+        """
+        sql = 'insert into t values ' + ', '.join(['(%s, %s)'] * 2500)
+        started = time.perf_counter()
+
+        prepare_query(sql, tuple(range(5000)), 'postgresql')
+
+        assert time.perf_counter() - started < 1.0
+
+    @pytest.mark.parametrize(
+        ('literal', 'expected'),
+        [("'%smith%'", "'%%smith%%'"), ("'%(x)'", "'%%(x)'")],
+        ids=['percent_s', 'percent_paren'])
+    def test_placeholder_lookalike_in_a_literal_is_doubled(
+            self, literal, expected):
+        """A literal '%s' or '%(' reaches psycopg doubled, never as a marker.
+
+        Mutation: `s(` restored to the _UNESCAPED_PCT_RE lookahead.
+        Oracle: psycopg reads an undoubled '%s' in a literal as a marker.
+        """
+        sql = f'select * from t where name like {literal} and id = %s'
+
+        result_sql, _ = prepare_query(sql, (1,), 'postgresql')
+
+        assert result_sql == (
+            f'select * from t where name like {expected} and id = %s')
+
 
 class TestPrepareQueryRegexp:
     """Test regexp_replace patterns are preserved."""
@@ -641,28 +715,56 @@ class TestPrepareQueryRegexp:
 
         assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
 
-    def test_regexp_preserved_while_like_literal_is_escaped(self):
-        """The like literal is escaped; the regexp body next to it is not.
+    def test_regexp_literal_percent_doubles_like_the_like_literal(self):
+        """The like literal and the regexp body next to it both double '%'.
 
-        Mutation: dropping the save_regexp/restore pass in _escape_percents.
-        Oracle: hand-written SQL where 'a%' doubles and '[0-9]%x' does not.
+        Mutation: exempting regexp_replace from _escape_percents, which
+                  leaves '%x' for psycopg to reject as a placeholder.
+        Oracle: hand-written SQL where 'a%' and '[0-9]%x' both double.
         """
         sql = ("select * from t where s like 'a%' "
                "and regexp_replace(code, '[0-9]%x', '') = 'B' and id = %s")
         expected = ("select * from t where s like 'a%%' "
-                    "and regexp_replace(code, '[0-9]%x', '') = 'B' and id = %s")
+                    "and regexp_replace(code, '[0-9]%%x', '') = 'B' and id = %s")
 
         assert prepare_query(sql, (1,), 'postgresql') == (expected, (1,))
 
-    def test_regexp_body_percent_left_alone_without_a_like_neighbor(self):
-        """A lone regexp_replace body is exempt from percent doubling.
+    def test_regexp_body_percent_doubles_without_a_like_neighbor(self):
+        """A lone regexp_replace body doubles its '%' before a bound arg.
 
-        Mutation: restoring the saved regexp before the _STR_RE pass.
-        Oracle: SQL identical to the input, plus (1,).
+        Mutation: exempting regexp_replace from _escape_percents, which
+                  leaves '%d' for psycopg to reject as a placeholder.
+        Oracle: hand-written SQL with '%%d+', plus (1,).
         """
         sql = "select regexp_replace(code, '%d+', '') from t where id = %s"
+        expected = "select regexp_replace(code, '%%d+', '') from t where id = %s"
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
+        assert prepare_query(sql, (1,), 'postgresql') == (expected, (1,))
+
+    @pytest.mark.parametrize(
+        ('dialect', 'marker'),
+        [('postgresql', '%s'), ('sqlite', '?')],
+        ids=['postgresql', 'sqlite'])
+    def test_placeholder_argument_of_regexp_replace_binds(self, dialect, marker):
+        """A placeholder passed to regexp_replace binds like any other.
+
+        Mutation: _protected_ranges masking the whole regexp_replace(...) span.
+        Oracle: hand-written SQL with the dialect's marker, plus ('x',).
+        """
+        sql = "select regexp_replace(code, %s, '') from t"
+        expected = f"select regexp_replace(code, {marker}, '') from t"
+
+        assert prepare_query(sql, ('x',), dialect) == (expected, ('x',))
+
+    def test_named_placeholder_inside_regexp_replace_counts(self):
+        """A %(name)s argument of regexp_replace is a named placeholder.
+
+        Mutation: _protected_ranges masking the whole regexp_replace(...) span.
+        Oracle: the one placeholder in the SQL sits outside every literal.
+        """
+        sql = "select regexp_replace(code, %(pattern)s, '') from t"
+
+        assert has_named_placeholders(sql, 'postgresql') is True
 
 
 class TestPrepareQueryDollarQuotes:
@@ -805,14 +907,15 @@ class TestPrepareQueryComments:
         assert prepare_query(sql, (), 'postgresql') == (sql, ())
 
     def test_double_quoted_literal_is_protected(self):
-        r"""A double-quoted literal's %s is not a real placeholder.
+        r"""A double-quoted literal's %s is not a placeholder, and is doubled.
 
         Mutation: dropping '"' from the literal branch of _protected_ranges.
-        Oracle: SQL identical to the input, plus (1,).
+        Oracle: hand-written SQL; psycopg reads '%%' back as '%'.
         """
         sql = 'select * from t where "c %s n" = %s'
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
+        assert prepare_query(sql, (1,), 'postgresql') == (
+            'select * from t where "c %%s n" = %s', (1,))
 
     def test_question_mark_in_line_comment_protected_sqlite(self):
         """-- ? comment is literal in SQLite.

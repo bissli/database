@@ -714,7 +714,7 @@ class TestConcreteStrategyMethodsAreCached:
 
         assert spy.call_count == 1
         sql, params = spy.call_args.args[1], spy.call_args.args[2]
-        assert params == ('foo',)
+        assert params == ('"foo"',)
         assert 'i.indisprimary' in sql
 
     def test_postgres_get_columns_caches_and_quotes_the_table(
@@ -734,11 +734,11 @@ class TestConcreteStrategyMethodsAreCached:
         assert spy.call_count == 1
         assert 'hstore(null::"foo")' in spy.call_args.args[1]
 
-    def test_postgres_get_sequence_columns_splits_a_qualified_table(
+    def test_postgres_get_sequence_columns_resolves_the_quoted_table(
             self, mock_connection, mocker):
-        """Verify a qualified table filters on schema and name, and caches.
+        """Verify the table resolves through to_regclass, quoted, and caches.
 
-        Mutation: the `if schema is not None` branch or decorator dropped.
+        Mutation: the decorator dropped, or the table passed unquoted or split.
         Oracle: hand-written parameter tuples and a spy call count of 2.
         """
         strategy = PostgresStrategy()
@@ -746,8 +746,7 @@ class TestConcreteStrategyMethodsAreCached:
             strategy, '_select_column_raw', return_value=['id'])
 
         strategy.get_sequence_columns(mock_connection, 'myschema.foo')
-        qualified_sql, qualified_params = (spy.call_args.args[1],
-                                           spy.call_args.args[2])
+        qualified_params = spy.call_args.args[2]
         strategy.get_sequence_columns(mock_connection, 'myschema.foo')
 
         strategy.get_sequence_columns(mock_connection, 'foo')
@@ -755,10 +754,9 @@ class TestConcreteStrategyMethodsAreCached:
                                    spy.call_args.args[2])
 
         assert spy.call_count == 2
-        assert qualified_params == ('myschema', 'foo')
-        assert 'table_schema' in qualified_sql
-        assert plain_params == ('foo',)
-        assert 'table_schema' not in plain_sql
+        assert qualified_params == ('"myschema"."foo"',)
+        assert plain_params == ('"foo"',)
+        assert 'to_regclass(%s)' in plain_sql
 
     def test_sqlite_get_primary_keys_caches_and_filters_on_pk(
             self, mock_connection, mocker):

@@ -140,6 +140,22 @@ class TestExtractIndexDefinition:
         expected = '(lower((email)::text), tenant_id)'
         assert extract_index_definition(definition) == expected
 
+    @pytest.mark.parametrize(('tail', 'expected'), [
+        (' INCLUDE (c, d)', '(a)'),
+        (" WITH (fillfactor='70')", '(a)'),
+        (" INCLUDE (c) WITH (fillfactor='70') WHERE (b > 0)", '(a) WHERE (b > 0)'),
+        ], ids=['include', 'with', 'both-then-where'])
+    def test_trailing_index_options_leave_the_target(self, tail, expected):
+        """Verify INCLUDE and WITH clauses never reach the conflict target.
+
+        Mutation: dropping the INCLUDE or WITH group from the strict
+                  pattern, which folds that clause into the column group.
+        Oracle: hand-written key columns plus predicate, in the clause
+                order pg_get_indexdef emits.
+        """
+        definition = 'CREATE UNIQUE INDEX uq_t_a ON public.t USING btree (a)' + tail
+        assert extract_index_definition(definition) == expected
+
     def test_coalesce_multiple_columns(self):
         """Verify an unqualified table with no USING clause still parses.
 
@@ -221,39 +237,41 @@ class TestGetConstraintDefinition:
         assert result == '(a, lower((b)::text)) WHERE (c IS NULL)'
 
     @pytest.mark.parametrize(('definition', 'expected'), [
-        ('UNIQUE (sku, warehouse)', 'sku, warehouse'),
-        ('PRIMARY KEY (id)', 'id'),
-        ('UNIQUE (a, b) DEFERRABLE INITIALLY DEFERRED', 'a, b'),
-        ('UNIQUE (a) INCLUDE (c)', 'a'),
-        ('UNIQUE NULLS NOT DISTINCT (a, b)', 'a, b'),
+        ('UNIQUE (sku, warehouse)', '(sku, warehouse)'),
+        ('PRIMARY KEY (id)', '(id)'),
+        ('UNIQUE (a, b) DEFERRABLE INITIALLY DEFERRED', '(a, b)'),
+        ('UNIQUE (a) INCLUDE (c)', '(a)'),
+        ('UNIQUE NULLS NOT DISTINCT (a, b)', '(a, b)'),
         ], ids=['unique', 'primary-key', 'deferrable', 'include-clause', 'nulls-not-distinct'])
-    def test_constraint_row_returns_bare_column_list(self, definition, expected):
-        """Verify a constraint row yields its columns without the keyword.
+    def test_constraint_row_returns_parenthesized_column_list(self, definition, expected):
+        """Verify a constraint row yields its columns in parentheses.
 
-        Mutation: source test flipped to 'index' (all params); [^)]+
-                  widened to .+ (include-clause); generic fallback
-                  deleted (nulls-not-distinct).
-        Oracle: hand-written column list per definition shape.
+        Mutation: the bare column list returned, so build_upsert_sql
+                  writes 'on conflict a, b' (all params); [^)]+ widened
+                  to .+ (include-clause); generic fallback deleted
+                  (nulls-not-distinct).
+        Oracle: hand-written conflict target per definition shape.
         """
         cn = StubConnection([(definition, 'constraint')])
         result = PostgresStrategy().get_constraint_definition(
             cn, 'inventory', 'uq_inventory')
         assert result == expected
 
-    def test_lookup_uses_unqualified_unquoted_table_name(self):
+    def test_lookup_passes_the_quoted_qualified_table(self):
         """Verify the placeholders get constraint, table, constraint, table.
 
-        Mutation: parts[0] instead of parts[-1] for table_name.
-        Oracle: hand-written parameter tuple, quotes and schema removed.
+        Mutation: the schema dropped from the table, or the raw name
+                  split on every dot.
+        Oracle: hand-written parameter tuple, each segment quoted.
         """
         cn = StubConnection([('UNIQUE (sku)', 'constraint')])
         PostgresStrategy().get_constraint_definition(
             cn, 'public."Order Items"', 'uq_order_items_sku')
         expected = (
             'uq_order_items_sku',
-            'Order Items',
+            '"public"."Order Items"',
             'uq_order_items_sku',
-            'Order Items',
+            '"public"."Order Items"',
             )
         assert len(cn.recorder.calls) == 1
         sql, params = cn.recorder.calls[0]

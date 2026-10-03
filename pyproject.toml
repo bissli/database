@@ -29,7 +29,7 @@ sqlalchemy = "^2.0.0"
 
 cachetools = "*"
 python-dateutil = "*"
-libb-util = "*"
+libb-util = ">=0.0.63"
 
 # == test
 asserts = { version = "*", optional = true }

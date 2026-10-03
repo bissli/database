@@ -30,6 +30,10 @@ RETRYABLE_PATTERNS = [
 
 _RETRYABLE_REGEX = re.compile('|'.join(RETRYABLE_PATTERNS), re.IGNORECASE)
 
+_QUOTED_NAME_REGEX = re.compile(r'"[^"]*"')
+
+RETRYABLE_SQLSTATES = ('08', '25P03', '53300', '57P')
+
 
 def is_retryable_error(exc: BaseException) -> bool:
     """True when exc looks transient, so a retry may succeed.
@@ -42,12 +46,23 @@ def is_retryable_error(exc: BaseException) -> bool:
     Returns
     -------
     bool
-        True when exc has connection_invalidated set, or its message
-        matches a RETRYABLE_PATTERNS entry, ignoring case.
+        True when exc has connection_invalidated set. Otherwise an error
+        with a SQLSTATE is retryable when the code starts with a
+        RETRYABLE_SQLSTATES entry, a sqlite3 error never is, and any
+        other error is retryable when its message, double-quoted names
+        removed, matches a RETRYABLE_PATTERNS entry, ignoring case.
     """
     if getattr(exc, 'connection_invalidated', False):
         return True
-    error_msg = str(getattr(exc, 'orig', None) or exc).lower()
+    error = getattr(exc, 'orig', None) or exc
+    # SQLite names identifiers unquoted, and no pattern describes a
+    # failure of an in-process database.
+    if isinstance(error, sqlite3.Error):
+        return False
+    sqlstate = getattr(error, 'sqlstate', None)
+    if sqlstate:
+        return sqlstate.startswith(RETRYABLE_SQLSTATES)
+    error_msg = _QUOTED_NAME_REGEX.sub('', str(error))
     return bool(_RETRYABLE_REGEX.search(error_msg))
 
 

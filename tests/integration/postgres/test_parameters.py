@@ -3,6 +3,7 @@
 import datetime
 
 import database as db
+import pytest
 
 
 def test_date_parameter_handling(psql_docker, pg_conn):
@@ -285,6 +286,75 @@ def test_any_with_list_parameter(psql_docker, pg_conn):
         [1, 2, 3],
         'A%')
     assert names == ['Alpha']
+
+
+@pytest.mark.parametrize(('pattern', 'expected'), [
+    ('[0-9]%d', 'abcd'),
+    ('[0-9]%', 'abdcd'),
+    ('c?d$', 'ab7%d'),
+    ], ids=['percent-d', 'lone-percent', 'question-mark'])
+def test_regexp_replace_pattern_beside_a_bound_argument(
+        psql_docker, pg_conn, pattern, expected):
+    """Verify a regexp_replace pattern with '%' or '?' runs beside a bound arg.
+
+    Mutation: exempting regexp_replace from percent doubling, so psycopg
+              reads '%d' or a lone '%' as a placeholder and raises; or
+              the '?' in the pattern turned into a placeholder.
+    Oracle: the hand-applied regex on the one stored name 'ab7%dcd'.
+    """
+    db.execute(pg_conn, 'create temporary table regexp_test (id int, name text)')
+    db.insert(pg_conn, 'insert into regexp_test values (%s, %s)', 1, 'ab7%dcd')
+
+    sql = f"select regexp_replace(name, '{pattern}', '') from regexp_test where id = %s"
+    assert db.select_column(pg_conn, sql, 1) == [expected]
+
+
+def test_like_literal_starting_with_s_beside_a_bound_argument(
+        psql_docker, pg_conn):
+    """Verify like '%smith%' matches beside a bound arg instead of raising.
+
+    Mutation: '%s' left undoubled inside a literal, so psycopg counts it
+              as a second placeholder for one argument.
+    Oracle: the one stored name 'jsmithe' matches '%smith%'.
+    """
+    db.execute(pg_conn, 'create temporary table like_test (id int, name text)')
+    db.insert(pg_conn, 'insert into like_test values (%s, %s)', 1, 'jsmithe')
+
+    sql = "select name from like_test where name like '%smith%' and id = %s"
+    assert db.select_column(pg_conn, sql, 1) == ['jsmithe']
+
+
+@pytest.mark.parametrize('literal', ['a%(b', '50%', 'a%sb'])
+def test_percent_literal_survives_an_inlined_placeholder(
+        psql_docker, pg_conn, literal):
+    """Verify a '%' literal reads back as written once 'is not %s' inlines.
+
+    Mutation: the no-placeholder branch of Cursor._execute_query running
+              the doubled text raw, so '%%' reaches the server.
+    Oracle: the literal as written; no bound arg remains to collapse '%%'.
+    """
+    sql = f"select '{literal}' as x where 1 is not %s"
+
+    assert db.select_column(pg_conn, sql, None) == [literal]
+
+
+def test_multi_statement_skips_a_placeholder_lookalike_in_a_literal(
+        psql_docker, pg_conn):
+    """Verify a literal '%s' in one statement does not claim a bound arg.
+
+    Mutation: counting placeholders on the raw statement text instead of
+              the masked text, so the count is 2 for one arg and raises.
+    Oracle: the hand-written rows ('q%s', 0) and ('r', 7).
+    """
+    db.execute(pg_conn, 'create temporary table multi_pct (s text, n int)')
+    db.execute(
+        pg_conn,
+        "insert into multi_pct values ('q%s', 0); "
+        "insert into multi_pct values ('r', %s)",
+        7)
+
+    rows = db.select(pg_conn, 'select s, n from multi_pct order by s')
+    assert [(row['s'], row['n']) for row in rows] == [('q%s', 0), ('r', 7)]
 
 
 if __name__ == '__main__':

@@ -1,9 +1,8 @@
 import sqlite3
 
-import psycopg
 import pytest
 import sqlalchemy as sa
-from database.utils import ensure_commit, get_dialect_name, get_raw_connection
+from database.utils import get_dialect_name, get_raw_connection
 
 
 class _Obj:
@@ -19,21 +18,6 @@ class _Dialect:
 
     def __init__(self, name):
         self.name = name
-
-
-class _Connection:
-    """Connection stub whose commit() counts calls and may raise."""
-
-    def __init__(self, error=None, driver_connection=None):
-        self.error = error
-        self.commit_count = 0
-        if driver_connection is not None:
-            self.driver_connection = driver_connection
-
-    def commit(self):
-        self.commit_count += 1
-        if self.error is not None:
-            raise self.error
 
 
 class TestGetDialectName:
@@ -194,91 +178,6 @@ class TestGetRawConnection:
         inner = object()
         middle = _Obj(driver_connection=inner)
         assert get_raw_connection(_Obj(driver_connection=middle)) is middle
-
-
-class TestEnsureCommit:
-    """Tests for ensure_commit fallback and error handling."""
-
-    def test_commits_once_and_skips_fallback(self):
-        """Verify a successful commit stops before the driver fallback.
-
-        Mutation: the `return` after `connection.commit()` dropped.
-        Oracle: spy counts, one wrapper commit and no driver commit.
-        """
-        conn = _Connection(driver_connection=_Connection())
-        ensure_commit(conn)
-        assert conn.commit_count == 1
-        assert conn.driver_connection.commit_count == 0
-
-    def test_commit_reaches_the_database(self, tmp_path):
-        """Verify ensure_commit makes a pending write visible to a reader.
-
-        Mutation: the `connection.commit()` call dropped.
-        Oracle: a second sqlite3 connection to the file sees the row.
-        """
-        db_path = tmp_path / 'commit.db'
-        writer = sqlite3.connect(db_path)
-        reader = sqlite3.connect(db_path)
-        try:
-            writer.execute('create table t (id integer)')
-            writer.commit()
-            writer.execute('insert into t values (1)')
-            ensure_commit(writer)
-            assert reader.execute('select count(*) from t').fetchone()[0] == 1
-        finally:
-            reader.close()
-            writer.close()
-
-    @pytest.mark.parametrize(
-        'error',
-        [
-            psycopg.ProgrammingError,
-            psycopg.InterfaceError,
-            psycopg.OperationalError,
-            sqlite3.ProgrammingError,
-            sqlite3.InterfaceError,
-            sqlite3.OperationalError,
-            ])
-    def test_falls_back_to_driver_after_expected_error(self, error):
-        """Verify each _COMMIT_ERRORS member routes the commit to the driver.
-
-        Mutation: an entry dropped from _COMMIT_ERRORS.
-        Oracle: spy counts, one commit on each connection and no raise.
-        """
-        conn = _Connection(error=error('boom'), driver_connection=_Connection())
-        ensure_commit(conn)
-        assert conn.commit_count == 1
-        assert conn.driver_connection.commit_count == 1
-
-    def test_unexpected_error_propagates(self):
-        """Verify an error outside _COMMIT_ERRORS propagates.
-
-        Mutation: `except _COMMIT_ERRORS` widened to `except Exception`.
-        Oracle: RuntimeError escapes and the driver is untouched.
-        """
-        conn = _Connection(error=RuntimeError('boom'), driver_connection=_Connection())
-        with pytest.raises(RuntimeError, match='boom'):
-            ensure_commit(conn)
-        assert conn.driver_connection.commit_count == 0
-
-    def test_driver_commit_error_is_swallowed(self):
-        """Verify a failing driver commit is swallowed.
-
-        Mutation: the fallback except narrowed so InterfaceError escapes.
-        Oracle: spy count 1 and no exception.
-        """
-        driver = _Connection(error=psycopg.InterfaceError('closed'))
-        assert ensure_commit(_Obj(driver_connection=driver)) is None
-        assert driver.commit_count == 1
-
-    def test_no_commit_anywhere_is_a_noop(self):
-        """Verify an object graph with no commit() is left alone.
-
-        Mutation: the hasattr commit guard dropped from the fallback.
-        Oracle: neither object has commit; None is the only outcome.
-        """
-        assert ensure_commit(_Obj()) is None
-        assert ensure_commit(_Obj(driver_connection=_Obj())) is None
 
 
 if __name__ == '__main__':

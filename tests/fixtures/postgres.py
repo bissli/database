@@ -110,13 +110,11 @@ def pg_conn(psql_docker):
         stage_test_data(cn)
         yield cn
     finally:
+        terminate_postgres_connections(cn)
         try:
-            cn.rollback()
             cn.close()
         except Exception as e:
             logger.warning(f'Error during connection cleanup: {e}')
-        finally:
-            terminate_postgres_connections(cn)
 
 
 @pytest.fixture

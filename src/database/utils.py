@@ -1,21 +1,6 @@
 """Helpers taking a ConnectionWrapper, SQLAlchemy or raw DBAPI connection.
 """
-import logging
-import sqlite3
 from typing import Any
-
-import psycopg
-
-logger = logging.getLogger(__name__)
-
-_COMMIT_ERRORS = (
-    psycopg.ProgrammingError,
-    psycopg.InterfaceError,
-    psycopg.OperationalError,
-    sqlite3.ProgrammingError,
-    sqlite3.InterfaceError,
-    sqlite3.OperationalError,
-    )
 
 
 def get_dialect_name(obj: Any) -> str:
@@ -64,30 +49,3 @@ def get_raw_connection(connection: Any) -> Any:
     """connection.driver_connection when present, else connection.
     """
     return getattr(connection, 'driver_connection', connection)
-
-
-def ensure_commit(connection: Any) -> None:
-    """Commit on connection, else on connection.driver_connection.
-
-    A psycopg or sqlite3 ProgrammingError, InterfaceError or
-    OperationalError from either commit is logged and swallowed, so a
-    failed commit returns normally.
-
-    Parameters
-    ----------
-    connection : Any
-        Any object; one with no commit() at either level is left alone.
-    """
-    if hasattr(connection, 'commit'):
-        try:
-            connection.commit()
-            return
-        except _COMMIT_ERRORS as e:
-            logger.debug(f'Could not commit transaction: {e}')
-
-    if (hasattr(connection, 'driver_connection')
-        and hasattr(connection.driver_connection, 'commit')):
-        try:
-            connection.driver_connection.commit()
-        except _COMMIT_ERRORS as e:
-            logger.debug(f'Could not commit driver_connection transaction: {e}')

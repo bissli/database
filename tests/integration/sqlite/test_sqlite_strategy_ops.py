@@ -104,6 +104,22 @@ def test_sqlite_copy_from_returns_zero(sqlite_strategy_conn, caplog):
     assert 'COPY operation not supported in SQLite' in caplog.text
 
 
+def test_sqlite_reset_table_sequence_runs_no_statement(sqlite_strategy_conn):
+    """Verify reset_table_sequence on SQLite reads and writes nothing.
+
+    Mutation: reset_sequence looking up a sequence column it never uses.
+    Oracle: sqlite3's trace callback, which records every statement run.
+    """
+    statements = []
+    sqlite_strategy_conn.dbapi_connection.set_trace_callback(statements.append)
+    try:
+        db.reset_table_sequence(sqlite_strategy_conn, 'test_table')
+    finally:
+        sqlite_strategy_conn.dbapi_connection.set_trace_callback(None)
+
+    assert statements == []
+
+
 @pytest.mark.parametrize(('table', 'spelling'), [
     ('type', 'type'),
     ('seq', 'seq'),

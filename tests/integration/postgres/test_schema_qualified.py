@@ -70,6 +70,83 @@ class TestSchemaQualifiedSchemaMetadata:
 
 
 @pytest.mark.usefixtures('psql_docker')
+class TestUnqualifiedNameFollowsSearchPath:
+    """Metadata lookups on a bare 't' with public.t and myschema.t present.
+    """
+
+    @pytest.mark.parametrize(('method', 'public_cols', 'myschema_cols'), [
+        ('get_ordered_columns', ['decoy'], ['id', 'name', 'value']),
+        ('get_default_columns', ['decoy'], ['id', 'name', 'value']),
+        ('get_sequence_columns', ['decoy'], ['id']),
+        ])
+    def test_unqualified_table_reads_only_the_visible_table(
+            self, decoy_public_t, method, public_cols, myschema_cols):
+        """Verify a bare name reads the one table search_path resolves.
+
+        Mutation: no schema filter on an unqualified name, mixing in
+                  every schema's t.
+        Oracle: each table's hand-written columns, picked by search_path.
+        """
+        lookup = getattr(get_db_strategy(decoy_public_t), method)
+        assert lookup(decoy_public_t, 't') == public_cols
+
+        db.execute(decoy_public_t, 'set search_path to myschema, public')
+        assert lookup(decoy_public_t, 't', bypass_cache=True) == myschema_cols
+
+
+@pytest.mark.usefixtures('psql_docker')
+class TestConstraintDefinitionSchema:
+    """get_constraint_definition with one index name in two schemas.
+    """
+
+    @pytest.fixture
+    def two_uq_t(self, decoy_public_t):
+        """uq_t on public.t (decoy), then uq_t on myschema.t (value).
+        """
+        db.execute(decoy_public_t, 'create unique index uq_t on public.t (decoy)')
+        db.execute(decoy_public_t, 'create unique index uq_t on myschema.t (value)')
+        return decoy_public_t
+
+    def test_qualified_name_reads_its_own_schema(self, two_uq_t):
+        """Verify the conflict target comes from the named schema's index.
+
+        Mutation: matching the bare table name, so public.t's uq_t wins.
+        Oracle: each index's hand-written column list.
+        """
+        strategy = get_db_strategy(two_uq_t)
+        assert strategy.get_constraint_definition(two_uq_t, 'myschema.t', 'uq_t') == '(value)'
+        assert strategy.get_constraint_definition(two_uq_t, 'public.t', 'uq_t') == '(decoy)'
+        assert strategy.get_constraint_definition(two_uq_t, 't', 'uq_t') == '(decoy)'
+
+    def test_upsert_on_qualified_table_uses_its_own_index(self, two_uq_t):
+        """Verify upsert_rows conflicts on myschema.t's uq_t, not public's.
+
+        Mutation: the conflict target read from public.t's uq_t (decoy).
+        Oracle: value 1 belongs to 'alpha', so the row renames it.
+        """
+        db.upsert_rows(two_uq_t, 'myschema.t', [{'name': 'zeta', 'value': 1}],
+                       constraint_name='uq_t', update_cols_always=['name'])
+        rows = db.select(two_uq_t, 'select name, value from myschema.t order by value')
+        assert [(row['name'], row['value']) for row in rows] == [
+            ('zeta', 1), ('beta', 2)]
+
+    def test_quoted_table_name_holding_a_dot(self, pg_conn):
+        """Verify a quoted name with a dot inside is one table, not two parts.
+
+        Mutation: table.split('.') on the raw name, looking up table 'b"'.
+        Oracle: the hand-written column list of uq_ab.
+        """
+        db.execute(pg_conn, 'drop table if exists "a.b"')
+        db.execute(pg_conn, 'create table "a.b" (k int)')
+        db.execute(pg_conn, 'create unique index uq_ab on "a.b" (k)')
+        try:
+            strategy = get_db_strategy(pg_conn)
+            assert strategy.get_constraint_definition(pg_conn, '"a.b"', 'uq_ab') == '(k)'
+        finally:
+            db.execute(pg_conn, 'drop table "a.b"')
+
+
+@pytest.mark.usefixtures('psql_docker')
 class TestSchemaQualifiedQueries:
     """Reads and writes through the library on 'myschema.t'.
     """

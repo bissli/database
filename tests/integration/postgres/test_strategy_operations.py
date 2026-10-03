@@ -3,6 +3,7 @@
 import io
 
 import database as db
+import psycopg
 import pytest
 from database.strategy import PostgresStrategy
 
@@ -86,6 +87,41 @@ create temporary table test_composite_pk (
     composite_pk = strategy.get_primary_keys(pg_conn, 'test_composite_pk')
     assert set(composite_pk) == {'id1', 'id2'}
     assert strategy.get_primary_keys(pg_conn, 'test_table') == ['name']
+
+
+@pytest.mark.parametrize('table', ['Order Items', 'MixedCase', 'public.MixedCase'])
+def test_strategy_get_primary_keys_on_a_name_needing_quotes(
+        psql_docker, pg_conn, table):
+    """Verify the key lookup resolves a name as the sequence lookup does.
+
+    Mutation: the raw name cast to regclass, which folds MixedCase to
+              lower case and rejects the space in Order Items.
+    Oracle: the hand-written serial key, which get_sequence_columns
+            also finds under the same spelling.
+    """
+    name = table.removeprefix('public.')
+    db.execute(pg_conn, f'create table "{name}" (id serial primary key, data text)')
+    try:
+        strategy = PostgresStrategy()
+        sequence_cols = strategy.get_sequence_columns(pg_conn, table, bypass_cache=True)
+        assert sequence_cols == ['id']
+        assert strategy.get_primary_keys(pg_conn, table, bypass_cache=True) == ['id']
+    finally:
+        db.execute(pg_conn, f'drop table "{name}"')
+
+
+def test_strategy_get_primary_keys_on_a_missing_table(psql_docker, pg_conn):
+    """Verify a missing table raises, so no fallback sequence column is cached.
+
+    Mutation: to_regclass in place of the ::regclass cast, which returns
+              [] and lets find_sequence_column cache the 'id' fallback.
+    Oracle: PostgreSQL's UndefinedTable for a relation that does not exist.
+    """
+    strategy = PostgresStrategy()
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        strategy.get_primary_keys(pg_conn, 'no_such_table', bypass_cache=True)
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        strategy.find_sequence_column(pg_conn, 'no_such_table', bypass_cache=True)
 
 
 def test_strategy_get_sequence_columns(psql_docker, pg_conn):

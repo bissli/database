@@ -773,6 +773,55 @@ def test_insert_rows_column_and_parameter_order():
     assert params == [[1, 'a', 'x'], [2, 'b', 'y']]
 
 
+def test_insert_rows_binds_each_row_by_column_name(upsert_conn):
+    """Verify a row whose keys come in another order stores by name.
+
+    Mutation: each row bound by row.values() in place of by column name.
+    Oracle: hand-written stored pairs; the second row lists b before a.
+    """
+    upsert_conn.insert_rows('eventlog', [
+        {'a': '1', 'b': '2'},
+        {'b': '3', 'a': '4'},
+        ])
+
+    stored = db.select(
+        upsert_conn, 'select a, b from eventlog order by a')
+    assert stored.values.tolist() == [['1', '2'], ['4', '3']]
+
+
+def test_insert_rows_missing_key_binds_null_parameter():
+    """Verify a key absent from some rows still gets a column, bound null.
+
+    Mutation: the column list taken from rows[0] alone, or row[col].
+    Oracle: hand-written literal and parameter lists; 'email' first
+        appears in the third row.
+    """
+    cn = StubConnection('postgresql', ['id', 'name', 'email'], ['id'])
+    rows = (
+        {'id': 1, 'name': 'a'},
+        {'id': 2},
+        {'id': 3, 'email': 'z'},
+        )
+    cn.insert_rows('users', rows)
+
+    sql, params, _ = cn.recorder.calls[-1]
+    assert sql == 'insert into "users" ("id","name","email") values (%s, %s, %s)'
+    assert params == [[1, 'a', None], [2, None, None], [3, None, 'z']]
+
+
+def test_insert_rows_with_only_unknown_keys_issues_no_statement():
+    """Verify rows holding no table column insert nothing and return 0.
+
+    Mutation: the guard testing the filtered list's length in place of
+        whether any filtered row kept a key.
+    Oracle: a recording stub cursor stays empty.
+    """
+    cn = StubConnection('postgresql', ['id', 'name'], ['id'])
+
+    assert cn.insert_rows('t', ({'bogus': 1}, {'other': 2})) == 0
+    assert cn.recorder.calls == []
+
+
 @pytest.mark.parametrize(('dialect', 'marker'), [
     ('postgresql', '%s'),
     ('sqlite', '?'),

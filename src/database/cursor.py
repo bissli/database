@@ -9,11 +9,11 @@ from typing import Any
 
 from database.exceptions import QueryError
 from database.sql import has_named_placeholders, has_placeholders
+from database.sql import mask_protected_text
 from database.sql import raise_on_readonly_disarm, split_statements
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
 from database.types import columns_from_cursor_description
-from database.utils import ensure_commit
 
 from libb import collapse
 
@@ -213,7 +213,9 @@ class Cursor:
         self._execute_query(operation, args)
 
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
-            ensure_commit(self.connwrapper)
+            # SQLAlchemy tracks no transaction for the raw cursor's
+            # statements, so sa_connection.commit() would not commit them.
+            self.connwrapper.dbapi_connection.commit()
 
         return self.dbapi_cursor.rowcount
 
@@ -236,7 +238,7 @@ class Cursor:
             return
 
         if args and not has_placeholders(sql):
-            self.dbapi_cursor.execute(sql)
+            self._execute_without_params(sql)
             logger.debug('Executed query without placeholders (ignoring args)')
             return
 
@@ -294,15 +296,19 @@ class Cursor:
             params = args
 
         placeholder = self.strategy.get_placeholder_style()
-        placeholder_count = sum(stmt.count(placeholder) for stmt in statements)
+        dialect = getattr(self.connwrapper, 'dialect', 'postgresql')
+        counts = []
+        for stmt in statements:
+            masked = mask_protected_text(stmt, dialect)
+            counts.append((stmt if masked is None else masked).count(placeholder))
+        placeholder_count = sum(counts)
         if len(params) != placeholder_count:
             raise QueryError(
                 f'Parameter count mismatch: SQL needs {placeholder_count} '
                 f'but {len(params)} were provided')
 
         param_index = 0
-        for stmt in statements:
-            count = stmt.count(placeholder)
+        for stmt, count in zip(statements, counts):
             if count > 0:
                 stmt_params = params[param_index:param_index + count]
                 param_index += count
@@ -401,7 +407,9 @@ class Cursor:
                 total_rowcount += self.dbapi_cursor.rowcount
 
         if auto_commit and not getattr(self.connwrapper, 'in_transaction', False):
-            ensure_commit(self.connwrapper)
+            # SQLAlchemy tracks no transaction for the raw cursor's
+            # statements, so sa_connection.commit() would not commit them.
+            self.connwrapper.dbapi_connection.commit()
 
         return total_rowcount
 
