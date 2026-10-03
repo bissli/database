@@ -1,6 +1,6 @@
 """Database access for PostgreSQL and SQLite.
 """
-__version__ = '0.5.2'
+__version__ = '0.6.0'
 
 from typing import Any, TextIO
 
