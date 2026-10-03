@@ -1328,29 +1328,42 @@ class TestStandardizePlaceholders:
         """
         assert standardize_placeholders(sql, dialect) == expected
 
-    def test_named_params_survive_conversion_of_positional_ones(self):
-        """A pyformat name stays put while the bare '%s' beside it converts.
+    def test_named_and_positional_params_both_convert_for_sqlite(self):
+        """A pyformat name becomes ':name' and the bare '%s' beside it '?'.
 
         Mutation: dropping the `m.group(1)` check from the replace callback
-            in standardize_placeholders, which rewrites '%(a)s' to '?'.
-        Oracle: hand-written mixed SQL; the '%s' must move and the
-            '%(a)s' must not.
+            in standardize_placeholders, which rewrites '%(a)s' to '?';
+            or returning the pyformat text unchanged.
+        Oracle: hand-written mixed SQL in sqlite3's ':name' and '?' forms.
         """
         sql = 'SELECT * FROM t WHERE a = %(a)s AND b = %s'
 
         assert standardize_placeholders(sql, 'sqlite') == (
-            'SELECT * FROM t WHERE a = %(a)s AND b = ?')
+            'SELECT * FROM t WHERE a = :a AND b = ?')
 
-    def test_named_only_sql_is_returned_unchanged(self):
-        """A named-only query takes the sqlite quick path untouched.
+    def test_named_only_sql_converts_for_sqlite(self):
+        """A named-only query reaches the substitution pass on sqlite.
 
-        Mutation: the quick check `'%s' not in sql` widened to `'%' not in
-            sql`, which drags '%(id)s' into the substitution pass.
-        Oracle: hand-written SQL identical to the input.
+        Mutation: the quick check `'%' not in sql` narrowed to `'%s' not
+            in sql`, which returns '%(id)s' early for sqlite3 to reject.
+        Oracle: hand-written SQL in sqlite3's ':name' form.
         """
         sql = 'SELECT * FROM users WHERE id = %(id)s'
 
-        assert standardize_placeholders(sql, 'sqlite') == sql
+        assert standardize_placeholders(sql, 'sqlite') == (
+            'SELECT * FROM users WHERE id = :id')
+
+    def test_named_params_unchanged_for_postgresql(self):
+        """A pyformat name stays as written for psycopg.
+
+        Mutation: _named_ph called with a fixed 'sqlite' dialect, which
+            turns '%(a)s' into ':a' for PostgreSQL.
+        Oracle: hand-written SQL where only the '?' moves.
+        """
+        sql = 'SELECT * FROM t WHERE a = %(a)s AND b = ?'
+
+        assert standardize_placeholders(sql, 'postgresql') == (
+            'SELECT * FROM t WHERE a = %(a)s AND b = %s')
 
     def test_preserves_string_literals(self):
         """A '%s' inside a literal is not converted; the real one is.

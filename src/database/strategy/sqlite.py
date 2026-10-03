@@ -355,7 +355,7 @@ select name as column from pragma_table_info({quoted_table})
         return '?'
 
     def standardize_sql(self, sql: str) -> str:
-        """Convert PostgreSQL-style placeholders (%s) to SQLite-style (?).
+        """SQL with '%s' rewritten to '?' and '%(name)s' to ':name'.
         """
         return standardize_placeholders(sql, dialect='sqlite')
 
