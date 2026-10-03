@@ -241,12 +241,27 @@ def has_named_placeholders(sql: str | None, dialect: str = 'postgresql') -> bool
 
 
 def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
-    """Convert placeholders between database dialects."""
+    """SQL with its placeholders rewritten into the dialect's style.
+
+    Parameters
+    ----------
+    sql : str
+        Statement text. An empty string or None comes back as given.
+    dialect : str, default 'postgresql'
+        'sqlite' turns '%s' into '?' and '%(name)s' into ':name'. Any
+        other value turns '?' into '%s' and keeps '%(name)s'.
+
+    Returns
+    -------
+    str
+        The rewritten statement. A placeholder inside a string literal, a
+        comment, or a dollar-quoted body stays as written.
+    """
     if not sql:
         return sql
 
     # Quick check: nothing to convert
-    if dialect == 'sqlite' and '%s' not in sql:
+    if dialect == 'sqlite' and '%' not in sql:
         return sql
     if dialect == 'postgresql' and '?' not in sql:
         return sql
@@ -260,7 +275,9 @@ def standardize_placeholders(sql: str, dialect: str = 'postgresql') -> str:
         if (dialect == 'postgresql' and m.group(0) == '?'
                 and _is_jsonb_op(sql, m.start())):
             return m.group(0)
-        return m.group(0) if m.group(1) else target  # Keep named params
+        if m.group(1):
+            return _named_ph(m.group(1), dialect)
+        return target
 
     return _PH_RE.sub(replace, sql)
 

@@ -127,3 +127,32 @@ def test_quoted_identifier_sigil_keeps_dict_value_positional(sl_conn, column):
     db.execute(sl_conn, f'insert into j (id, {column}, data) values (?, 1, ?)', 6, {'k': 'v'})
 
     assert db.select_scalar(sl_conn, 'select data from j where id = 6') == '{"k": "v"}'
+
+
+def test_pyformat_params_bind_on_cursor_execute(sl_conn):
+    """Verify Cursor.execute binds '%(name)s' with a dict on SQLite.
+
+    Mutation: standardize_placeholders keeping '%(name)s' for sqlite, which
+        sqlite3 rejects with 'near "%": syntax error'.
+    Oracle: hand-chosen value read back for the named row.
+    """
+    sql = 'update test_table set value = %(value)s where name = %(who)s'
+    sl_conn.cursor().execute(sql, {'value': 11, 'who': 'Alice'})
+
+    values = db.select_column(sl_conn, 'select value from test_table order by name')
+    assert values == [11, 20, 30]
+
+
+def test_pyformat_params_bind_on_cursor_executemany(sl_conn):
+    """Verify Cursor.executemany binds '%(name)s' from a list of dicts.
+
+    Mutation: standardize_placeholders keeping '%(name)s' for sqlite, or
+        executemany skipping standardize_sql.
+    Oracle: hand-chosen values per row, keys out of placeholder order.
+    """
+    sql = 'update test_table set value = %(value)s where name = %(who)s'
+    params = [{'who': 'Alice', 'value': 11}, {'who': 'Bob', 'value': 22}]
+    sl_conn.cursor().executemany(sql, params)
+
+    values = db.select_column(sl_conn, 'select value from test_table order by name')
+    assert values == [11, 22, 30]
