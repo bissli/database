@@ -890,8 +890,11 @@ The module automatically handles common Python, NumPy, and Pandas data types:
 
 - Python native types: `str`, `int`, `float`, `bool`, `datetime`, etc.
 - NumPy types: `np.float64`, `np.int64`, etc.
-- Pandas types: `pd.NA`, nullable integer types
+- Pandas types: `pd.NA`, nullable integer types, `pd.Timestamp`
 - PyArrow scalar types
+
+A `pd.Timestamp` or `np.datetime64` binds as a `datetime.datetime` cut
+to the microsecond, the finest precision either database stores.
 
 NULL values are handled consistently across databases:
 - Python `None` values are converted to database NULL

@@ -1,5 +1,6 @@
 """NumPy and pandas parameter values bound against PostgreSQL.
 """
+import datetime
 import math
 
 import database as db
@@ -72,6 +73,23 @@ def test_numpy_pandas_types_iterdict_loader(psql_docker, pg_conn):
     assert row['array_col'] == [1, 2, 3, 4, 5]
     assert row['nullable_col'] == 1
     assert row['null_col'] is None
+
+
+def test_datetime_values_keep_microseconds(psql_docker, pg_conn):
+    """Verify pd.Timestamp and datetime64 values store with microseconds.
+
+    Mutation: a datetime64[s] rescale in TypeConverter.
+    Oracle: the hand-chosen 03:04:05.123456 read back field for field.
+    """
+    stamp = datetime.datetime(2026, 1, 2, 3, 4, 5, 123456)
+    db.execute(pg_conn, 'drop table if exists stamps')
+    db.execute(pg_conn, 'create table stamps (id integer, ts timestamp)')
+    rows = [{'id': 1, 'ts': np.datetime64(stamp)}, {'id': 2, 'ts': pd.Timestamp(stamp)}]
+
+    db.insert_rows(pg_conn, 'stamps', rows)
+    db.execute(pg_conn, 'insert into stamps values (%s, %s)', 3, np.datetime64(stamp))
+
+    assert db.select_column(pg_conn, 'select ts from stamps order by id') == [stamp] * 3
 
 
 if __name__ == '__main__':

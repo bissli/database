@@ -121,7 +121,13 @@ def _convert_numpy_value(val: Any) -> float | int | bool | datetime.datetime | N
     -------
     float | int | bool | datetime.datetime | None
         The unboxed builtin. None for NaN, infinity and NaT. A datetime64
-        comes back as a naive UTC datetime, truncated to the second.
+        comes back as a naive datetime holding the same wall-clock value,
+        cut to the microsecond.
+
+    Raises
+    ------
+    ValueError
+        A datetime64 whose year falls outside 1-9999.
     """
     if isinstance(val, np.floating) and (np.isnan(val) or np.isinf(val)):
         return None
@@ -133,9 +139,12 @@ def _convert_numpy_value(val: Any) -> float | int | bool | datetime.datetime | N
         return val.item()
 
     if isinstance(val, np.datetime64):
-        timestamp = val.astype('datetime64[s]').astype(int)
-        return datetime.datetime.fromtimestamp(
-            timestamp, datetime.UTC).replace(tzinfo=None)
+        # item() gives an int, microseconds since the epoch, outside
+        # datetime's range, and SQLite would store that int silently.
+        converted = val.astype('datetime64[us]').item()
+        if not isinstance(converted, datetime.datetime):
+            raise ValueError(f'{val} is outside the datetime range')
+        return converted
 
     return val
 
@@ -158,7 +167,8 @@ class TypeConverter:
         Any
             A driver-ready value. None for None, NaN, infinity, NaT,
             pd.NA, a PyArrow null and ''. Any other str, 'nan' and
-            'None' included, comes back unchanged.
+            'None' included, comes back unchanged. A pd.Timestamp or
+            datetime64 comes back as a datetime cut to the microsecond.
         """
         if value is None:
             return None
@@ -182,6 +192,11 @@ class TypeConverter:
 
         if isinstance(value, type(pd.NaT)):
             return None
+
+        # sqlite3 matches adapters by exact type, so the registered
+        # datetime adapter never sees this subclass.
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime(warn=False)
 
         if isinstance(value, str) and not value:
             return None
@@ -705,7 +720,7 @@ class RowAdapter:
 
     @staticmethod
     def create_attrdict_from_cols(cols: list[str]) -> attrdict:
-        """attrdict mapping each name in cols to None.
+        """Attrdict mapping each name in cols to None.
         """
         return attrdict(RowAdapter.create_empty_dict(cols))
 

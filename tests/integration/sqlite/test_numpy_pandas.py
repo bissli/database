@@ -1,5 +1,6 @@
 """NumPy and pandas parameter values bound on SQLite.
 """
+import datetime
 import json
 import math
 
@@ -70,3 +71,21 @@ def test_numpy_pandas_types_iterdict_loader(sl_conn, monkeypatch):
     assert abs(row['float_col'] - math.pi) < 0.00001
     assert row['nullable_col'] == 1
     assert row['null_col'] is None
+
+
+def test_datetime_values_from_a_dataframe_round_trip(sl_conn):
+    """Verify pd.Timestamp and datetime64 values store with microseconds.
+
+    Mutation: dropping the pd.Timestamp branch of TypeConverter (sqlite3
+        raises ProgrammingError), or a datetime64[s] rescale.
+    Oracle: the hand-chosen 03:04:05.123456 read back field for field.
+    """
+    stamp = datetime.datetime(2026, 1, 2, 3, 4, 5, 123456)
+    db.execute(sl_conn, 'create table stamps (id integer, ts timestamp)')
+    rows = pd.DataFrame({'id': [1], 'ts': [pd.Timestamp(stamp)]}).to_dict('records')
+
+    db.insert_rows(sl_conn, 'stamps', rows)
+    db.execute(sl_conn, 'insert into stamps values (?, ?)', 2, pd.Timestamp(stamp))
+    db.execute(sl_conn, 'insert into stamps values (?, ?)', 3, np.datetime64(stamp))
+
+    assert db.select_column(sl_conn, 'select ts from stamps order by id') == [stamp] * 3

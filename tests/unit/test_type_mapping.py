@@ -284,18 +284,53 @@ class TestTypeConverterScalars:
         assert type(converted_list) is list
         assert converted_list == [1, 2, 3]
 
-    def test_datetime64_converts_as_utc_at_second_scale(self, eastern_timezone):
-        """Verify datetime64 converts through the UTC epoch in seconds.
+    def test_datetime64_keeps_wall_clock_and_microseconds(self, eastern_timezone):
+        """Verify datetime64 keeps its wall-clock value down to the microsecond.
 
-        Mutation: dropping datetime.UTC or the datetime64[s] rescale.
-        Oracle: hand-computed 12:34:56 UTC under America/New_York.
+        Mutation: a datetime64[s] rescale, or a local-time conversion.
+        Oracle: the input's own fields, 12:34:56.123456, under
+            America/New_York; the nanosecond digits are cut.
         """
         converted = TypeConverter.convert_value(
-            np.datetime64('2023-01-15T12:34:56.789'))
+            np.datetime64('2023-01-15T12:34:56.123456789'))
 
-        assert converted == datetime.datetime(2023, 1, 15, 12, 34, 56)
+        assert converted == datetime.datetime(2023, 1, 15, 12, 34, 56, 123456)
         assert type(converted) is datetime.datetime
         assert converted.tzinfo is None
+
+    def test_datetime64_outside_the_datetime_range_raises(self):
+        """Verify a datetime64 past year 9999 raises instead of binding an int.
+
+        Mutation: dropping the isinstance check after item(), which binds
+            microseconds since the epoch as an integer.
+        Oracle: years 10000 and 0 either side of the range, and
+            9999-12-31 inside it.
+        """
+        with pytest.raises(ValueError, match='outside the datetime range'):
+            TypeConverter.convert_value(np.datetime64('10000-01-01'))
+        with pytest.raises(ValueError, match='outside the datetime range'):
+            TypeConverter.convert_value(np.datetime64('0000-06-01T00:00:00'))
+        assert TypeConverter.convert_value(
+            np.datetime64('9999-12-31T23:59:59.999999')) == datetime.datetime(
+                9999, 12, 31, 23, 59, 59, 999999)
+
+    def test_pandas_timestamp_becomes_a_plain_datetime(self):
+        """Verify a pd.Timestamp comes back as an exact datetime.datetime.
+
+        Mutation: dropping the pd.Timestamp branch, which leaves the
+            subclass that sqlite3 cannot bind.
+        Oracle: the input's own fields, naive and tz-aware.
+        """
+        naive = TypeConverter.convert_value(
+            pd.Timestamp('2023-01-15 12:34:56.123456789'))
+        aware = TypeConverter.convert_value(
+            pd.Timestamp('2023-01-15 12:34:56.5', tz='UTC'))
+
+        assert type(naive) is datetime.datetime
+        assert naive == datetime.datetime(2023, 1, 15, 12, 34, 56, 123456)
+        assert type(aware) is datetime.datetime
+        assert aware == datetime.datetime(
+            2023, 1, 15, 12, 34, 56, 500000, tzinfo=datetime.UTC)
 
     def test_containers_skip_the_pandas_isna_branch(self):
         """Verify a list or tuple value comes back instead of raising.

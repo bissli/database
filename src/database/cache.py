@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 class Cache:
     """Process-wide registry of named TTL caches.
 
-    Creating and clearing caches take a lock. Reading and writing an
-    entry does not.
+    Creating and clearing caches take Cache._lock. A cache returned by
+    get_cache does not lock itself, so a caller reading or writing an
+    entry holds Cache._lock, or a concurrent clear can raise KeyError.
     """
 
     _instance = None
@@ -270,7 +271,8 @@ def cacheable_strategy(cache_name: str, ttl: int = 300,
                     specific_cache_name, ttl=ttl, maxsize=maxsize)
                 cache_key = (f'{_create_cache_key(table, args, kwargs)}'
                              f':{engine_cache_id(cn)}')
-                cached = cache.get(cache_key, _MISS)
+                with Cache._lock:
+                    cached = cache.get(cache_key, _MISS)
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f'Cache error in {method.__name__}({table}): {e}')
                 return method(self, cn, table, *args, **kwargs)
@@ -282,7 +284,8 @@ def cacheable_strategy(cache_name: str, ttl: int = 300,
             logger.debug(f'Cache miss for {method.__name__}({table})')
             result = method(self, cn, table, *args, **kwargs)
             try:
-                cache[cache_key] = result
+                with Cache._lock:
+                    cache[cache_key] = result
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f'Could not store cache entry for '
                                f'{method.__name__}({table}): {e}')

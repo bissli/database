@@ -728,6 +728,42 @@ class TestCacheClearing:
             Transaction(Wrapper(engine_a)), 'widgets') == ['v1']
         assert get_count() == 2
 
+    def test_decorator_touches_its_cache_only_under_the_clear_lock(
+            self, mock_connection, strategy, method_factory, monkeypatch):
+        """Verify every cache read and write holds Cache._lock.
+
+        Mutation: cacheable_strategy reading or writing its cache outside
+            Cache._lock, which lets a concurrent clear_for_table corrupt
+            the TTLCache and raise KeyError.
+        Oracle: a cache that records whether the calling thread owns
+            Cache._lock at each access.
+        """
+        lock_held = []
+
+        class RecordingCache(cachetools.TTLCache):
+            def __contains__(self, key):
+                lock_held.append(Cache._lock._is_owned())
+                return super().__contains__(key)
+
+            def __getitem__(self, key):
+                lock_held.append(Cache._lock._is_owned())
+                return super().__getitem__(key)
+
+            def __setitem__(self, key, value):
+                lock_held.append(Cache._lock._is_owned())
+                super().__setitem__(key, value)
+
+        monkeypatch.setitem(
+            Cache._caches, 'table_columns_ProbeStrategy_get_columns',
+            RecordingCache(maxsize=50, ttl=300))
+        get_count = method_factory.create('table_columns', ['col1'])
+
+        assert strategy.get_columns(mock_connection, 'widgets') == ['col1']
+        assert strategy.get_columns(mock_connection, 'widgets') == ['col1']
+        assert get_count() == 1
+        assert lock_held
+        assert all(lock_held)
+
 
 class TestConcreteStrategyMethodsAreCached:
     """Tests that the real strategy overrides re-apply the decorator.
