@@ -1,13 +1,14 @@
 """Process-wide TTL caches for schema metadata and strategy lookups.
 """
 import functools
+import itertools
 import logging
 import threading
+import weakref
 from collections.abc import Callable
 from typing import Any
 
 import cachetools
-
 from database.sql import _split_qualified_identifier
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,37 @@ class Cache:
 
 
 _MISS = object()
+_engine_ids: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+_engine_id_counter = itertools.count(1)
+
+
+def engine_cache_id(cn: Any) -> int:
+    """Number that tells one engine's cache entries from another's.
+
+    Parameters
+    ----------
+    cn : Any
+        ConnectionWrapper, or a Transaction, whose cn is used. An object
+        with no engine attribute is numbered itself.
+
+    Returns
+    -------
+    int
+        Unique to the engine for the life of the process, and never
+        reused, so a new engine at a dead engine's address cannot read
+        the dead engine's entries.
+
+    Raises
+    ------
+    TypeError
+        When the engine cannot be weakly referenced.
+    """
+    owner = getattr(cn, 'cn', cn)
+    engine = getattr(owner, 'engine', owner)
+    with Cache._lock:
+        if engine not in _engine_ids:
+            _engine_ids[engine] = next(_engine_id_counter)
+        return _engine_ids[engine]
 
 
 def _bare_table_name(name: str) -> str:
@@ -178,7 +210,8 @@ def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) 
     -------
     str
         'table:arg:...:name=value:...' built from repr() of each value,
-        with kwargs sorted by name, the whole key lower-cased.
+        with kwargs sorted by name. Case is kept, because PostgreSQL
+        reads a quoted "Orders" and orders as two tables.
     """
     args_str = ':'.join(
         repr(arg) for arg in method_args
@@ -192,14 +225,17 @@ def _create_cache_key(table_name: str, method_args: tuple, method_kwargs: dict) 
         and not hasattr(v, 'driver_connection')
     )
 
-    return f'{table_name}:{args_str}:{kwargs_str}'.lower()
+    return f'{table_name}:{args_str}:{kwargs_str}'
 
 
 def cacheable_strategy(cache_name: str, ttl: int = 300,
                        maxsize: int = 50) -> Callable[[Callable], Callable]:
-    """Decorator that caches a strategy method's result per table.
+    """Decorator that caches a strategy method's result per engine and table.
 
-    The method must take (self, cn, table, ...).
+    The method must take (self, cn, table, ...). The key holds the table
+    name as passed, so an unqualified PostgreSQL name keeps the result its
+    search_path gave. A caller that changes search_path calls
+    Cache.clear_for_table.
 
     Parameters
     ----------
@@ -232,7 +268,8 @@ def cacheable_strategy(cache_name: str, ttl: int = 300,
                 specific_cache_name = f'{cache_name}_{strategy_class}_{method.__name__}'
                 cache = Cache.get_instance().get_cache(
                     specific_cache_name, ttl=ttl, maxsize=maxsize)
-                cache_key = _create_cache_key(table, args, kwargs)
+                cache_key = (f'{_create_cache_key(table, args, kwargs)}'
+                             f':{engine_cache_id(cn)}')
                 cached = cache.get(cache_key, _MISS)
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(f'Cache error in {method.__name__}({table}): {e}')

@@ -9,8 +9,8 @@ from typing import Any
 
 from database.exceptions import QueryError
 from database.sql import has_named_placeholders, has_placeholders
-from database.sql import mask_protected_text
-from database.sql import raise_on_readonly_disarm, split_statements
+from database.sql import mask_protected_text, raise_on_readonly_disarm
+from database.sql import split_statements
 from database.strategy import get_db_strategy
 from database.types import RowAdapter, TypeConverter
 from database.types import columns_from_cursor_description
@@ -263,6 +263,9 @@ class Cursor:
         """
         if not args:
             self.dbapi_cursor.execute(sql)
+        elif (len(args) == 1 and isinstance(args[0], (list, tuple, dict))
+              and not args[0]):
+            self._execute_without_params(sql)
         elif len(args) == 1 and isinstance(args[0], (list, tuple)):
             self.dbapi_cursor.execute(sql, args[0])
         else:
@@ -344,12 +347,14 @@ class Cursor:
                 self._execute_without_params(stmt)
 
     def _execute_without_params(self, stmt: str) -> None:
-        """Run one statement of a parameterized multi-statement call.
+        """Run one statement without parameters, '%%' made '%' on PostgreSQL.
 
         Parameters
         ----------
         stmt : str
-            Statement holding no placeholder.
+            Statement holding no placeholder. The public API passes a
+            no-args call here too, so on PostgreSQL '%%' means '%' whether
+            or not a call binds args.
         """
         if getattr(self.connwrapper, 'dialect', 'postgresql') == 'postgresql':
             stmt = stmt.replace('%%', '%')

@@ -4,7 +4,6 @@ import atexit
 import logging
 import threading
 import time
-import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from functools import wraps
@@ -12,6 +11,7 @@ from typing import Any, Self, TextIO, TypeVar
 
 import pandas as pd
 import sqlalchemy as sa
+from database.cache import Cache, engine_cache_id
 from database.cursor import Cursor, extract_column_info, get_dict_cursor
 from database.cursor import load_data, process_multiple_result_sets
 from database.exceptions import DbConnectionError, ReadOnlyError
@@ -45,9 +45,6 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _engine_registry: dict[str, Engine] = {}
 _engine_registry_lock = threading.RLock()
-_schema_cache: weakref.WeakKeyDictionary[Engine, dict[tuple, list[str]]] = (
-    weakref.WeakKeyDictionary())
-_schema_cache_lock = threading.RLock()
 _CONNECTION_ROLES = frozenset({'writer', 'reader'})
 
 
@@ -694,20 +691,25 @@ class ConnectionWrapper:
         Returns
         -------
         list[str]
-            The cached list itself, so a caller must not mutate it.
+            The cached list itself, so a caller must not mutate it. An
+            entry lasts until Cache's schema TTL expires or
+            Cache.clear_for_table(table) drops it.
         """
-        cache_key = ('columns', table)
-        with _schema_cache_lock:
-            engine_cache = _schema_cache.setdefault(self.engine, {})
-            if not bypass_cache and cache_key in engine_cache:
-                return engine_cache[cache_key]
+        cache_key = f'{table}:columns:{engine_cache_id(self)}'
+        schema_cache = Cache.get_instance().get_schema_cache()
+        # Cache.clear_for_table deletes entries under Cache._lock, so a
+        # separate lock would let a clear run between the test and read.
+        with Cache._lock:
+            cached = None if bypass_cache else schema_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         schema, name = _split_schema_for_inspector(table)
         self._ensure_connection()
         inspector = inspect(self.sa_connection)
         columns = [col['name'] for col in inspector.get_columns(name, schema=schema)]
-        with _schema_cache_lock:
-            engine_cache[cache_key] = columns
+        with Cache._lock:
+            schema_cache[cache_key] = columns
         return columns
 
     def get_table_primary_keys(self, table: str,
@@ -725,21 +727,24 @@ class ConnectionWrapper:
         -------
         list[str]
             Empty for a table without a primary key. The cached list
-            itself, so a caller must not mutate it.
+            itself, so a caller must not mutate it. An entry lasts until
+            Cache's schema TTL expires or Cache.clear_for_table(table)
+            drops it.
         """
-        cache_key = ('primary_keys', table)
-        with _schema_cache_lock:
-            engine_cache = _schema_cache.setdefault(self.engine, {})
-            if not bypass_cache and cache_key in engine_cache:
-                return engine_cache[cache_key]
+        cache_key = f'{table}:primary_keys:{engine_cache_id(self)}'
+        schema_cache = Cache.get_instance().get_schema_cache()
+        with Cache._lock:
+            cached = None if bypass_cache else schema_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         schema, name = _split_schema_for_inspector(table)
         self._ensure_connection()
         inspector = inspect(self.sa_connection)
         pk_constraint = inspector.get_pk_constraint(name, schema=schema)
         primary_keys = pk_constraint.get('constrained_columns', [])
-        with _schema_cache_lock:
-            engine_cache[cache_key] = primary_keys
+        with Cache._lock:
+            schema_cache[cache_key] = primary_keys
         return primary_keys
 
     def get_sequence_columns(self, table: str,

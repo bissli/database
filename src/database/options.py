@@ -106,7 +106,9 @@ def pandas_numpy_data_loader(data: Iterable[dict] | None, columns: list[Column],
     -------
     pd.DataFrame
         Zero rows for empty input. attrs['column_types'] holds
-        Column.get_column_types_dict(columns).
+        Column.get_column_types_dict(columns). Under pandas 3 a text
+        column is str dtype and a null in it reads as NaN; under pandas 2
+        it is object dtype holding None.
     """
     if not data:
         return _empty_dataframe(columns)

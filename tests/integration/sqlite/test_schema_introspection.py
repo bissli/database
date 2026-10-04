@@ -1,8 +1,14 @@
 """Schema introspection on a SQLite ConnectionWrapper.
 """
+import sys
+import threading
+import time
+
 import database as db
 import pytest
 from database import ColumnInfo, ValidationError
+from database.cache import Cache
+from database.strategy import get_db_strategy
 
 PRICE_DDL = """CREATE TABLE price (
     zeta TEXT,
@@ -131,3 +137,85 @@ def test_introspection_ignores_a_temp_table(schema_conn):
     assert schema_conn.get_unique_indexes('scratch') == []
     with pytest.raises(ValidationError, match='scratch'):
         schema_conn.describe_columns('scratch')
+
+
+def test_clear_for_table_lets_insert_rows_see_an_added_column(tmp_path):
+    """Verify a cleared table's columns are read again on the same engine.
+
+    Mutation: get_table_columns keeping a cache Cache.clear_for_table
+        never reaches.
+    Oracle: the value written to the added column, read back.
+    """
+    cn = db.connect({'drivername': 'sqlite', 'database': str(tmp_path / 'w.db')})
+    try:
+        cn.execute('create table w (code text primary key, n integer)')
+        cn.insert_rows('w', [{'code': 'a', 'n': 1}])
+        cn.execute('alter table w add column extra text')
+        Cache.get_instance().clear_for_table('w')
+
+        cn.insert_rows('w', [{'code': 'b', 'n': 2, 'extra': 'X'}])
+
+        assert db.select_scalar(cn, "select extra from w where code = 'b'") == 'X'
+    finally:
+        cn.close()
+
+
+def test_two_database_files_keep_their_own_primary_keys(tmp_path):
+    """Verify one table name in two files never shares a cached key list.
+
+    Mutation: engine_cache_id dropped from the cacheable_strategy key.
+    Oracle: the primary key each file's DDL declares.
+    """
+    first = db.connect({'drivername': 'sqlite', 'database': str(tmp_path / 'a.db')})
+    second = db.connect({'drivername': 'sqlite', 'database': str(tmp_path / 'b.db')})
+    try:
+        first.execute('create table widgets (code text primary key, id integer)')
+        second.execute('create table widgets (code text, id integer primary key)')
+
+        assert get_db_strategy(first).get_primary_keys(first, 'widgets') == ['code']
+        assert get_db_strategy(second).get_primary_keys(second, 'widgets') == ['id']
+    finally:
+        first.close()
+        second.close()
+
+
+@pytest.mark.slow
+def test_schema_lookup_survives_a_concurrent_clear(tmp_path):
+    """Verify get_table_columns never raises while another thread clears.
+
+    Mutation: get_table_columns testing and reading the schema cache
+        under a lock clear_for_table does not hold.
+    Oracle: zero errors; the separate-lock version raises KeyError
+        dozens of times a second under this switch interval.
+    """
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    cn = db.connect({'drivername': 'sqlite', 'database': str(tmp_path / 'r.db')})
+    cn.execute('create table t (a text primary key, b integer)')
+    errors = []
+    stop_at = time.monotonic() + 2
+
+    def read_schema():
+        while time.monotonic() < stop_at:
+            try:
+                cn.get_table_columns('t')
+                cn.get_table_primary_keys('t')
+            except Exception as exc:
+                errors.append(exc)
+
+    def clear_schema():
+        while time.monotonic() < stop_at:
+            Cache.get_instance().clear_for_table('t')
+
+    threads = [threading.Thread(target=read_schema),
+               threading.Thread(target=clear_schema)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(previous_interval)
+        cn.close()
+
+    assert errors == []

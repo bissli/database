@@ -220,7 +220,6 @@ class TestCacheManager:
         assert schema_cache['users'] == {'id': 'int'}
 
 
-
 class TestCacheKeyGeneration:
     """Tests for _create_cache_key."""
 
@@ -231,14 +230,14 @@ class TestCacheKeyGeneration:
          "test_table:123:'string':45.67:int_arg=42:str_arg='value'"),
         ('Test_Table', [None, 'arg'],
          {'regular_arg': 'value', 'none_arg': None},
-         "test_table:none:'arg':none_arg=none:regular_arg='value'"),
+         "Test_Table:None:'arg':none_arg=None:regular_arg='value'"),
     ], ids=['basic_types', 'none_values'])
     def test_cache_key_has_an_exact_form(
         self, table_name, method_args,
         method_kwargs, expected_key):
-        """Verify the key layout, ordering, and case folding are fixed.
+        """Verify the key layout and ordering are fixed and case is kept.
 
-        Mutation: args sliced [1:], kwargs unsorted, no .lower(), or str().
+        Mutation: args sliced [1:], kwargs unsorted, a .lower(), or str().
         Oracle: hand-written keys over kwargs given out of order.
         """
         assert _create_cache_key(
@@ -266,7 +265,7 @@ class TestCacheKeyGeneration:
             [HasCursor(), HasDriverConnection(), Plain()],
             {'cn': HasCursor(), 'flag': True})
 
-        assert key == 'test_table:plain:flag=true'
+        assert key == 'test_table:PLAIN:flag=True'
 
     def test_cache_key_ignores_the_bypass_cache_kwarg(self):
         """Verify bypass_cache never widens the key space.
@@ -280,7 +279,6 @@ class TestCacheKeyGeneration:
 
         assert with_flag == "test_table:'arg':x=1"
         assert with_flag == without_flag
-
 
 
 class TestDecoratorPlumbing:
@@ -403,7 +401,7 @@ class TestDecoratorPlumbing:
             'table_columns_BoundedStrategy_get_columns')
         assert cache.maxsize == 2
         assert cache.ttl == 77
-        assert sorted(cache) == ['t2::', 't3::']
+        assert sorted(key.split(':')[0] for key in cache) == ['t2', 't3']
 
         probe.get_columns(mock_connection, 't1')
         assert probe.calls == 4
@@ -668,12 +666,13 @@ class TestCacheClearing:
             'test_table2_v1']
         assert get_count() == 3
 
-    def test_table_name_case_shares_one_entry_and_one_clear(
+    def test_table_name_case_keeps_entries_apart_and_one_clear_drops_both(
             self, mock_connection, strategy, method_factory, cache_manager):
-        """Verify table names are folded for both lookup and clearing.
+        """Verify each spelling caches apart and a clear in any case drops both.
 
-        Mutation: the trailing .lower() in _create_cache_key dropped.
-        Oracle: a versioned body; the upper-case call replays 'v1'.
+        Mutation: a .lower() added to _create_cache_key, or removed from
+            _bare_table_name.
+        Oracle: a versioned body; each fresh lookup returns the next version.
         """
         versions = [0]
 
@@ -684,13 +683,49 @@ class TestCacheClearing:
         get_count = method_factory.create('table_columns', versioned_return)
 
         assert strategy.get_columns(mock_connection, 'test_table') == ['v1']
-        assert strategy.get_columns(mock_connection, 'TEST_TABLE') == ['v1']
-        assert get_count() == 1
+        assert strategy.get_columns(mock_connection, 'TEST_TABLE') == ['v2']
+        assert strategy.get_columns(mock_connection, 'test_table') == ['v1']
+        assert get_count() == 2
 
         cache_manager.clear_caches_for_table('TEST_TABLE')
 
-        assert strategy.get_columns(mock_connection, 'test_table') == ['v2']
-        assert strategy.get_columns(mock_connection, 'TEST_TABLE') == ['v2']
+        assert strategy.get_columns(mock_connection, 'test_table') == ['v3']
+        assert strategy.get_columns(mock_connection, 'TEST_TABLE') == ['v4']
+        assert get_count() == 4
+
+    def test_two_engines_never_share_an_entry(
+            self, strategy, method_factory):
+        """Verify one table name on two engines is looked up once per engine.
+
+        Mutation: engine_cache_id dropped from the decorator's key, or the
+            Transaction's cn not followed to its engine.
+        Oracle: a versioned body; engine B's first call returns 'v2', and a
+            Transaction on engine A replays 'v1'.
+        """
+        class Engine:
+            pass
+
+        class Wrapper:
+            def __init__(self, engine):
+                self.engine = engine
+
+        class Transaction:
+            def __init__(self, cn):
+                self.cn = cn
+
+        versions = [0]
+
+        def versioned_return(table):
+            versions[0] += 1
+            return [f'v{versions[0]}']
+
+        get_count = method_factory.create('table_columns', versioned_return)
+        engine_a, engine_b = Engine(), Engine()
+
+        assert strategy.get_columns(Wrapper(engine_a), 'widgets') == ['v1']
+        assert strategy.get_columns(Wrapper(engine_b), 'widgets') == ['v2']
+        assert strategy.get_columns(
+            Transaction(Wrapper(engine_a)), 'widgets') == ['v1']
         assert get_count() == 2
 
 

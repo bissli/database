@@ -377,7 +377,7 @@ class TestPrepareQueryAnyAll:
         assert result == ('select * from t where id = any(%s)', ([1, 2, 3],))
 
     def test_any_with_extra_param_preserves_list(self):
-        """any combined with another placeholder preserves the array.
+        """Any combined with another placeholder preserves the array.
 
         Mutation: _normalize unwrapping whenever `len(args) == 1`.
         Oracle: hand-written ([1, 2], 'alice').
@@ -651,22 +651,36 @@ class TestPrepareQueryPercentEscaping:
     def test_percent_escaping(self, sql, args, dialect, expected_sql):
         """Verify '%' doubling in literals, both sides of the placeholder.
 
-        Mutation: dropping the `(?<!%)` guard from _UNESCAPED_PCT_RE.
+        Mutation: _escape_percents adding a '%' to an even run.
         Oracle: hand-written full SQL per row.
         """
         result_sql, _ = prepare_query(sql, args, dialect)
 
         assert result_sql == expected_sql
 
-    def test_percent_outside_a_literal_is_left_alone(self):
-        """Only string-literal percents are doubled; the modulo op is not.
+    def test_bare_modulo_percent_is_doubled(self):
+        """Verify a modulo '%' outside a literal is doubled for psycopg.
 
-        Mutation: _escape_percents doubling '%' across the whole segment.
-        Oracle: hand-written SQL keeping the bare `50 % 3`.
+        Mutation: _escape_percents limited to string literals again.
+        Oracle: hand-written SQL with `50 %% 3`, which psycopg sends as
+            `50 % 3`; a lone '%' there raises 'incomplete placeholder'.
         """
         sql = 'select 50 % 3 as r, id from t where id = %s'
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
+        assert prepare_query(sql, (1,), 'postgresql') == (
+            'select 50 %% 3 as r, id from t where id = %s', (1,))
+
+    def test_odd_percent_run_is_made_even(self):
+        """Verify a run of three '%' gains one, matching the no-args collapse.
+
+        Mutation: _escape_percents doubling only a lone '%'.
+        Oracle: psycopg halves '%%%%' to '%%', which is what '%%%' becomes
+            without args after '%%' collapses to '%'.
+        """
+        sql = "select '%%%' as a, id from t where id = %s"
+
+        assert prepare_query(sql, (1,), 'postgresql') == (
+            "select '%%%%' as a, id from t where id = %s", (1,))
 
     def test_many_placeholders_prepare_in_linear_time(self):
         """Verify 5000 placeholders prepare well inside a second.
@@ -690,7 +704,7 @@ class TestPrepareQueryPercentEscaping:
             self, literal, expected):
         """A literal '%s' or '%(' reaches psycopg doubled, never as a marker.
 
-        Mutation: `s(` restored to the _UNESCAPED_PCT_RE lookahead.
+        Mutation: _escape_percents skipping a '%' followed by 's' or '('.
         Oracle: psycopg reads an undoubled '%s' in a literal as a marker.
         """
         sql = f'select * from t where name like {literal} and id = %s'
@@ -774,11 +788,12 @@ class TestPrepareQueryDollarQuotes:
         """$$ ... %s ... $$ has no real placeholder; one outside binds one arg.
 
         Mutation: removing the `c == '$'` branch from _protected_ranges.
-        Oracle: SQL identical to the input, plus (42,).
+        Oracle: the input with the body's '%s' doubled, plus (42,).
         """
         sql = 'select $$has %s inside$$, %s from t'
 
-        assert prepare_query(sql, (42,), 'postgresql') == (sql, (42,))
+        assert prepare_query(sql, (42,), 'postgresql') == (
+            'select $$has %%s inside$$, %s from t', (42,))
 
     def test_anonymous_dollar_quoted_body_with_question_mark_postgresql(self):
         """? inside $$...$$ on postgres is literal, not a placeholder.
@@ -794,43 +809,49 @@ class TestPrepareQueryDollarQuotes:
         r"""$tag$ ... %s ... $tag$ body is literal.
 
         Mutation: _DOLLAR_OPEN_RE matching only the anonymous '$$' tag.
-        Oracle: SQL identical to the input, plus (1,).
+        Oracle: the input with the body's '%s' doubled, plus (1,).
         """
         sql = 'select $body$any %s text$body$ from t where id = %s'
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
+        assert prepare_query(sql, (1,), 'postgresql') == (
+            'select $body$any %%s text$body$ from t where id = %s', (1,))
 
     def test_nested_dollar_tags_match_by_tag(self):
         """$outer$ closes only at its own tag, swallowing the inner one.
 
         Mutation: closing a dollar body at the next '$' instead of its tag.
-        Oracle: SQL identical to the input; only the trailing slot binds.
+        Oracle: the input with both body '%s' doubled; only the trailing
+            slot binds.
         """
         sql = 'select $outer$ %s and $inner$ %s $inner$ end $outer$ from t where id = %s'
 
-        assert prepare_query(sql, (99,), 'postgresql') == (sql, (99,))
+        assert prepare_query(sql, (99,), 'postgresql') == (
+            'select $outer$ %%s and $inner$ %%s $inner$ end $outer$ from t where id = %s',
+            (99,))
 
     def test_dollar_quotes_are_not_protected_for_sqlite(self):
         """Dollar quoting is postgres-only; sqlite converts the inner %s.
 
         Mutation: dropping `dialect == 'postgresql'` from the dollar branch.
-        Oracle: postgres keeps the '%s', sqlite turns it into '?'.
+        Oracle: postgres keeps the '%s' as text, doubled to '%%s'; sqlite
+            turns it into '?'.
         """
         sql = 'select $$a %s b$$ from t'
 
         assert prepare_query(sql, ('x',), 'sqlite') == (
             'select $$a ? b$$ from t', ('x',))
-        assert prepare_query(sql, None, 'postgresql')[0] == sql
+        assert prepare_query(sql, None, 'postgresql')[0] == (
+            'select $$a %%s b$$ from t')
 
     def test_unterminated_dollar_quote_protects_to_end_of_sql(self):
         """An unclosed $$ swallows the rest of the statement.
 
         Mutation: falling back to `m.end()` when the closing tag is missing.
-        Oracle: SQL unchanged and an empty arg tuple.
+        Oracle: the '%s' kept as text, doubled, and an empty arg tuple.
         """
         sql = 'select $$abc %s def'
 
-        assert prepare_query(sql, (), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == ('select $$abc %%s def', ())
 
 
 class TestPrepareQueryComments:
@@ -840,41 +861,45 @@ class TestPrepareQueryComments:
         r"""-- comment %s is literal; only the post-newline %s binds.
 
         Mutation: dropping the '--' branch from _protected_ranges.
-        Oracle: SQL identical to the input, plus (5,).
+        Oracle: the input with the comment's '%s' doubled, plus (5,).
         """
         sql = 'select * from t -- comment %s\nwhere id = %s'
 
-        assert prepare_query(sql, (5,), 'postgresql') == (sql, (5,))
+        assert prepare_query(sql, (5,), 'postgresql') == (
+            'select * from t -- comment %%s\nwhere id = %s', (5,))
 
     def test_block_comment_protects_percent_s(self):
         """/* %s */ is literal; only the outside placeholder binds.
 
         Mutation: dropping the '/*' branch from _protected_ranges.
-        Oracle: SQL identical to the input, plus (10,).
+        Oracle: the input with the comment's '%s' doubled, plus (10,).
         """
         sql = 'select /* has %s */ * from t where id = %s'
 
-        assert prepare_query(sql, (10,), 'postgresql') == (sql, (10,))
+        assert prepare_query(sql, (10,), 'postgresql') == (
+            'select /* has %%s */ * from t where id = %s', (10,))
 
     def test_multiline_block_comment_protected(self):
         """A /* ... */ block spanning a newline stays protected throughout.
 
         Mutation: ending a block comment at the newline.
-        Oracle: SQL identical to the input, plus (2,).
+        Oracle: the input with the comment's '%s' doubled, plus (2,).
         """
         sql = 'select /* line1\n%s line2 */ * from t where id = %s'
 
-        assert prepare_query(sql, (2,), 'postgresql') == (sql, (2,))
+        assert prepare_query(sql, (2,), 'postgresql') == (
+            'select /* line1\n%%s line2 */ * from t where id = %s', (2,))
 
     def test_unterminated_block_comment_protects_to_end_of_sql(self):
         """An unclosed /* swallows the rest of the statement.
 
         Mutation: leaving j at the comment start when '*/' is missing.
-        Oracle: SQL unchanged and an empty arg tuple.
+        Oracle: both '%s' kept as text, doubled, and an empty arg tuple.
         """
         sql = 'select * from t /* %s where id = %s'
 
-        assert prepare_query(sql, (), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == (
+            'select * from t /* %%s where id = %%s', ())
 
     def test_comment_marker_inside_string_literal_is_not_a_comment(self):
         """String protection wins over comment markers.
@@ -890,21 +915,23 @@ class TestPrepareQueryComments:
         """The reverse precedence: a comment's quote never starts a string.
 
         Mutation: running the literal scan over the whole SQL before comments.
-        Oracle: SQL identical to the input, plus (1,).
+        Oracle: the input with the comment's '%s' doubled, plus (1,).
         """
         sql = "select * from t -- it's fine %s\nwhere id = %s"
 
-        assert prepare_query(sql, (1,), 'postgresql') == (sql, (1,))
+        assert prepare_query(sql, (1,), 'postgresql') == (
+            "select * from t -- it's fine %%s\nwhere id = %s", (1,))
 
     def test_unterminated_string_literal_protects_to_end_of_sql(self):
         """An unclosed string literal swallows the rest of the statement.
 
         Mutation: `j = i + 1` in place of `j = n` for an unclosed literal.
-        Oracle: SQL unchanged and an empty arg tuple.
+        Oracle: the '%s' kept as text, doubled, and an empty arg tuple.
         """
         sql = "select * from t where s = 'abc %s"
 
-        assert prepare_query(sql, (), 'postgresql') == (sql, ())
+        assert prepare_query(sql, (), 'postgresql') == (
+            "select * from t where s = 'abc %%s", ())
 
     def test_double_quoted_literal_is_protected(self):
         r"""A double-quoted literal's %s is not a placeholder, and is doubled.

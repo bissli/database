@@ -1114,8 +1114,11 @@ columns = cn.get_table_columns('users')  # ['id', 'name', ...]
 ```
 
 `get_table_columns` and `get_table_primary_keys` return the cached list
-itself; a caller must not mutate it. The cache is keyed by engine and
-dies with it. `cn.get_table_columns('users', bypass_cache=True)` reads
+itself; a caller must not mutate it. The list lives in `Cache`'s schema
+cache, keyed by table name and engine, for 600 seconds.
+`Cache.get_instance().clear_for_table('users')` drops it, so a caller
+that alters a table clears it before the next `insert_rows` or
+`upsert_rows`. `cn.get_table_columns('users', bypass_cache=True)` reads
 the catalog again.
 
 #### SQLite Schema Operations
@@ -1265,7 +1268,17 @@ cache_manager.clear_for_table('users')
 `clear_for_table` matches the table part of each key exactly, by its
 last dotted segment, unquoted and lower-cased: `'order'` drops
 `order:...`, `public.order:...` and `other.order:...`, and keeps
-`orders:...`. An empty name logs a warning and drops nothing.
+`orders:...`. An empty name logs a warning and drops nothing. The
+schema cache behind `get_table_columns` and `get_table_primary_keys`
+lives in the same registry, so `clear_for_table` and `clear_all` reach
+it too.
+
+Each key holds the table name in the case the caller passed and a
+number unique to the engine. PostgreSQL reads `"MixedCase"` and
+`mixedcase` as two tables, and two databases may each hold a `users`
+table, so neither pair shares an entry. An unqualified PostgreSQL name
+keeps the result its `search_path` gave. A caller that changes
+`search_path` calls `clear_for_table`.
 
 ### SQL Parameter Handling
 
@@ -1286,23 +1299,26 @@ no `%` is doubled for SQLite.
 | `db.select(cn, "SELECT * FROM products WHERE code LIKE 'PRD-%' AND name LIKE %s", "Chair%")` | `"SELECT * FROM products WHERE code LIKE 'PRD-%%' AND name LIKE %s", "Chair%"` |
 | `db.select(cn, "SELECT '%s' AS tag, name FROM users WHERE id = %s", 1)`                      | `"SELECT '%%s' AS tag, name FROM users WHERE id = %s", 1`                      |
 
-A call with no args sends the statement as written, so `LIKE 'test%'`
-reaches the server as is, and so does a `%%`. With bound args psycopg
-reads every `%` as a format directive, so inside a string literal or
-quoted identifier `prepare_query` doubles each `%` that is not already
-part of `%%`, `%s` and `%(` included. A `%` in a parameter value is
-never touched.
+On PostgreSQL a `%%` in the statement means one `%`, whether or not
+the call binds args. The alias `"SI %% Float"` in libtc reads back as
+`SI % Float` either way. A lone `%` means `%` as well.
 
-With bound args, a `%%` the caller writes in a literal stays `%%`, and
-psycopg collapses it to one `%` on the way to the server. The alias
-`"SI %% Float"` in libtc relies on this and reads back as `SI % Float`.
-Without args the same `%%` reaches the server as two characters.
+With bound args psycopg reads every `%` as a format directive, so
+`prepare_query` doubles each lone `%` that is not a placeholder: in a
+string literal, a quoted identifier, a comment, a dollar-quoted body,
+or a modulo operator. A `%%` the caller writes stays `%%`, and psycopg
+sends it as one `%`. A `%` in a parameter value is never touched.
 
-When the args all inline into the text (`is %s` with `None`, `in %s`
-with an empty list), or a statement in a multi-statement call holds no
-placeholder, the cursor runs that text without parameters and turns
-each `%%` back into `%` first. A literal therefore reads back as
-written.
+A call that binds no parameters runs without them, after the cursor
+turns each `%%` into `%`. That covers a call with no args, a call
+whose args all inline into the text (`is %s` with `None`, `in %s` with
+an empty list), and a statement with no placeholder in a
+multi-statement call. PL/pgSQL `raise` and `format()` read `%%` as one
+literal percent, so their text takes `%%%%` through this library. Only
+`cn.cursor().execute(sql)` with no args sends a `%%` unchanged.
+
+SQLite rewrites no `%`, so a `%%` reaches it as two characters. A lone
+`%`, in a literal or as modulo, means the same on both dialects.
 
 #### IS NULL / IS NOT NULL Handling
 

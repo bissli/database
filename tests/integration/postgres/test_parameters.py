@@ -357,5 +357,74 @@ def test_multi_statement_skips_a_placeholder_lookalike_in_a_literal(
     assert [(row['s'], row['n']) for row in rows] == [('q%s', 0), ('r', 7)]
 
 
+def test_double_percent_reads_as_one_with_or_without_args(psql_docker, pg_conn):
+    """Verify '%%' in a literal means '%' whether or not the call binds args.
+
+    Mutation: Cursor._execute_query sending a no-args statement raw, or
+        _execute_without_params dropping its '%%' collapse.
+    Oracle: the hand-written literal 'a%b'.
+    """
+    assert db.select_scalar(pg_conn, "select 'a%%b'") == 'a%b'
+    assert db.select_scalar(pg_conn, "select 'a%%b' || %s", 'x') == 'a%bx'
+
+
+def test_lone_percent_beside_a_colon_literal_runs_without_args(psql_docker, pg_conn):
+    """Verify a ':30' in a literal does not send a lone '%' through psycopg.
+
+    Mutation: Cursor._execute_simple passing an empty arg tuple to psycopg.
+    Oracle: the hand-written literal 'a%b'.
+    """
+    sql = "select 'a%b' where '10:30' > ''"
+
+    assert db.select_scalar(pg_conn, sql) == 'a%b'
+
+
+def test_percent_in_a_comment_and_a_modulo_bind_with_args(psql_docker, pg_conn):
+    """Verify a '%' outside any literal survives a call that binds args.
+
+    Mutation: _escape_percents limited to string literals.
+    Oracle: 7 mod 3 is 1, and the bound value as passed.
+    """
+    sql = """
+select 7 % 3 as r, %s as p -- 50% done
+"""
+    row = db.select_row(pg_conn, sql, 'x')
+
+    assert (row.r, row.p) == (1, 'x')
+
+
+def test_escaped_quote_in_an_e_string_keeps_the_next_placeholder(psql_docker, pg_conn):
+    """Verify a backslash-escaped quote in E'' does not hide a later '%s'.
+
+    Mutation: _protected_ranges ignoring the backslash escape in E''.
+    Oracle: the hand-written literal and the bound value.
+    """
+    row = db.select_row(pg_conn, "select E'it\\'s 50%' as s, %s as p", 'x')
+
+    assert (row.s, row.p) == ("it's 50%", 'x')
+
+
+def test_odd_percent_run_reads_the_same_with_or_without_args(psql_docker, pg_conn):
+    """Verify '%%%' reads back alike whether or not the call binds args.
+
+    Mutation: _escape_percents doubling only a lone '%'.
+    Oracle: the no-args result of the same literal, '%%'.
+    """
+    assert db.select_scalar(pg_conn, "select '%%%'") == '%%'
+    assert db.select_scalar(pg_conn, "select '%%%' || %s", 'x') == '%%x'
+
+
+def test_dict_args_that_all_inline_run_without_params(psql_docker, pg_conn):
+    """Verify an inlined named arg leaves no empty dict for psycopg.
+
+    Mutation: Cursor._execute_simple passing an empty dict to psycopg.
+    Oracle: the hand-written literal '5%'; the JSONB '?' and the inlined
+        null leave no placeholder.
+    """
+    sql = """select '5%' where '{"k": 1}'::jsonb ? 'k' and 1 is not %(a)s"""
+
+    assert db.select_scalar(pg_conn, sql, {'a': None}) == '5%'
+
+
 if __name__ == '__main__':
     __import__('pytest').main([__file__])

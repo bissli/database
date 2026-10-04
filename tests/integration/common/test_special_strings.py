@@ -4,6 +4,7 @@ import database as db
 import numpy as np
 import pyarrow as pa
 import pytest
+from database.options import use_iterdict_data_loader
 from tests.integration.common.conftest import col
 
 SPELLED_NULLS = ('nan', 'NaN', 'None', 'none', 'NA', 'NaT', 'null', 'NULL')
@@ -26,8 +27,9 @@ def probe_conn(db_conn):
     db.execute(db_conn, 'drop table if exists null_probe')
 
 
+@use_iterdict_data_loader
 def stored_by_label(cn: db.ConnectionWrapper) -> dict[str, str | None]:
-    """Map each stored label to its txt value.
+    """Map each stored label to its txt value as the driver returns it.
     """
     result = db.select(cn, 'select label, txt from null_probe')
     return dict(zip(col(result, 'label'), col(result, 'txt')))

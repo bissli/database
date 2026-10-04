@@ -13,8 +13,7 @@ _SUPPORTED_DIALECTS = {'postgresql', 'sqlite'}
 
 _PH_RE = re.compile(r'%\((\w+)\)s|%s|\?')
 _HAS_PH_RE = re.compile(r'%\((\w+)\)s|%s|\?|(?<!:):\w+')
-_STR_RE = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
-_UNESCAPED_PCT_RE = re.compile(r'(?<!%)%(?!%)')
+_PCT_RUN_RE = re.compile(r'%+')
 _DOLLAR_OPEN_RE = re.compile(r'\$(\w*)\$')
 _NAMED_PYFORMAT_RE = re.compile(r'%\(\w+\)s')
 _NAMED_SQLITE_RE = re.compile(r'(?<!:):\w+|(?<![\w$@])[$@]\w+')
@@ -562,8 +561,9 @@ def _protected_ranges(sql: str, dialect: str) -> set[int]:
     sql : str
         Statement text.
     dialect : str
-        'postgresql' adds dollar-quoted bodies. 'sqlite' adds backtick
-        and bracket identifiers.
+        'postgresql' adds dollar-quoted bodies and a backslash escape
+        inside an E'' string. 'sqlite' adds backtick and bracket
+        identifiers.
 
     Returns
     -------
@@ -576,8 +576,16 @@ def _protected_ranges(sql: str, dialect: str) -> set[int]:
     while i < n:
         c = sql[i]
         if c in {"'", '"'} or (dialect == 'sqlite' and c == '`'):
+            is_escape_string = (
+                dialect == 'postgresql' and c == "'"
+                and i and sql[i - 1] in 'Ee'
+                and not (i > 1 and (sql[i - 2].isalnum()
+                                    or sql[i - 2] in _IDENT_CHARS)))
             j = i + 1
             while j < n:
+                if is_escape_string and sql[j] == '\\':
+                    j += 2
+                    continue
                 if sql[j] == c:
                     if j + 1 < n and sql[j + 1] == c:
                         j += 2
@@ -942,10 +950,21 @@ def _expand_named_in(
 
 
 def _escape_percents(segment: str) -> str:
-    """Segment with lone '%' in literals doubled.
+    """Segment with each odd run of '%' made even by one more '%'.
+
+    Parameters
+    ----------
+    segment : str
+        Text between two placeholders. psycopg reads a '%' anywhere in it
+        as a format directive: in a literal, a comment, a dollar body, or
+        a modulo operator.
+
+    Returns
+    -------
+    str
+        psycopg halves each run, so a run of n reaches the server as
+        ceil(n / 2) signs, as Cursor._execute_without_params gives
+        without params: '%' and '%%' as '%', '%%%' as '%%'.
     """
-    def double_percents(m: re.Match[str]) -> str:
-        return _UNESCAPED_PCT_RE.sub('%%', m.group(0))
-
-    return _STR_RE.sub(double_percents, segment)
-
+    return _PCT_RUN_RE.sub(
+        lambda run: run.group(0) + '%' * (len(run.group(0)) % 2), segment)

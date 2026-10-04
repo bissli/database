@@ -197,3 +197,21 @@ class TestSchemaQualifiedQueries:
         new_id = db.select_scalar(pg_schema_conn,
                                   "select id from myschema.t where name = 'delta'")
         assert new_id == 11
+
+
+@pytest.mark.usefixtures('psql_docker')
+def test_mixed_case_table_keeps_its_own_primary_keys(pg_conn):
+    """Verify "MixedCase" and mixedcase never share a cached key list.
+
+    Mutation: a .lower() on the cacheable_strategy key.
+    Oracle: the primary key each table's DDL declares.
+    """
+    db.execute(pg_conn, 'create table "MixedCase" (code text primary key, id integer)')
+    db.execute(pg_conn, 'create table mixedcase (code text, id integer primary key)')
+    try:
+        strategy = get_db_strategy(pg_conn)
+
+        assert strategy.get_primary_keys(pg_conn, 'MixedCase') == ['code']
+        assert strategy.get_primary_keys(pg_conn, 'mixedcase') == ['id']
+    finally:
+        db.execute(pg_conn, 'drop table if exists "MixedCase", mixedcase')
