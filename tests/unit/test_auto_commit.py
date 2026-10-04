@@ -3,18 +3,20 @@
 import threading
 
 import pytest
+from database.cache import Cache
 from database.transaction import Transaction, diagnose_connection
 from database.transaction import disable_auto_commit, enable_auto_commit
 
 
 class RecordingRawConnection:
-    """Raw connection logging commit/rollback; fail_on_commit raises.
+    """Raw connection logging commit/rollback; fail_on_* makes either raise.
     """
 
     def __init__(self) -> None:
         self.autocommit = True
         self.calls: list[str] = []
         self.fail_on_commit = False
+        self.fail_on_rollback = False
 
     def commit(self) -> None:
         """Record the commit and optionally fail like a dead connection.
@@ -24,9 +26,11 @@ class RecordingRawConnection:
             raise RuntimeError('commit failed')
 
     def rollback(self) -> None:
-        """Record the rollback.
+        """Record the rollback and optionally fail like a dead connection.
         """
         self.calls.append('rollback')
+        if self.fail_on_rollback:
+            raise RuntimeError('rollback failed')
 
 
 class RecordingConnection:
@@ -471,10 +475,12 @@ class TestTransactionLifecycle:
         assert conn.connection.calls == ['commit', 'commit']
 
     def test_connection_reusable_after_commit_failure(self):
-        """Verify a failed commit still clears state and restores auto-commit.
+        """Verify a failed commit rolls back, clears state, restores auto-commit.
 
-        Mutation: the pop or enable_auto_commit moved out of the finally.
-        Oracle: a second Transaction, which the nested guard would reject.
+        Mutation: the pop or enable_auto_commit moved out of the finally, or
+            the failed commit re-raised without a rollback.
+        Oracle: a second Transaction, which the nested guard would reject,
+            and the hand-written call log.
         """
         conn = RecordingConnection()
         conn.connection.fail_on_commit = True
@@ -490,7 +496,43 @@ class TestTransactionLifecycle:
         with Transaction(conn):
             pass
 
-        assert conn.connection.calls == ['commit', 'commit']
+        assert conn.connection.calls == ['commit', 'rollback', 'commit']
+
+    def test_rollback_empties_schema_and_strategy_caches(self):
+        """Verify a rolled-back block drops schema and strategy cache entries.
+
+        Mutation: _rollback skipping either the schema or the strategy clear.
+        Oracle: one entry planted in each cache before the block.
+        """
+        cache = Cache.get_instance()
+        cache.get_schema_cache()['t:columns:1'] = ['id', 'v']
+        cache.get_cache('primary_keys_test')['t:1'] = ['id']
+
+        with pytest.raises(RuntimeError, match='in the block'):
+            with Transaction(RecordingConnection()):
+                raise RuntimeError('in the block')
+
+        assert len(cache.get_schema_cache()) == 0
+        assert len(cache.get_cache('primary_keys_test')) == 0
+
+    def test_failed_rollback_after_failed_commit_keeps_the_commit_error(self):
+        """Verify a failed rollback neither hides the commit error nor the clear.
+
+        Mutation: the rollback error propagating in place of the commit
+            error, or the cache clear skipped when rollback raises.
+        Oracle: the fake's 'commit failed' message, and a planted entry.
+        """
+        conn = RecordingConnection()
+        conn.connection.fail_on_commit = True
+        conn.connection.fail_on_rollback = True
+        cache = Cache.get_instance()
+        cache.get_schema_cache()['t:columns:1'] = ['id', 'v']
+
+        with pytest.raises(RuntimeError, match='commit failed'):
+            with Transaction(conn):
+                pass
+
+        assert len(cache.get_schema_cache()) == 0
 
     def test_unentered_transaction_leaves_the_connection_unflagged(self):
         """Verify building a Transaction without entering changes nothing.

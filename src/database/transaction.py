@@ -1,10 +1,12 @@
 """Transaction context manager and auto-commit switching.
 """
 import logging
+import sqlite3
 import threading
-from typing import Any
+from typing import Any, Self
 
 import pandas as pd
+from database.cache import Cache
 from database.cursor import get_dict_cursor
 from database.sql import prepare_query
 from database.strategy import get_db_strategy
@@ -16,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 _local = threading.local()
+
+# sqlite3 on Python 3.12+ reports this in autocommit while
+# isolation_level still controls its transactions.
+_SQLITE_LEGACY_CONTROL = getattr(sqlite3, 'LEGACY_TRANSACTION_CONTROL', None)
 
 
 def _set_autocommit(connection: Any, enable: bool) -> None:
@@ -50,7 +56,7 @@ def _set_autocommit(connection: Any, enable: bool) -> None:
 
     raw_conn = get_raw_connection(connection)
 
-    if hasattr(raw_conn, 'autocommit'):
+    if getattr(raw_conn, 'autocommit', None) not in {None, _SQLITE_LEGACY_CONTROL}:
         try:
             raw_conn.autocommit = enable
             return
@@ -91,8 +97,9 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
         type : dialect name, or 'unknown'.
         is_sqlalchemy : whether conn carries an sa_connection.
         closed : conn.closed, or False.
-        auto_commit : the raw connection's autocommit; failing that,
-        whether its isolation_level is None (sqlite3); else None.
+        auto_commit : the raw connection's autocommit; where that is
+        absent or sqlite3's legacy-control value, whether its
+        isolation_level is None (sqlite3); else None.
         in_transaction : conn.in_transaction, or False.
     """
     info: dict[str, Any] = {
@@ -112,7 +119,8 @@ def diagnose_connection(conn: Any) -> dict[str, Any]:
     info['closed'] = getattr(conn, 'closed', False)
 
     info['auto_commit'] = getattr(raw_conn, 'autocommit', None)
-    if info['auto_commit'] is None and hasattr(raw_conn, 'isolation_level'):
+    if (info['auto_commit'] in {None, _SQLITE_LEGACY_CONTROL}
+        and hasattr(raw_conn, 'isolation_level')):
         info['auto_commit'] = raw_conn.isolation_level is None
 
     if hasattr(conn, 'in_transaction'):
@@ -183,7 +191,7 @@ class Transaction:
         """
         return self.connection.dialect
 
-    def __enter__(self) -> 'Transaction':
+    def __enter__(self) -> Self:
         """Mark the connection in a transaction and turn auto-commit off.
         """
         _local.active_transactions[id(self.connection)] = True
@@ -204,10 +212,17 @@ class Transaction:
             dbapi_conn = getattr(self.connection, 'connection', self.connection)
 
             if exc_type is not None:
-                dbapi_conn.rollback()
+                self._rollback(dbapi_conn)
                 logger.warning('Rolling back the current transaction')
             else:
-                dbapi_conn.commit()
+                try:
+                    dbapi_conn.commit()
+                except Exception:
+                    try:
+                        self._rollback(dbapi_conn)
+                    except Exception as e:
+                        logger.warning(f'Rollback after a failed commit failed: {e}')
+                    raise
                 logger.debug(
                     f'Committed transaction for connection {id(self.connection)}')
         finally:
@@ -220,6 +235,21 @@ class Transaction:
             logger.debug(
                 'Transaction cleanup complete for connection '
                 f'{id(self.connection)}')
+
+    def _rollback(self, dbapi_conn: Any) -> None:
+        """Roll back, then empty the schema and strategy caches.
+
+        Parameters
+        ----------
+        dbapi_conn : Any
+            DBAPI connection holding the block's transaction.
+        """
+        try:
+            dbapi_conn.rollback()
+        finally:
+            cache = Cache.get_instance()
+            cache.clear_cache('schema_global')
+            cache.clear_strategy_caches()
 
     def execute(self, sql: str, *args: Any,
                 returnid: str | list[str] | None = None) -> Any:

@@ -852,7 +852,12 @@ with db.transaction(cn) as tx:
 
 A thread holds at most one open `transaction` per connection; a nested
 one raises `RuntimeError`. Auto-commit is on after the block, even
-where it was off before it.
+where it was off before it. A commit that fails rolls the block back
+and raises.
+
+On SQLite the block opens with `begin`, so DDL rolls back with the
+rest. SQLite ignores `pragma foreign_keys` inside a transaction, so a
+table rebuild turns foreign keys off before the block.
 
 ### Commits Outside a Transaction
 
@@ -1121,8 +1126,9 @@ itself; a caller must not mutate it. The list lives in `Cache`'s schema
 cache, keyed by table name and engine, for 600 seconds.
 `Cache.get_instance().clear_for_table('users')` drops it, so a caller
 that alters a table clears it before the next `insert_rows` or
-`upsert_rows`. `cn.get_table_columns('users', bypass_cache=True)` reads
-the catalog again.
+`upsert_rows`. A `transaction` block that rolls back empties the
+schema caches itself. `cn.get_table_columns('users',
+bypass_cache=True)` reads the catalog again.
 
 #### SQLite Schema Operations
 

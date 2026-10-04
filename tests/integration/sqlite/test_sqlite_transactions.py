@@ -105,6 +105,54 @@ def test_sqlite_rollback_undoes_a_write_after_sqlite_rolled_back(sqlite_file_db)
     assert names == ['Alice', 'Bob', 'Charlie']
 
 
+def test_sqlite_failed_commit_leaves_the_connection_usable(sqlite_file_db):
+    """Verify a write after a block whose commit failed commits on its own.
+
+    Mutation: __exit__ re-raising a failed commit without a rollback, which
+        leaves the block's transaction open for the next write to join.
+    Oracle: a second sqlite3 connection reading the later row, and no orphan.
+    """
+    conn, path = sqlite_file_db
+    db.execute(conn, 'create table parent (id integer primary key)')
+    db.execute(conn, """
+create table child (
+    parent_id integer references parent (id) deferrable initially deferred
+)
+""")
+
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn) as tx:
+        tx.execute('insert into child (parent_id) values (?)', 99)
+
+    db.execute(conn, 'insert into parent (id) values (?)', 5)
+
+    other = sqlite3.connect(path)
+    try:
+        assert other.execute('select id from parent').fetchall() == [(5,)]
+        assert other.execute('select count(*) from child').fetchone() == (0,)
+    finally:
+        other.close()
+
+
+def test_sqlite_rolled_back_create_leaves_no_stale_columns(sqlite_file_db):
+    """Verify insert_rows sees every column of a table re-created after rollback.
+
+    Mutation: Transaction.__exit__ rolling back without emptying the schema
+        cache, so insert_rows drops the column the cached list lacks.
+    Oracle: the hand-set value 'x' read back from the re-created table.
+    """
+    conn, _ = sqlite_file_db
+
+    with pytest.raises(RuntimeError), db.transaction(conn) as tx:
+        tx.execute('create table scratch (id integer, v text)')
+        db.insert_rows(conn, 'scratch', [{'id': 1, 'v': 'a'}])
+        raise RuntimeError('after the insert')
+
+    db.execute(conn, 'create table scratch (id integer, other text)')
+    db.insert_rows(conn, 'scratch', [{'id': 1, 'other': 'x'}])
+
+    assert db.select_scalar(conn, 'select other from scratch where id = ?', 1) == 'x'
+
+
 def test_sqlite_isolation_levels(sqlite_file_db):
     """Verify another connection sees a block's write only after commit.
 
