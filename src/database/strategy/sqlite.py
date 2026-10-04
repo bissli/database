@@ -337,9 +337,21 @@ select name as column from pragma_table_info(?, ?)
         raw_conn.isolation_level = None
 
     def disable_autocommit(self, raw_conn: Any) -> None:
-        """Disable auto-commit mode for SQLite.
+        """Open a transaction that holds every statement, DDL included.
+
+        Parameters
+        ----------
+        raw_conn : Any
+            sqlite3 connection with no transaction open. The caller ends
+            the transaction with commit or rollback.
+
+        Raises
+        ------
+        sqlite3.OperationalError
+            A transaction is already open on raw_conn.
         """
         raw_conn.isolation_level = 'DEFERRED'
+        raw_conn.execute('begin')
 
     def set_session_readonly(self, conn: Any) -> None:
         """Make a connection refuse every write, DDL included.

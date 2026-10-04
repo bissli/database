@@ -59,12 +59,50 @@ def test_sqlite_transaction_rollback(sqlite_file_db):
     """
     conn, _ = sqlite_file_db
 
-    with pytest.raises(sqlite3.IntegrityError):
-        with db.transaction(conn) as tx:
-            tx.execute(UPDATE_SQL, 999, 'Bob')
-            tx.execute(INSERT_SQL, 'Alice', 100)
+    with pytest.raises(sqlite3.IntegrityError), db.transaction(conn) as tx:
+        tx.execute(UPDATE_SQL, 999, 'Bob')
+        tx.execute(INSERT_SQL, 'Alice', 100)
 
     assert db.select_scalar(conn, VALUE_SQL, 'Bob') == 20
+
+
+def test_sqlite_rollback_undoes_ddl_ahead_of_any_dml(sqlite_file_db):
+    """Verify a rollback undoes a rename and a create run before any DML.
+
+    Mutation: disable_autocommit leaving BEGIN to the driver's implicit
+        isolation_level 'DEFERRED', which opens a transaction before DML only.
+    Oracle: the fixture's one table, test_table, under its own name.
+    """
+    conn, _ = sqlite_file_db
+
+    with pytest.raises(RuntimeError), db.transaction(conn) as tx:
+        tx.execute('alter table test_table rename to renamed_table')
+        tx.execute('create table extra_table (x integer)')
+        raise RuntimeError('after the DDL')
+
+    assert conn.list_tables() == ['test_table']
+
+
+def test_sqlite_rollback_undoes_a_write_after_sqlite_rolled_back(sqlite_file_db):
+    """Verify a write after SQLite's own mid-block rollback still rolls back.
+
+    Mutation: disable_autocommit setting isolation_level None, so the driver
+        opens no new transaction after `insert or rollback` ends the first.
+    Oracle: the fixture's three staged names, without David.
+    """
+    conn, _ = sqlite_file_db
+
+    with pytest.raises(RuntimeError):
+        with db.transaction(conn) as tx:
+            with pytest.raises(sqlite3.IntegrityError):
+                tx.execute(
+                    'insert or rollback into test_table (name, value) values (?, ?)',
+                    'Alice', 1)
+            tx.execute(INSERT_SQL, 'David', 40)
+            raise RuntimeError('after the write')
+
+    names = db.select_column(conn, 'select name from test_table order by name')
+    assert names == ['Alice', 'Bob', 'Charlie']
 
 
 def test_sqlite_isolation_levels(sqlite_file_db):
