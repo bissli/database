@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "database"
-version = "0.6.4"
+version = "0.7.0"
 description = "Unified Python interface for PostgreSQL and SQLite over SQLAlchemy."
 authors = ["bissli <bissli@xyz.com>"]
 readme = "README.md"
