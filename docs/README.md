@@ -1146,6 +1146,8 @@ cn.describe_columns('users')     # [ColumnInfo(name='id', type='INTEGER',
                                  #   notnull=False, default=None, primary_key=True), ...]
 cn.get_unique_indexes('users')   # [['email']], primary-key indexes included
 cn.table_ddl('users')            # 'CREATE TABLE users (...)'
+cn.index_ddl()                   # ['CREATE INDEX users_email on users (email)']
+cn.foreign_key_violations()      # [('orders', 7, 'users', 0)], one per orphan row
 
 # Reset AUTOINCREMENT sequence
 db.reset_table_sequence(cn, 'users')

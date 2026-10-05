@@ -331,7 +331,7 @@ class DatabaseStrategy(ABC):
         raise NotImplementedError(f'{type(self).__name__} cannot list indexes')
 
     def table_ddl(self, cn: 'ConnectionWrapper', table: str) -> str:
-        """create statement text of a table.
+        """Create statement text of a table.
 
         Raises
         ------
@@ -339,6 +339,27 @@ class DatabaseStrategy(ABC):
             Always, for a dialect that has not overridden this.
         """
         raise NotImplementedError(f'{type(self).__name__} cannot read table DDL')
+
+    def index_ddl(self, cn: 'ConnectionWrapper') -> list[str]:
+        """Create index statement text of every index, ordered by name.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot read index DDL')
+
+    def foreign_key_violations(
+            self, cn: 'ConnectionWrapper') -> list[tuple[str, int | None, str, int]]:
+        """Rows whose foreign key names no parent row.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, for a dialect that has not overridden this.
+        """
+        raise NotImplementedError(f'{type(self).__name__} cannot check foreign keys')
 
     @property
     @abstractmethod
@@ -520,7 +541,7 @@ class DatabaseStrategy(ABC):
         update_cols_always: list[str] | None = None,
         update_cols_ifnull: list[str] | None = None,
     ) -> str:
-        """insert ... on conflict statement for one row of columns.
+        """Insert ... on conflict statement for one row of columns.
 
         Parameters
         ----------
@@ -552,7 +573,7 @@ class DatabaseStrategy(ABC):
         return '%s'
 
     def standardize_sql(self, sql: str) -> str:
-        """sql with its placeholders rewritten to this dialect's style.
+        """Sql with its placeholders rewritten to this dialect's style.
         """
         return sql
 

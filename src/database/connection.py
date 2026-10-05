@@ -802,6 +802,34 @@ class ConnectionWrapper:
         """
         return get_db_strategy(self).table_ddl(self, table)
 
+    def index_ddl(self) -> list[str]:
+        """Each create index statement, ordered by index name.
+
+        Returns
+        -------
+        list[str]
+            Statement text as stored. An index built for a primary-key or
+            unique constraint has no statement and does not appear.
+        """
+        return get_db_strategy(self).index_ddl(self)
+
+    def foreign_key_violations(self) -> list[tuple[str, int | None, str, int]]:
+        """Rows whose foreign key names no parent row.
+
+        Returns
+        -------
+        list[tuple[str, int | None, str, int]]
+            One (table, rowid, parent table, foreign-key id) per violating
+            row, empty when every key resolves. rowid is None for a without
+            rowid table, and a missing parent table fails every row.
+
+        Raises
+        ------
+        OperationalError
+            When any key's parent columns carry no unique index.
+        """
+        return get_db_strategy(self).foreign_key_violations(self)
+
     def vacuum_table(self, table: str) -> None:
         """Reclaim a table's dead space.
 

@@ -43,6 +43,8 @@ def test_the_unimplemented_hook_refuses_a_reader(legacy_strategy):
     ('describe_columns', ('t',)),
     ('get_unique_indexes', ('t',)),
     ('table_ddl', ('t',)),
+    ('index_ddl', ()),
+    ('foreign_key_violations', ()),
     ])
 def test_schema_introspection_refuses_on_postgres(method, args):
     """Verify a dialect without schema introspection raises.

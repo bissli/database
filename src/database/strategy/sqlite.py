@@ -596,6 +596,47 @@ where type = 'table' and name = ? collate nocase
             raise ValidationError(f'No table named {table}')
         return ddl[0]
 
+    def index_ddl(self, cn: 'ConnectionWrapper') -> list[str]:
+        """Create index statements of the main database, as SQLite stored them.
+
+        Returns
+        -------
+        list[str]
+            One statement per index, ordered by index name. An index SQLite
+            builds for a primary-key or unique constraint has no statement
+            and does not appear.
+        """
+        sql = """
+select sql from sqlite_master
+where type = 'index' and sql is not null
+order by name
+"""
+        return self._select_column_raw(cn, sql)
+
+    def foreign_key_violations(
+            self, cn: 'ConnectionWrapper') -> list[tuple[str, int | None, str, int]]:
+        """Rows of the main database whose foreign key names no parent row.
+
+        Returns
+        -------
+        list[tuple[str, int | None, str, int]]
+            One (table, rowid, parent table, foreign-key id) per violating
+            row, empty when every key resolves. rowid is None for a without
+            rowid table. A key whose parent table is missing fails on every
+            row with a non-null key. The check ignores the connection's
+            foreign_keys setting.
+
+        Raises
+        ------
+        sqlite3.OperationalError
+            When any key's parent columns carry no unique index ('foreign
+            key mismatch'). No row of any table is reported then.
+        """
+        # The table-valued pragma_foreign_key_check takes no schema
+        # argument before SQLite 3.33.0.
+        sql = 'pragma main.foreign_key_check'
+        return [tuple(row.values()) for row in self._select_raw(cn, sql)]
+
     def build_upsert_sql(
         self,
         table: str,

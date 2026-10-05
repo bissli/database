@@ -1,5 +1,6 @@
 """Schema introspection on a SQLite ConnectionWrapper.
 """
+import sqlite3
 import sys
 import threading
 import time
@@ -108,6 +109,69 @@ def test_table_ddl_raises_on_a_missing_table(schema_conn):
     """
     with pytest.raises(ValidationError, match='missing'):
         schema_conn.table_ddl('missing')
+
+
+def test_index_ddl_returns_each_stored_index_statement_by_name(schema_conn):
+    """Verify index_ddl returns stored index text by index name, constraints out.
+
+    Mutation: dropping 'sql is not null', or ordering by tbl_name.
+    Oracle: hand-written statements; PRICE_DDL's two keys build indexes
+        with no stored statement.
+    """
+    schema_conn.execute('create index z_counter on counter (id)')
+
+    assert schema_conn.index_ddl() == [
+        'CREATE INDEX price_note on price (note)',
+        'CREATE INDEX z_counter on counter (id)',
+        ]
+
+
+def test_foreign_key_violations_reports_each_orphan_row(tmp_path):
+    """Verify every orphan row is reported, a missing parent table included.
+
+    Mutation: skipping keys whose parent table is missing, or returning
+        the row dicts in place of tuples.
+    Oracle: hand-listed orphans, written through a raw sqlite3 connection
+        that does not enforce foreign keys; a null key is no orphan.
+    """
+    path = tmp_path / 'orphans.db'
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+create table parent (id integer primary key);
+insert into parent values (1);
+create table child (id integer primary key, parent_id integer references parent (id));
+insert into child values (10, 1), (11, 99), (12, null);
+create table stray (id integer primary key, gone_id integer references gone (id));
+insert into stray values (20, 5);
+create table keyed (k text primary key, parent_id integer references parent (id))
+    without rowid;
+insert into keyed values ('a', 98);
+""")
+    raw.close()
+
+    with db.connect({'drivername': 'sqlite', 'database': str(path)},
+                    role='reader') as cn:
+        violations = cn.foreign_key_violations()
+
+    assert sorted(violations, key=lambda row: row[0]) == [
+        ('child', 11, 'parent', 0),
+        ('keyed', None, 'parent', 0),
+        ('stray', 20, 'gone', 0),
+        ]
+
+
+def test_foreign_key_violations_raises_on_a_key_with_no_unique_parent(schema_conn):
+    """Verify a key whose parent columns carry no unique index raises.
+
+    Mutation: catching the error and returning [], which reports a
+        database whose keys cannot be checked as clean.
+    Oracle: SQLite's own 'foreign key mismatch' for that schema.
+    """
+    schema_conn.execute('create table loose (a text)')
+    schema_conn.execute('create table tied (a text references loose (a))')
+
+    with pytest.raises(db.OperationalError, match='foreign key mismatch'):
+        schema_conn.foreign_key_violations()
 
 
 @pytest.mark.parametrize('table', ['type', 'seq', 'name'])
