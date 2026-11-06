@@ -24,7 +24,7 @@ python = "^3.10"
 
 pandas = "*"
 pyarrow = "*"
-psycopg = { extras = ["binary"], version = "~3.2" }
+psycopg = { extras = ["binary"], version = "~3.3" }
 sqlalchemy = "^2.0.0"
 
 cachetools = "*"
